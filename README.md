@@ -1,142 +1,150 @@
-# premiere-av1-importer
+# AV1 Importer for Adobe Premiere Pro
 
-Импортёр AV1 для Adobe Premiere Pro. Цель — перетащил файл на таймлайн, и он работает,
-без конвертации и промежуточных форматов.
+Drag an AV1 file onto the timeline and it just works — no transcoding, no proxies.
 
-## Зачем
+[Русская версия](README.ru.md)
 
-Premiere Pro 25.3 **не декодирует AV1**: демультиплексор контейнер разбирает и опознаёт
-поток как `av01`, но декодера нет — импорт падает с «unsupported video compression type».
-Готовое решение (Autokroma Influx) платное и его магазин недоступен из РФ.
+Premiere Pro 25.x **cannot decode AV1**. Its demuxer parses the container and
+recognises the stream as `av01`, but there is no decoder, so the import fails with
+*"File uses unsupported video compression type av01"*. This plug-in adds the missing
+decoder, using FFmpeg and — where the hardware allows — the GPU.
 
-## Состояние
+That matters if you record with OBS: AV1 gives the same picture quality at a
+noticeably lower bitrate, but the recordings were unusable in Premiere.
 
-- [x] Тулчейн: MSVC 14.44 (Build Tools 2022), пример из SDK собирается
-- [x] Слой декодирования на ffmpeg: открытие, метаданные, кадр по номеру, BGRA
-- [x] **Аппаратное декодирование на NVIDIA** (`av1_cuvid`) — 249 кадров/с на 1440p60
-- [x] Слой Premiere SDK: формат, сведения о файле, выдача кадров
-- [x] Плагин собирается в `.prm` и проходит проверку загрузки
-- [x] **Работает в Premiere: файл встаёт на таймлайн**
-- [x] Звук — все дорожки OBS отдельно
-- [x] Кэш кадров — отматывание назад в 12 раз быстрее
-- [ ] Проверка на длинном монтаже
+## Install
 
-## Устройство
+1. Download `AV1Importer-Setup-x.y.z.exe` from [Releases](../../releases).
+2. Close Premiere Pro and Media Encoder.
+3. Run it. Administrator rights are required — Adobe plug-ins live in a shared
+   system folder.
+
+To remove it, use *Apps & features* or the uninstaller in the plug-in folder.
+
+**Requirements:** Windows x64, Adobe Premiere Pro 2025 (25.x). Hardware decoding
+needs an NVIDIA GPU with AV1 support (RTX 30 series and newer); without one the
+plug-in falls back to the CPU decoder automatically.
+
+## What works
+
+- Video on the timeline, hardware-decoded where available
+- **Multi-track audio kept separate** — OBS writes microphone, game, Discord and
+  music as distinct streams, and they arrive as distinct tracks
+- Scrubbing, seeking and export
+- MP4, MKV, WebM, MOV, M4V containers
+
+Files that are *not* AV1 are handed straight back to Premiere's own importer, so
+nothing about your existing footage changes.
+
+## Performance
+
+Measured on 2560x1440@60 AV1, RTX 5080:
+
+| | |
+|---|---|
+| Sequential playback | 4 ms/frame — **250 fps**, four times faster than real time |
+| Step backwards | 5.9 ms/frame (71 ms without the frame cache) |
+| Random seek | 75 ms — one keyframe interval, inherent to the codec |
+
+Of those 4 ms, decoding takes 0.08 ms; the rest is moving the frame out of GPU
+memory and converting colour. In other words the GPU is not the bottleneck, and
+there is little left worth optimising.
+
+## Building from source
+
+Not needed to use the plug-in — only to modify it.
+
+You will need, none of which are in this repository:
+
+- **Adobe Premiere Pro C++ SDK** into `sdk/` — from
+  [developer.adobe.com](https://developer.adobe.com/premiere-pro/), requires an Adobe ID
+- **FFmpeg** into `ffmpeg/` — a BtbN `win64-lgpl-shared` build (headers, `.lib` and `.dll`)
+- **Visual Studio Build Tools 2022** with the C++ workload
+- **Inno Setup 6** — only to build the installer
 
 ```
-src/AV1Decoder.{h,cpp}   ядро: ffmpeg, ничего не знает про Adobe SDK
-src/AV1Importer.{h,cpp}  слой Premiere SDK — переводит запросы Premiere в вызовы ядра
-src/AV1Runtime.cpp       подгрузка ffmpeg из папки плагина
-src/AV1Log.{h,cpp}       журнал плагина
-tools/decoder_test.cpp   проверка ядра без Premiere
-tools/plugin_test.cpp    проверка готового .prm без Premiere
+build.bat                        the plug-in -> build\Release\AV1Importer.prm
+build-test.bat                   the test programs
+installer\build-installer.bat    the installer -> dist\
 ```
 
-Ядро намеренно отделено от SDK — его можно собрать и проверить консольной программой,
-что снимает 90% отладки без запуска Premiere.
+Two console programs let you test almost everything without launching Premiere,
+which is what makes this project practical to work on:
 
-### Как не сломать остальные форматы
+```
+build\decoder_test.exe <file.mp4>                    metadata, a frame, timings, audio levels
+build\plugin_test.exe  build\plugin\AV1Importer.prm  plug-in loading and its answers
+```
 
-Плагин объявляет себя обработчиком `.mp4/.mkv/.webm/.mov/.m4v` с приоритетом 100 —
-выше штатного импортёра Premiere. Но при открытии он **проверяет кодек потока**, и если
-внутри не AV1, сразу возвращает `imBadFile`. Premiere в этом случае передаёт файл дальше
-по списку приоритетов, то есть своему обычному импортёру. Так поддержка одного кодека
-добавляется, ничего не отбирая у остальных.
+## How it works
 
-### Почему ffmpeg подключён отложенно
+`src/AV1Decoder.*` is the decoding core. It deliberately knows nothing about the
+Adobe SDK, so it can be built and exercised by a console program — that removes
+most of the debugging from the slow build-install-restart-Premiere loop.
+`src/AV1Importer.*` is the SDK layer and only translates Premiere's requests into
+calls on the core.
 
-Windows ищет зависимые DLL рядом с исполняемым файлом (то есть рядом с Premiere), но не
-рядом с загружаемой библиотекой. При обычной линковке Premiere просто молча не загрузил бы
-плагин. Поэтому: `AV1Runtime.cpp` при загрузке сам находит ffmpeg в папке плагина, а сами
-библиотеки подключены через `/DELAYLOAD` — к первому настоящему вызову они уже в процессе.
+### Three conditions, without which Premiere ignores an importer — silently
 
-Отсюда два неочевидных требования сборки:
+Each one fails identically: the file will not open, exactly as if no plug-in were
+installed. There is no message and no log entry.
 
-- **межмодульная оптимизация выключена** — с ней линковщик игнорирует `/DELAYLOAD`;
-- **библиотеки импорта пересобраны** в `ffmpeg/lib-msvc`, потому что родные из поставки
-  ffmpeg сделаны сторонним инструментом и с ними `/DELAYLOAD` тоже не работает (LNK4199):
+1. **Priority 100 or higher.** Below that, Premiere handles MP4 itself and never
+   reaches the plug-in. Only 100+ overrides Adobe's own importers.
+2. **Answer `imGetSupports7/8`** with `malSupports7/8`. This is the handshake about
+   which interface version the plug-in speaks. Without it Premiere reads the file
+   info and walks away, never asking for a pixel format or a frame.
+3. **`subType` must be `imUncompressed`**, not `av01`. The plug-in does the
+   decoding and hands over ready pixels; saying `av01` sends Premiere off to look
+   for a decoder it does not have — and it reports exactly the error you were
+   trying to fix.
+
+### Why FFmpeg is delay-loaded
+
+Windows looks for dependent DLLs next to the *executable* — that is, next to
+Premiere — never next to the DLL being loaded. With ordinary linking Premiere
+would simply fail to load the plug-in, without a word. So `AV1Runtime.cpp` loads
+FFmpeg from the plug-in's own folder at startup, and the libraries themselves are
+linked with `/DELAYLOAD`, so by the time a real call happens they are already in
+the process.
+
+Two non-obvious build requirements follow:
+
+- **whole-program optimisation must be off** — with it the linker silently ignores
+  `/DELAYLOAD`;
+- **the import libraries are regenerated** into `ffmpeg/lib-msvc`, because the ones
+  shipped with FFmpeg are produced by a different toolchain and `/DELAYLOAD` does
+  not work with them either (LNK4199):
 
 ```
 lib /def:ffmpeg\lib\avcodec-62.def /name:avcodec-62.dll /out:ffmpeg\lib-msvc\avcodec.lib /machine:x64
 ```
-(и так же для `avformat-62`, `avutil-60`, `swscale-9`, `swresample-6`)
 
-## Сборка
+### The frame cache
 
-Нужны (не в репозитории):
-- `sdk/` — Adobe Premiere Pro C++ SDK (скачивается с developer.adobe.com, требует Adobe ID)
-- `ffmpeg/` — сборка BtbN, вариант win64-lgpl-**shared** (нужны заголовки, .lib и .dll)
+Measurement, not intuition, decided this. Reading forward costs 4 ms per frame;
+stepping *backwards* cost 71 ms. An inter-frame codec has to return to the nearest
+keyframe and decode forward from there, and OBS writes a keyframe every second —
+so every step back decoded half a second of video and threw away the result that
+would be needed a moment later.
 
-```
-build.bat             сам плагин -> build\Release\AV1Importer.prm
-build-test.bat        проверочные программы
-```
+The cache is therefore filled **only while moving backwards**. Reading forward is
+already sequential, and caching there would waste memory for nothing. Frames are
+moved out of GPU memory first (fifty 1440p frames will not fit in VRAM), the
+budget is 256 MB, and the frames farthest from the current position are evicted.
 
-Проверка без Premiere:
+### The log
 
-```
-build\decoder_test.exe <файл.mp4>                   ядро: метаданные, кадр, скорость
-build\plugin_test.exe  build\plugin\AV1Importer.prm загрузка плагина и его ответы
-```
+`%LOCALAPPDATA%\AV1Importer\log.txt`, rewritten each time Premiere starts. It
+records every selector Premiere sends, by name, **including the ones the plug-in
+rejects** — the cause of failure hid among exactly those. Inside Premiere every
+importer failure looks the same, so this log is the main debugging tool.
 
-### Три условия, без которых Premiere игнорирует плагин
+## Licence
 
-Каждое из них проявляется одинаково — файл не открывается, будто плагина нет:
+MIT — see [LICENSE](LICENSE).
 
-1. **Приоритет 100 и выше.** Ниже — Premiere разбирает mp4 сам и до плагина
-   не доходит. Перебить импортёры самой Adobe можно только со ста.
-2. **Ответ на `imGetSupports7/8`** значениями `malSupports7/8`. Это рукопожатие
-   о версии интерфейса. Без него Premiere читает сведения о файле и молча уходит,
-   не спрашивая ни формат пикселей, ни кадры.
-3. **`subType` = `imUncompressed`**, а не `av01`. Распаковываем мы, наружу идут
-   готовые пиксели; сказать `av01` — значит отправить Premiere искать декодер,
-   которого у него нет.
+Uses FFmpeg under LGPL v3; the libraries are unmodified BtbN builds and are linked
+dynamically. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-### Многодорожечный звук
-
-OBS пишет микрофон, игру, дискорд и музыку отдельными потоками. Плагин отдаёт их
-порознь через `imIterateStreams`: поток 0 — видео плюс первая дорожка, потоки
-1..N — остальные; на последнем возвращается `malNoError` как признак конца списка.
-
-### Кэш кадров
-
-Замеры показали, что болит не чтение вперёд, а отматывание назад: чтобы показать
-кадр, межкадровому кодеку надо вернуться к опорному и декодировать оттуда. В записях
-OBS опорные кадры раз в секунду, поэтому каждый шаг назад декодировал полсекунды
-видео и выбрасывал результат, который тут же требовался снова.
-
-Поэтому кэш наполняется **только при отматывании назад** — при чтении вперёд кадры
-и так идут подряд, и кэш лишь тратил бы память. Кадры переносятся из памяти
-видеокарты в обычную (полсотни кадров 1440p в видеопамяти не удержать), предел
-256 МБ, теснятся самые дальние от текущей позиции.
-
-### Журнал
-
-`%LOCALAPPDATA%\AV1Importer\log.txt`, перезаписывается при каждом запуске Premiere.
-Пишет все запросы Premiere по именам, включая отвергнутые плагином — именно среди
-них пряталась причина отказа. Это главный инструмент отладки: внутри Premiere
-любая ошибка импортёра выглядит одинаково.
-
-## Установка
-
-```
-powershell -ExecutionPolicy Bypass -File install.ps1
-```
-
-От имени администратора, при закрытом Premiere. Плагин ложится отдельной папкой
-`C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore\AV1 Importer\` вместе с ffmpeg.
-Снять: тот же скрипт с ключом `-Uninstall`.
-
-## Замеры (2026-08-19)
-
-Файл 2560x1440@60, AV1, 10 секунд:
-
-| | |
-|---|---|
-| декодер | `av1_cuvid` (видеокарта) |
-| чтение подряд вперёд | 4 мс на кадр (**249 кадров/с**) |
-| шаг назад, без кэша | 71 мс на кадр |
-| **шаг назад, с кэшем** | **5.9 мс на кадр** |
-| случайный прыжок | 75 мс (кэш тут не помогает и не может) |
-
-Звук: 4 стереодорожки AAC 48 кГц, читаются независимо друг от друга.
+Not affiliated with or endorsed by Adobe.
