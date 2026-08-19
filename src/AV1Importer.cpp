@@ -6,6 +6,7 @@
 // imUnsupported, и Premiere просто не будет этим пользоваться.
 
 #include "AV1Importer.h"
+#include "AV1Log.h"
 
 #include <string>
 
@@ -85,11 +86,15 @@ static prMALError AV1Init(imStdParms* stdParms, imImportInfoRec* importInfo)
     importInfo->dontCache       = kPrFalse;
     importInfo->keepLoaded      = kPrFalse;
 
-    // Выше нуля — чтобы получить .mp4 раньше штатного импортёра Premiere.
+    // Чтобы получить .mp4 раньше штатного импортёра Premiere, нужно ровно это:
+    // в документации SDK сказано, что для перебивания импортёров самой Adobe
+    // приоритет должен быть 100 и выше. Со значением ниже Premiere разбирает
+    // файл сам и до плагина не доходит.
     // Файлы не с AV1 мы тут же вернём обратно через imBadFile, и разбирать
-    // их будет он же. Ниже сотни: перебивать чужие сторонние плагины незачем.
-    importInfo->priority        = 50;
+    // их будет всё тот же штатный импортёр.
+    importInfo->priority        = 100;
 
+    av1imp::Log("imInit: приоритет %d", importInfo->priority);
     return imIsCacheable;
 }
 
@@ -144,10 +149,15 @@ static prMALError AV1OpenFile8(imStdParms* stdParms, imFileRef* fileRef,
     // Главная проверка: файл наш, только если внутри действительно AV1.
     // Иначе честно отдаём его обратно — Premiere передаст штатному импортёру.
     if (!EnsureDecoder(ldata)) {
+        av1imp::Log("imOpenFile8: отказ — %s",
+                    ldata->decoder ? ldata->decoder->LastError().c_str() : "нет декодера");
         CloseHandle(ldata->fileRef);
         ldata->fileRef = imInvalidHandleValue;
         return imBadFile;
     }
+    av1imp::Log("imOpenFile8: принят, %dx%d, декодер %s",
+                ldata->decoder->Info().width, ldata->decoder->Info().height,
+                ldata->decoder->Info().decoderName.c_str());
 
     *fileRef                   = ldata->fileRef;
     openRec->fileinfo.fileref  = ldata->fileRef;
@@ -218,7 +228,12 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
         CopyUtf16(ldata->filePath, 2048, fileAccess->filepath);
     }
 
+    av1imp::Log("imGetInfo8: спрашивают про %S (поток %d)",
+                ldata->filePath, fileInfo->streamIdx);
+
     if (!EnsureDecoder(ldata)) {
+        av1imp::Log("imGetInfo8: отказ — %s",
+                    ldata->decoder ? ldata->decoder->LastError().c_str() : "нет декодера");
         stdParms->piSuites->memFuncs->unlockHandle(reinterpret_cast<char**>(ldataH));
         return imBadFile;
     }
@@ -251,7 +266,12 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     fileInfo->vidInfo.imageWidth     = mi.width;
     fileInfo->vidInfo.imageHeight    = mi.height;
     fileInfo->vidInfo.depth          = 32;
-    fileInfo->vidInfo.subType        = 'av01';
+    // Ключевой момент. Сказать здесь 'av01' — значит отправить Premiere искать
+    // декодер AV1, которого у него нет: он его не находит и отказывает файлу
+    // словами "unsupported compression type av01", даже не спросив у нас кадр.
+    // Но распаковываем-то мы, а наружу отдаём готовые пиксели, поэтому с точки
+    // зрения Premiere источник несжатый.
+    fileInfo->vidInfo.subType        = imUncompressed;
     fileInfo->vidInfo.fieldType      = prFieldsNone;
     fileInfo->vidInfo.alphaType      = alphaNone;
     fileInfo->vidInfo.pixelAspectNum = 1;
@@ -278,6 +298,10 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
         ldata->TimeSuite->GetTicksPerSecond(&ticksPerSecond);
         ldata->ticksPerFrame = ticksPerSecond * mi.fpsDen / mi.fpsNum;
     }
+
+    av1imp::Log("imGetInfo8: %dx%d, %d/%d кадр/с, %lld кадров, тип сжатия RAW",
+                mi.width, mi.height, fileInfo->vidScale, fileInfo->vidSampleSize,
+                (long long)mi.frameCount);
 
     stdParms->piSuites->memFuncs->unlockHandle(reinterpret_cast<char**>(ldataH));
     return malNoError;
@@ -365,7 +389,12 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
                      + static_cast<size_t>(format->inFrameHeight - 1) * rowBytes;
 
     if (!ldata->decoder->GetFrameBGRA(frameIndex, lastRow, -rowBytes)) {
+        av1imp::Log("кадр %d: ОШИБКА — %s", frameIndex, ldata->decoder->LastError().c_str());
         return imFileReadFailed;
+    }
+    if (frameIndex < 3) {
+        av1imp::Log("кадр %d выдан (%dx%d, шаг %d)", frameIndex,
+                    format->inFrameWidth, format->inFrameHeight, rowBytes);
     }
 
     ldata->PPixCacheSuite->AddFrameToCache(ldata->importerID, 0, *videoRec->outFrame,
@@ -426,6 +455,17 @@ PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
                                        reinterpret_cast<imSourceVideoRec*>(param2));
             break;
 
+        // Рукопожатие: плагин объявляет, какой версией интерфейса владеет.
+        // Без ответа Premiere считает импортёр устаревшим и не спрашивает у него
+        // ни формат пикселей, ни кадры — просто прочитает сведения о файле и уйдёт.
+        case imGetSupports7:
+            result = malSupports7;
+            break;
+
+        case imGetSupports8:
+            result = malSupports8;
+            break;
+
         case imShutdown:
             result = malNoError;
             break;
@@ -435,5 +475,9 @@ PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
             break;
     }
 
+    // Пишем ВСЕ запросы, включая отвергнутые. Первая версия журнала их прятала
+    // ради чистоты — и спрятала как раз то, что нужно: отказ на нужном запросе
+    // выглядит для Premiere так же, как отсутствие плагина.
+    av1imp::Log("  запрос %s -> %d", av1imp::SelectorName(selector), result);
     return result;
 }

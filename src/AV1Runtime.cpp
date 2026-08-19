@@ -16,6 +16,8 @@
 
 #include <windows.h>
 
+#include "AV1Log.h"
+
 namespace {
 
 HMODULE g_selfModule = nullptr;
@@ -47,8 +49,12 @@ void PreloadFFmpeg()
 
         // LOAD_WITH_ALTERED_SEARCH_PATH заставляет искать зависимости
         // этой библиотеки в её же папке, а не рядом с Premiere
-        LoadLibraryExW(full, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        HMODULE m = LoadLibraryExW(full, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (!m) {
+            av1imp::Log("ffmpeg: НЕ загружена %ls (код %lu)", name, GetLastError());
+        }
     }
+    av1imp::Log("ffmpeg: подгружен из %ls", dir);
 }
 
 } // namespace
@@ -58,6 +64,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
     if (reason == DLL_PROCESS_ATTACH) {
         g_selfModule = module;
         DisableThreadLibraryCalls(module);
+        av1imp::LogReset();
+        av1imp::Log("плагин загружен в процесс");
         PreloadFFmpeg();
     }
     return TRUE;
