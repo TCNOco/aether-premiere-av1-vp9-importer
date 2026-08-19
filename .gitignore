@@ -1,0 +1,11 @@
+build/
+ffmpeg/
+sdk/
+*.prm
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+frame_out.bmp
+frame_check.png
