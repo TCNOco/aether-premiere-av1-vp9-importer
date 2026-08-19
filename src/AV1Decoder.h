@@ -24,6 +24,8 @@ struct MediaInfo {
     int      width          = 0;
     int      height         = 0;
     double   fps            = 0.0;   // кадров в секунду
+    int      fpsNum         = 0;     // та же частота точной дробью: fpsNum/fpsDen.
+    int      fpsDen         = 0;     // Premiere считает время в них, и 60000/1001 округлять нельзя
     int64_t  frameCount     = 0;     // может быть оценкой, если в контейнере нет точного числа
     double   durationSec    = 0.0;
     bool     hardwareDecode = false; // декодирует видеокарта, а не процессор
@@ -49,6 +51,8 @@ public:
 
     // Выдать кадр по индексу в буфер вызывающего.
     // Формат — BGRA, 8 бит на канал, строка dstStride байт, начало кадра сверху.
+    // Отрицательный dstStride переворачивает кадр по вертикали — так его ждёт
+    // Premiere, у которого у 32-битных буферов начало координат внизу слева.
     // Возвращает false, если кадр получить не удалось.
     bool GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride);
 

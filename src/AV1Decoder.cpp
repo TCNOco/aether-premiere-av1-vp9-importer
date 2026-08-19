@@ -80,7 +80,9 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware) {
     info_.height = st->codecpar->height;
 
     AVRational fr = st->avg_frame_rate.num ? st->avg_frame_rate : st->r_frame_rate;
-    info_.fps = (fr.num && fr.den) ? av_q2d(fr) : 0.0;
+    info_.fps    = (fr.num && fr.den) ? av_q2d(fr) : 0.0;
+    info_.fpsNum = fr.num;
+    info_.fpsDen = fr.den;
 
     if (st->duration != AV_NOPTS_VALUE) {
         info_.durationSec = st->duration * av_q2d(st->time_base);

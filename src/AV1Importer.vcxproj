@@ -34,7 +34,9 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)'=='Release'" Label="Configuration">
     <UseDebugLibraries>false</UseDebugLibraries>
-    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <!-- Межмодульная оптимизация выключена намеренно: с ней линковщик
+         игнорирует /DELAYLOAD, а без отложенной загрузки плагин не найдёт ffmpeg -->
+    <WholeProgramOptimization>false</WholeProgramOptimization>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
     <UseDebugLibraries>true</UseDebugLibraries>
@@ -62,8 +64,15 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalLibraryDirectories>..\ffmpeg\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swscale.lib;vfw32.lib;msacm32.lib;winmm.lib;comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- lib-msvc — библиотеки импорта, пересобранные из .def средствами MSVC.
+           Родные из поставки ffmpeg сделаны сторонним инструментом, и с ними
+           линковщик молча отказывается делать отложенную загрузку (LNK4199).
+           Пересоздаются командой из README при обновлении ffmpeg. -->
+      <AdditionalLibraryDirectories>..\ffmpeg\lib-msvc;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swscale.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- Отложенная загрузка: библиотеки ffmpeg подтягиваются при первом вызове,
+           уже после того как AV1Runtime.cpp загрузил их из папки плагина -->
+      <DelayLoadDLLs>avcodec-62.dll;avformat-62.dll;avutil-60.dll;swscale-9.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
 
@@ -88,13 +97,11 @@
 
   <ItemGroup>
     <ClCompile Include="AV1Importer.cpp" />
-    <ClCompile Include="AV1Async.cpp" />
     <ClCompile Include="AV1Decoder.cpp" />
-    <ClCompile Include="..\sdk\Premiere Pro 26.0 C++ SDK\Examples\Utils\SDK_File.cpp" />
+    <ClCompile Include="AV1Runtime.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AV1Importer.h" />
-    <ClInclude Include="AV1Async.h" />
     <ClInclude Include="AV1Decoder.h" />
   </ItemGroup>
   <ItemGroup>

@@ -9,3 +9,4 @@ sdk/
 *.lib
 frame_out.bmp
 frame_check.png
+build.log
