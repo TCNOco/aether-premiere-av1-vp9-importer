@@ -88,6 +88,7 @@ int main(int argc, char** argv) {
     }
 
     // последовательное чтение — так Premiere читает при воспроизведении
+    dec.ResetStats();
     const int kSeq = 60;
     t0 = std::chrono::steady_clock::now();
     int ok = 0;
@@ -98,6 +99,16 @@ int main(int argc, char** argv) {
     double totalMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
     printf("sequential : %d/%d frames, %.1f ms total, %.1f fps\n",
            ok, kSeq, totalMs, ok * 1000.0 / totalMs);
+
+    // Куда уходит время. Декодирует видеокарта, и узким местом легко
+    // оказывается не она, а перенос кадра в обычную память и пересчёт цвета —
+    // считаем отдельно, чтобы не оптимизировать вслепую.
+    {
+        const av1imp::Decoder::Stats& st = dec.GetStats();
+        const double per = st.frames ? 1.0 / st.frames : 0.0;
+        printf("  из них: декодирование %.2f мс, перенос %.2f мс, цвет %.2f мс (на кадр)\n",
+               st.decodeMs * per, st.transferMs * per, st.convertMs * per);
+    }
 
     // Обратная прокрутка — так монтажёр отматывает назад покадрово.
     // Для межкадрового кодека это худший случай: каждый шаг назад требует

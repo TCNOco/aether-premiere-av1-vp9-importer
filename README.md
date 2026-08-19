@@ -36,6 +36,10 @@ plug-in falls back to the CPU decoder automatically.
 Files that are *not* AV1 are handed straight back to Premiere's own importer, so
 nothing about your existing footage changes.
 
+One caveat about MKV and WebM: Premiere has no native support for those containers
+at all, so the plug-in demuxes them itself. That works — but only for AV1 inside.
+An MKV holding H.264 is refused by the plug-in and Premiere cannot open it either.
+
 ## Performance
 
 Measured on 2560x1440@60 AV1, RTX 5080:

@@ -11,6 +11,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 namespace av1imp {
@@ -324,13 +325,18 @@ bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride) {
 
     // Если декодировала видеокарта, кадр лежит в её памяти — забираем в обычную
     if (src->hw_frames_ctx) {
+        const auto t0 = std::chrono::steady_clock::now();
         av_frame_unref(swFrame_);
         if (av_hwframe_transfer_data(swFrame_, src, 0) < 0) {
             SetError("не удалось забрать кадр из памяти видеокарты");
             return false;
         }
         srcFrame = swFrame_;
+        stats_.transferMs += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0).count();
     }
+
+    const auto tConv = std::chrono::steady_clock::now();
 
     sws_ = sws_getCachedContext(sws_,
                                 srcFrame->width, srcFrame->height, (AVPixelFormat)srcFrame->format,
@@ -345,6 +351,10 @@ bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride) {
     int dstLinesize[4]  = { dstStride, 0, 0, 0 };
 
     sws_scale(sws_, srcFrame->data, srcFrame->linesize, 0, srcFrame->height, dstData, dstLinesize);
+
+    stats_.convertMs += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - tConv).count();
+    ++stats_.frames;
     return true;
 }
 
@@ -367,7 +377,10 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride) {
     }
 
     cacheFill_ = backward;
+    const auto tDec = std::chrono::steady_clock::now();
     const bool ok = DecodeUntil(frameIndex);
+    stats_.decodeMs += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - tDec).count();
     cacheFill_ = false;
 
     if (!ok) return false;

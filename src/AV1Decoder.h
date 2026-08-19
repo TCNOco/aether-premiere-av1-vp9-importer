@@ -85,6 +85,18 @@ public:
     // Именно в таком виде их ждёт Premiere.
     bool GetAudio(int64_t startSample, int32_t sampleCount, float* const* dst);
 
+    // Где на самом деле уходит время. Нужно, чтобы оптимизировать по замерам,
+    // а не по догадкам: декодирует видеокарта, и узким местом оказывается
+    // не она, а перенос кадра в обычную память и пересчёт цвета.
+    struct Stats {
+        double  decodeMs   = 0.0;   // разбор и декодирование
+        double  transferMs = 0.0;   // перенос из памяти видеокарты
+        double  convertMs  = 0.0;   // пересчёт в BGRA
+        int64_t frames     = 0;
+    };
+    const Stats& GetStats() const { return stats_; }
+    void ResetStats() { stats_ = Stats(); }
+
     // Текст последней ошибки — для журнала плагина
     const std::string& LastError() const { return lastError_; }
 
@@ -147,6 +159,8 @@ private:
     // одновременно: кадры для показа и звук для конформирования. Один общий
     // замок ставил бы звук в очередь за непрерывным потоком кадров.
     // Порядок захвата, когда нужны оба: сначала видео, потом звук.
+    Stats stats_;
+
     std::mutex mutex_;
     std::mutex audioMutex_;
 };
