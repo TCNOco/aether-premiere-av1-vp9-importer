@@ -53,6 +53,9 @@ public:
     // Открыть файл. Путь — UTF-8. Возвращает false, если файл не открылся
     // или видеопоток не AV1 (импортёр не должен перехватывать чужие форматы).
     bool Open(const std::string& utf8Path, bool preferHardware = true);
+
+    // Закрыть всё. Можно звать из любого потока: Premiere закрывает файл
+    // не дожидаясь, пока другие его потоки договорят с декодером.
     void Close();
 
     bool IsOpen() const { return fmt_ != nullptr; }
@@ -81,7 +84,10 @@ public:
 private:
     bool OpenCodec(bool preferHardware);
     bool DecodeMoreAudio();
-    void CloseAudio();
+
+    // Варианты без захвата замка — для вызова изнутри, когда он уже взят
+    void CloseLocked();
+    void CloseAudioLocked();
     bool DecodeUntil(int64_t targetFrame);
     bool ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride);
     void SetError(const std::string& msg, int averr = 0);
@@ -118,7 +124,13 @@ private:
     int64_t pendingCount_  = 0;
     int64_t audioCursor_   = -1;   // номер следующего готового отсчёта
 
-    std::mutex mutex_;  // Premiere дёргает импортёр из нескольких потоков
+    // Замки раздельные, и это важно. Видео и звук разбираются полностью
+    // независимо (у каждого свой контекст контейнера), а Premiere читает их
+    // одновременно: кадры для показа и звук для конформирования. Один общий
+    // замок ставил бы звук в очередь за непрерывным потоком кадров.
+    // Порядок захвата, когда нужны оба: сначала видео, потом звук.
+    std::mutex mutex_;
+    std::mutex audioMutex_;
 };
 
 } // namespace av1imp

@@ -185,6 +185,7 @@ static prMALError AV1QuietFile(imStdParms* stdParms, imFileRef* fileRef, void* p
     if (!ldataH) return malNoError;
 
     ImporterLocalRecPtr ldata = *ldataH;
+    av1imp::Log("imQuietFile: поток %d", ldata->streamIdx);
     if (ldata->decoder) {
         ldata->decoder->Close();  // сам объект оставляем: путь известен, откроемся заново
     }
@@ -202,6 +203,7 @@ static prMALError AV1CloseFile(imStdParms* stdParms, imFileRef* fileRef, void* p
     if (!ldataH) return malNoError;
 
     ImporterLocalRecPtr ldata = *ldataH;
+    av1imp::Log("imCloseFile: поток %d", ldata->streamIdx);
 
     if (ldata->decoder) {
         delete ldata->decoder;
@@ -377,10 +379,10 @@ static prMALError AV1ImportAudio7(imStdParms* stdParms, imFileRef fileRef,
         return imFileReadFailed;
     }
 
-    if (audioRec->position == 0) {
-        av1imp::Log("звук: дорожка %d, отдано %u отсчётов с начала",
-                    ldata->audioTrack, audioRec->size);
-    }
+    // Пишем каждый запрос: конформирование читает дорожку целиком, и по этим
+    // строкам видно, на каком месте оно оборвалось, если оборвалось
+    av1imp::Log("звук: дорожка %d, с %lld, %u отсчётов",
+                ldata->audioTrack, (long long)audioRec->position, audioRec->size);
     return malNoError;
 }
 

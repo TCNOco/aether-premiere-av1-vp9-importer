@@ -39,8 +39,8 @@ void Decoder::SetError(const std::string& msg, int averr) {
 }
 
 bool Decoder::Open(const std::string& utf8Path, bool preferHardware) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    Close();
+    std::scoped_lock lock(mutex_, audioMutex_);
+    CloseLocked();
 
     int err = avformat_open_input(&fmt_, utf8Path.c_str(), nullptr, nullptr);
     if (err < 0) {
@@ -51,14 +51,14 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware) {
     err = avformat_find_stream_info(fmt_, nullptr);
     if (err < 0) {
         SetError("не удалось прочитать сведения о потоках", err);
-        Close();
+        CloseLocked();
         return false;
     }
 
     videoStream_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     if (videoStream_ < 0) {
         SetError("в файле нет видеопотока");
-        Close();
+        CloseLocked();
         return false;
     }
 
@@ -68,12 +68,12 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware) {
     // иначе перехватим форматы, которые он и сам прекрасно открывает.
     if (st->codecpar->codec_id != AV_CODEC_ID_AV1) {
         SetError("видеопоток не AV1");
-        Close();
+        CloseLocked();
         return false;
     }
 
     if (!OpenCodec(preferHardware)) {
-        Close();
+        CloseLocked();
         return false;
     }
 
@@ -110,7 +110,7 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware) {
     packet_  = av_packet_alloc();
     if (!frame_ || !swFrame_ || !packet_) {
         SetError("не хватило памяти под буферы кадров");
-        Close();
+        CloseLocked();
         return false;
     }
 
@@ -171,7 +171,12 @@ bool Decoder::OpenCodec(bool preferHardware) {
 }
 
 void Decoder::Close() {
-    CloseAudio();
+    std::scoped_lock lock(mutex_, audioMutex_);
+    CloseLocked();
+}
+
+void Decoder::CloseLocked() {
+    CloseAudioLocked();
     if (sws_)      { sws_freeContext(sws_); sws_ = nullptr; }
     if (packet_)   { av_packet_free(&packet_); }
     if (frame_)    { av_frame_free(&frame_); }
@@ -303,7 +308,7 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride) {
 // Звук
 // ---------------------------------------------------------------------------
 
-void Decoder::CloseAudio() {
+void Decoder::CloseAudioLocked() {
     if (swr_)         { swr_free(&swr_); }
     if (audioPacket_) { av_packet_free(&audioPacket_); }
     if (audioFrame_)  { av_frame_free(&audioFrame_); }
@@ -318,8 +323,9 @@ void Decoder::CloseAudio() {
 }
 
 bool Decoder::OpenAudio(int ordinal) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    CloseAudio();
+    // Оба замка: читаем путь из состояния видео, а меняем состояние звука
+    std::scoped_lock lock(mutex_, audioMutex_);
+    CloseAudioLocked();
 
     if (!fmt_) {
         SetError("файл не открыт");
@@ -335,7 +341,7 @@ bool Decoder::OpenAudio(int ordinal) {
     }
     if ((err = avformat_find_stream_info(audioFmt_, nullptr)) < 0) {
         SetError("не удалось прочитать сведения о звуке", err);
-        CloseAudio();
+        CloseAudioLocked();
         return false;
     }
 
@@ -346,7 +352,7 @@ bool Decoder::OpenAudio(int ordinal) {
     }
     if (audioStreamIndex_ < 0) {
         SetError("нет звуковой дорожки с таким номером");
-        CloseAudio();
+        CloseAudioLocked();
         return false;
     }
 
@@ -354,7 +360,7 @@ bool Decoder::OpenAudio(int ordinal) {
     const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
     if (!dec) {
         SetError("нет декодера для этой звуковой дорожки");
-        CloseAudio();
+        CloseAudioLocked();
         return false;
     }
 
@@ -363,7 +369,7 @@ bool Decoder::OpenAudio(int ordinal) {
         avcodec_parameters_to_context(audioCodec_, st->codecpar) < 0 ||
         avcodec_open2(audioCodec_, dec, nullptr) < 0) {
         SetError("не удалось открыть декодер звука");
-        CloseAudio();
+        CloseAudioLocked();
         return false;
     }
 
@@ -383,7 +389,7 @@ bool Decoder::OpenAudio(int ordinal) {
     av_channel_layout_uninit(&outLayout);
     if (err < 0 || swr_init(swr_) < 0) {
         SetError("не удалось настроить преобразование звука", err);
-        CloseAudio();
+        CloseAudioLocked();
         return false;
     }
 
@@ -391,7 +397,7 @@ bool Decoder::OpenAudio(int ordinal) {
     audioPacket_ = av_packet_alloc();
     if (!audioFrame_ || !audioPacket_) {
         SetError("не хватило памяти под буферы звука");
-        CloseAudio();
+        CloseAudioLocked();
         return false;
     }
 
@@ -462,7 +468,7 @@ bool Decoder::DecodeMoreAudio() {
 }
 
 bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* dst) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(audioMutex_);
     if (!audioCodec_ || !dst) {
         SetError("звук не открыт");
         return false;
