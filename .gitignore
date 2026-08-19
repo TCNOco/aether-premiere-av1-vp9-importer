@@ -10,3 +10,5 @@ sdk/
 frame_out.bmp
 frame_check.png
 build.log
+_removed/
+_apply.log
