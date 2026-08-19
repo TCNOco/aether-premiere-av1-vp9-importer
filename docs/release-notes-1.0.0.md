@@ -16,7 +16,7 @@ Windows will warn that the publisher is unknown: the installer is not
 code-signed. Verify the download instead:
 
 ```
-SHA256  027267320786ab1f38d7a70b40f62b769d137162ee09babe8b249024537395a7
+SHA256  ff9eb6f87c779d2c1e75a1e43f5b7031bb935cc69121878393a0e9a0de7ade7c
 ```
 
 To remove it, use *Apps & features*.
@@ -58,5 +58,18 @@ Tested on 25.3. Other 25.x versions are likely fine; 24.x and earlier are untest
 
 ## Licence
 
-MIT. Uses FFmpeg under LGPL v3 — unmodified BtbN builds, linked dynamically; the
-licence text ships alongside the plug-in. Not affiliated with or endorsed by Adobe.
+MIT — covering this project's own code only.
+
+The Adobe SDK is **not** redistributed: no headers, no sample code, no other SDK
+component is in the repository or in this release. Only the compiled plug-in, which
+is our own object code, is distributed.
+
+FFmpeg is used under LGPL v3 — unmodified BtbN builds, linked dynamically, licence
+text shipped next to the plug-in and replaceable with your own build.
+
+AV1 is royalty-free under the AOMedia Patent License 1.0, which covers only AOMedia
+members' patents; third-party claims are possible. The plug-in only decodes and has
+no encoding path. Details and the full notices are in `THIRD-PARTY-NOTICES.md`.
+
+Adobe, Premiere Pro and Media Encoder are trademarks of Adobe Inc. Not affiliated
+with, sponsored by, or endorsed by Adobe. Nothing here is legal advice.

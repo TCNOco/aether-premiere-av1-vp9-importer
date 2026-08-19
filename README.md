@@ -61,7 +61,8 @@ Not needed to use the plug-in — only to modify it.
 You will need, none of which are in this repository:
 
 - **Adobe Premiere Pro C++ SDK** into `sdk/` — from
-  [developer.adobe.com](https://developer.adobe.com/premiere-pro/), requires an Adobe ID
+  [developer.adobe.com](https://developer.adobe.com/premiere-pro/); needs an Adobe ID,
+  and you accept Adobe's Developer Terms yourself
 - **FFmpeg** into `ffmpeg/` — a BtbN `win64-lgpl-shared` build (headers, `.lib` and `.dll`)
 - **Visual Studio Build Tools 2022** with the C++ workload
 - **Inno Setup 6** — only to build the installer
@@ -144,11 +145,35 @@ records every selector Premiere sends, by name, **including the ones the plug-in
 rejects** — the cause of failure hid among exactly those. Inside Premiere every
 importer failure looks the same, so this log is the main debugging tool.
 
-## Licence
+## Licensing, Adobe's terms, and AV1 patents
 
-MIT — see [LICENSE](LICENSE).
+Short version: MIT covers this repository's own code and nothing else. Full detail
+in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-Uses FFmpeg under LGPL v3; the libraries are unmodified BtbN builds and are linked
-dynamically. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+**This project's code** — MIT, see [LICENSE](LICENSE). That licence applies only to
+the source here. It does not extend to the Adobe SDK or to FFmpeg, and it could
+not: neither is ours to license.
 
-Not affiliated with or endorsed by Adobe.
+**The Adobe SDK is not redistributed.** No headers, no sample code, no utilities,
+no other SDK component appears in this repository or in any release — by design,
+see `.gitignore`. Building from source requires you to obtain the SDK from
+[Adobe](https://developer.adobe.com/premiere-pro/) and accept Adobe's own Developer
+Terms. The plug-in uses only the public, documented API and does not modify Adobe
+software. What the release ships is the compiled plug-in — our own object code —
+which is what Adobe's terms contemplate for plug-ins.
+
+Adobe, Premiere Pro and Media Encoder are trademarks of Adobe Inc. This project is
+independent: not affiliated with, sponsored by, or endorsed by Adobe.
+
+**FFmpeg** is used under LGPL v3 — unmodified BtbN builds, linked dynamically, with
+the licence text shipped next to the plug-in. You may swap the DLLs for your own
+build of the same versions; that relinking freedom is what LGPL requires.
+
+**AV1 and patents.** AV1 is published by the Alliance for Open Media as
+royalty-free under the AOMedia Patent License 1.0 — but that covers only the
+Necessary Claims of AOMedia members, and third-party claims are possible. In 2026
+Dolby sued Snap over AV1, which shows royalty-free is not an absolute guarantee.
+This plug-in only decodes and has no encoding path; decoding is done by your GPU
+vendor's driver or by dav1d (BSD-2-Clause). For an open-source plug-in the
+practical exposure is far lower than for a large commercial product, but it is not
+zero. **None of this is legal advice** — if you ship this commercially, get your own.
