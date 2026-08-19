@@ -69,10 +69,10 @@
            линковщик молча отказывается делать отложенную загрузку (LNK4199).
            Пересоздаются командой из README при обновлении ffmpeg. -->
       <AdditionalLibraryDirectories>..\ffmpeg\lib-msvc;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swscale.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>avcodec.lib;avformat.lib;avutil.lib;swscale.lib;swresample.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <!-- Отложенная загрузка: библиотеки ffmpeg подтягиваются при первом вызове,
            уже после того как AV1Runtime.cpp загрузил их из папки плагина -->
-      <DelayLoadDLLs>avcodec-62.dll;avformat-62.dll;avutil-60.dll;swscale-9.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <DelayLoadDLLs>avcodec-62.dll;avformat-62.dll;avutil-60.dll;swscale-9.dll;swresample-6.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
 

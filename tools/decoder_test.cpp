@@ -9,6 +9,7 @@
 #include "../src/AV1Decoder.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -97,6 +98,47 @@ int main(int argc, char** argv) {
     double totalMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
     printf("sequential : %d/%d frames, %.1f ms total, %.1f fps\n",
            ok, kSeq, totalMs, ok * 1000.0 / totalMs);
+
+    // --- звук ---
+    printf("\naudio      : %d дорожек\n", info.audioStreamCount);
+
+    for (int track = 0; track < info.audioStreamCount; ++track) {
+        if (!dec.OpenAudio(track)) {
+            printf("  дорожка %d: ОШИБКА - %s\n", track, dec.LastError().c_str());
+            continue;
+        }
+
+        const int ch = info.audioChannels;
+        const int32_t want = info.audioSampleRate;   // одна секунда
+
+        std::vector<std::vector<float>> buf(ch, std::vector<float>(want));
+        std::vector<float*> ptrs(ch);
+        for (int c = 0; c < ch; ++c) ptrs[c] = buf[c].data();
+
+        // Читаем с 10-й секунды: начало записи часто тихое, и по нему нельзя
+        // отличить рабочую дорожку от пустой
+        const int64_t start = (int64_t)info.audioSampleRate * 10;
+        if (!dec.GetAudio(start, want, ptrs.data())) {
+            printf("  дорожка %d: ОШИБКА - %s\n", track, dec.LastError().c_str());
+            continue;
+        }
+
+        float peak = 0.0f;
+        for (int c = 0; c < ch; ++c) {
+            for (int i = 0; i < want; ++i) {
+                float v = buf[c][i] < 0 ? -buf[c][i] : buf[c][i];
+                if (v > peak) peak = v;
+            }
+        }
+
+        // В децибелах, а не в долях единицы: тихая, но живая дорожка
+        // в долях выглядит нулём, и её не отличить от пустой
+        const double db = peak > 0 ? 20.0 * log10(peak) : -120.0;
+
+        printf("  дорожка %d: %d кан, %d Hz, %lld отсчётов, пик %.1f дБ%s\n",
+               track, ch, info.audioSampleRate, (long long)info.audioSampleCount,
+               db, db < -90.0 ? "  (цифровая тишина)" : "");
+    }
 
     return 0;
 }

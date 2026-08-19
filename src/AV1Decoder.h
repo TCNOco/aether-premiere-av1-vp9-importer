@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <string>
 #include <mutex>
+#include <vector>
 
 struct AVFormatContext;
 struct AVCodecContext;
@@ -16,6 +17,7 @@ struct AVFrame;
 struct AVPacket;
 struct SwsContext;
 struct AVBufferRef;
+struct SwrContext;
 
 namespace av1imp {
 
@@ -31,6 +33,13 @@ struct MediaInfo {
     bool     hardwareDecode = false; // декодирует видеокарта, а не процессор
     std::string codecName;
     std::string decoderName;
+
+    // Звук. Дорожек в файле может быть несколько: OBS пишет микрофон, игру,
+    // дискорд и музыку отдельными потоками, и сводить их в одну нельзя.
+    int      audioStreamCount = 0;
+    int      audioChannels    = 0;
+    int      audioSampleRate  = 0;
+    int64_t  audioSampleCount = 0;   // длина в кадрах отсчётов (не в байтах)
 };
 
 class Decoder {
@@ -56,11 +65,23 @@ public:
     // Возвращает false, если кадр получить не удалось.
     bool GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride);
 
+    // Открыть дорожку звука по её номеру среди звуковых (0 — первая).
+    // Отдельно от видео: у звука свой разбор контейнера, иначе перемотка
+    // видео сбивала бы позицию звука и наоборот.
+    bool OpenAudio(int ordinal);
+    bool HasAudio() const { return audioCodec_ != nullptr; }
+
+    // Выдать отсчёты в буферы вызывающего: dst[канал][отсчёт], 32-битные float.
+    // Именно в таком виде их ждёт Premiere.
+    bool GetAudio(int64_t startSample, int32_t sampleCount, float* const* dst);
+
     // Текст последней ошибки — для журнала плагина
     const std::string& LastError() const { return lastError_; }
 
 private:
     bool OpenCodec(bool preferHardware);
+    bool DecodeMoreAudio();
+    void CloseAudio();
     bool DecodeUntil(int64_t targetFrame);
     bool ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride);
     void SetError(const std::string& msg, int averr = 0);
@@ -81,6 +102,21 @@ private:
     // на каждый кадр приходилось бы перематывать файл с начала.
     int64_t  lastDecodedFrame_ = -1;
     bool     eofReached_       = false;
+
+    // --- звук ---
+    AVFormatContext* audioFmt_   = nullptr;  // свой разбор контейнера, см. OpenAudio
+    AVCodecContext*  audioCodec_ = nullptr;
+    AVFrame*         audioFrame_ = nullptr;
+    AVPacket*        audioPacket_ = nullptr;
+    SwrContext*      swr_        = nullptr;
+    int              audioStreamIndex_ = -1;
+
+    // Готовые отсчёты, оставшиеся от предыдущего запроса: Premiere просит
+    // произвольные куски, а декодер выдаёт кадрами по ~1024 отсчёта
+    std::vector<std::vector<float>> pending_;
+    int64_t pendingOffset_ = 0;
+    int64_t pendingCount_  = 0;
+    int64_t audioCursor_   = -1;   // номер следующего готового отсчёта
 
     std::mutex mutex_;  // Premiere дёргает импортёр из нескольких потоков
 };

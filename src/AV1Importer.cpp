@@ -54,6 +54,15 @@ bool EnsureDecoder(ImporterLocalRecPtr ldata)
     return ldata->decoder->Open(path, /*preferHardware=*/true);
 }
 
+// Дорожка звука открывается по требованию: Premiere спрашивает отсчёты
+// не у всех потоков и не сразу
+bool EnsureAudio(ImporterLocalRecPtr ldata)
+{
+    if (!ldata->decoder) return false;
+    if (ldata->decoder->HasAudio()) return true;
+    return ldata->decoder->OpenAudio(ldata->audioTrack);
+}
+
 ImporterLocalRecH AllocLocalRec(imStdParms* stdParms, void** privateData)
 {
     if (*privateData) {
@@ -134,6 +143,9 @@ static prMALError AV1OpenFile8(imStdParms* stdParms, imFileRef* fileRef,
 
     ImporterLocalRecPtr ldata = *ldataH;
     CopyUtf16(ldata->filePath, 2048, openRec->fileinfo.filepath);
+
+    ldata->streamIdx  = openRec->inStreamIdx;
+    ldata->audioTrack = openRec->inStreamIdx;   // поток N обслуживает дорожку N
 
     // Дескриптор нужен самому Premiere; читаем мы через ffmpeg, поэтому
     // открываем на чтение и разрешаем параллельное чтение другим.
@@ -258,10 +270,40 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
                                         (const void**)&ldata->TimeSuite);
     }
 
-    fileInfo->hasVideo    = kPrTrue;
-    fileInfo->hasAudio    = kPrFalse;   // звук — следующий этап
+    // Какой поток спрашивают. Поток 0 — видео плюс первая дорожка звука,
+    // потоки 1..N — остальные дорожки. Отдавать их порознь обязательно:
+    // OBS пишет микрофон, игру, дискорд и музыку отдельно, и сводить их
+    // в одну дорожку означало бы потерять саму возможность их разделить.
+    ldata->streamIdx  = fileInfo->streamIdx;
+    ldata->audioTrack = fileInfo->streamIdx;
+
+    const int audioTracks = mi.audioStreamCount;
+
+    if (fileInfo->streamIdx > 0 && fileInfo->streamIdx >= audioTracks) {
+        stdParms->piSuites->memFuncs->unlockHandle(reinterpret_cast<char**>(ldataH));
+        return imBadStreamIndex;
+    }
+
+    fileInfo->hasVideo    = (fileInfo->streamIdx == 0) ? kPrTrue : kPrFalse;
+    fileInfo->hasAudio    = kPrFalse;
     fileInfo->accessModes = kRandomAccessImport;
     fileInfo->hasDataRate = kPrFalse;
+
+    if (audioTracks > 0 && EnsureAudio(ldata)) {
+        fileInfo->hasAudio            = kPrTrue;
+        fileInfo->audInfo.numChannels = mi.audioChannels;
+        fileInfo->audInfo.sampleRate  = static_cast<float>(mi.audioSampleRate);
+        fileInfo->audInfo.sampleType  = kPrAudioSampleType_32BitFloat;
+        fileInfo->audDuration         = mi.audioSampleCount;
+    }
+
+    if (!fileInfo->hasVideo) {
+        av1imp::Log("imGetInfo8: поток %d — только звук, %d кан",
+                    fileInfo->streamIdx, mi.audioChannels);
+        stdParms->piSuites->memFuncs->unlockHandle(reinterpret_cast<char**>(ldataH));
+        // Есть ли ещё дорожки после этой
+        return (fileInfo->streamIdx + 1 < audioTracks) ? imIterateStreams : malNoError;
+    }
 
     fileInfo->vidInfo.imageWidth     = mi.width;
     fileInfo->vidInfo.imageHeight    = mi.height;
@@ -304,6 +346,41 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
                 (long long)mi.frameCount);
 
     stdParms->piSuites->memFuncs->unlockHandle(reinterpret_cast<char**>(ldataH));
+
+    // imIterateStreams — «спроси меня про следующий поток». Без этого Premiere
+    // остановится на первой дорожке и остальные три просто не увидит.
+    return (audioTracks > 1) ? imIterateStreams : malNoError;
+}
+
+// ---------------------------------------------------------------------------
+// Звук
+// ---------------------------------------------------------------------------
+
+static prMALError AV1ImportAudio7(imStdParms* stdParms, imFileRef fileRef,
+                                  imImportAudioRec7* audioRec)
+{
+    ImporterLocalRecH ldataH = reinterpret_cast<ImporterLocalRecH>(audioRec->privateData);
+    if (!ldataH) return imOtherErr;
+
+    ImporterLocalRecPtr ldata = *ldataH;
+    if (!EnsureDecoder(ldata) || !EnsureAudio(ldata)) {
+        av1imp::Log("imImportAudio7: звук недоступен — %s",
+                    ldata->decoder ? ldata->decoder->LastError().c_str() : "нет декодера");
+        return imFileReadFailed;
+    }
+
+    if (!ldata->decoder->GetAudio(audioRec->position,
+                                  static_cast<int32_t>(audioRec->size),
+                                  audioRec->buffer)) {
+        av1imp::Log("звук с %lld: ОШИБКА — %s", (long long)audioRec->position,
+                    ldata->decoder->LastError().c_str());
+        return imFileReadFailed;
+    }
+
+    if (audioRec->position == 0) {
+        av1imp::Log("звук: дорожка %d, отдано %u отсчётов с начала",
+                    ldata->audioTrack, audioRec->size);
+    }
     return malNoError;
 }
 
@@ -458,6 +535,11 @@ PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
         // Рукопожатие: плагин объявляет, какой версией интерфейса владеет.
         // Без ответа Premiere считает импортёр устаревшим и не спрашивает у него
         // ни формат пикселей, ни кадры — просто прочитает сведения о файле и уйдёт.
+        case imImportAudio7:
+            result = AV1ImportAudio7(stdParms, reinterpret_cast<imFileRef>(param1),
+                                     reinterpret_cast<imImportAudioRec7*>(param2));
+            break;
+
         case imGetSupports7:
             result = malSupports7;
             break;

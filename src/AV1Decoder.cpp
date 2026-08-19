@@ -7,6 +7,7 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
+#include <libswresample/swresample.h>
 }
 
 #include <algorithm>
@@ -98,6 +99,12 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware) {
 
     info_.codecName = "AV1";
 
+    for (unsigned i = 0; i < fmt_->nb_streams; ++i) {
+        if (fmt_->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            ++info_.audioStreamCount;
+        }
+    }
+
     frame_   = av_frame_alloc();
     swFrame_ = av_frame_alloc();
     packet_  = av_packet_alloc();
@@ -164,6 +171,7 @@ bool Decoder::OpenCodec(bool preferHardware) {
 }
 
 void Decoder::Close() {
+    CloseAudio();
     if (sws_)      { sws_freeContext(sws_); sws_ = nullptr; }
     if (packet_)   { av_packet_free(&packet_); }
     if (frame_)    { av_frame_free(&frame_); }
@@ -289,6 +297,242 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride) {
 
     if (!DecodeUntil(frameIndex)) return false;
     return ConvertToBGRA(frame_, dst, dstStride);
+}
+
+// ---------------------------------------------------------------------------
+// Звук
+// ---------------------------------------------------------------------------
+
+void Decoder::CloseAudio() {
+    if (swr_)         { swr_free(&swr_); }
+    if (audioPacket_) { av_packet_free(&audioPacket_); }
+    if (audioFrame_)  { av_frame_free(&audioFrame_); }
+    if (audioCodec_)  { avcodec_free_context(&audioCodec_); }
+    if (audioFmt_)    { avformat_close_input(&audioFmt_); }
+
+    audioStreamIndex_ = -1;
+    pending_.clear();
+    pendingOffset_ = 0;
+    pendingCount_  = 0;
+    audioCursor_   = -1;
+}
+
+bool Decoder::OpenAudio(int ordinal) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    CloseAudio();
+
+    if (!fmt_) {
+        SetError("файл не открыт");
+        return false;
+    }
+
+    // Свой разбор контейнера для звука. Общий с видео не годится: чтение
+    // пакетов двигает одну общую позицию, и перемотка видео сбивала бы звук.
+    int err = avformat_open_input(&audioFmt_, fmt_->url, nullptr, nullptr);
+    if (err < 0) {
+        SetError("не удалось открыть файл для звука", err);
+        return false;
+    }
+    if ((err = avformat_find_stream_info(audioFmt_, nullptr)) < 0) {
+        SetError("не удалось прочитать сведения о звуке", err);
+        CloseAudio();
+        return false;
+    }
+
+    int seen = 0;
+    for (unsigned i = 0; i < audioFmt_->nb_streams; ++i) {
+        if (audioFmt_->streams[i]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+        if (seen++ == ordinal) { audioStreamIndex_ = (int)i; break; }
+    }
+    if (audioStreamIndex_ < 0) {
+        SetError("нет звуковой дорожки с таким номером");
+        CloseAudio();
+        return false;
+    }
+
+    AVStream* st = audioFmt_->streams[audioStreamIndex_];
+    const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
+    if (!dec) {
+        SetError("нет декодера для этой звуковой дорожки");
+        CloseAudio();
+        return false;
+    }
+
+    audioCodec_ = avcodec_alloc_context3(dec);
+    if (!audioCodec_ ||
+        avcodec_parameters_to_context(audioCodec_, st->codecpar) < 0 ||
+        avcodec_open2(audioCodec_, dec, nullptr) < 0) {
+        SetError("не удалось открыть декодер звука");
+        CloseAudio();
+        return false;
+    }
+
+    info_.audioChannels    = audioCodec_->ch_layout.nb_channels;
+    info_.audioSampleRate  = audioCodec_->sample_rate;
+    info_.audioSampleCount = st->duration != AV_NOPTS_VALUE
+        ? (int64_t)(st->duration * av_q2d(st->time_base) * info_.audioSampleRate + 0.5)
+        : (int64_t)(info_.durationSec * info_.audioSampleRate + 0.5);
+
+    // Premiere работает только с 32-битными float по каналам, поэтому приводим
+    // к этому виду всегда — какой бы формат ни выдал декодер
+    AVChannelLayout outLayout;
+    av_channel_layout_copy(&outLayout, &audioCodec_->ch_layout);
+    err = swr_alloc_set_opts2(&swr_, &outLayout, AV_SAMPLE_FMT_FLTP, info_.audioSampleRate,
+                              &audioCodec_->ch_layout, audioCodec_->sample_fmt,
+                              audioCodec_->sample_rate, 0, nullptr);
+    av_channel_layout_uninit(&outLayout);
+    if (err < 0 || swr_init(swr_) < 0) {
+        SetError("не удалось настроить преобразование звука", err);
+        CloseAudio();
+        return false;
+    }
+
+    audioFrame_  = av_frame_alloc();
+    audioPacket_ = av_packet_alloc();
+    if (!audioFrame_ || !audioPacket_) {
+        SetError("не хватило памяти под буферы звука");
+        CloseAudio();
+        return false;
+    }
+
+    pending_.assign(info_.audioChannels, std::vector<float>());
+    audioCursor_ = -1;
+    return true;
+}
+
+// Декодировать очередной кадр звука в очередь готовых отсчётов
+bool Decoder::DecodeMoreAudio() {
+    while (true) {
+        int err = avcodec_receive_frame(audioCodec_, audioFrame_);
+
+        if (err == 0) {
+            const int n = audioFrame_->nb_samples;
+            for (auto& ch : pending_) ch.resize(n);
+
+            float* out[64] = {};
+            const int channels = std::min<int>(info_.audioChannels, 64);
+            for (int c = 0; c < channels; ++c) out[c] = pending_[c].data();
+
+            const int got = swr_convert(swr_, reinterpret_cast<uint8_t**>(out), n,
+                                        const_cast<const uint8_t**>(audioFrame_->data), n);
+            if (got < 0) {
+                SetError("ошибка преобразования звука", got);
+                return false;
+            }
+
+            // Позицию берём из метки времени: так не накапливается ошибка
+            // после перемотки и не важен порядок пакетов
+            if (audioFrame_->pts != AV_NOPTS_VALUE) {
+                AVStream* st = audioFmt_->streams[audioStreamIndex_];
+                audioCursor_ = (int64_t)(audioFrame_->pts * av_q2d(st->time_base)
+                                         * info_.audioSampleRate + 0.5);
+            } else if (audioCursor_ < 0) {
+                audioCursor_ = 0;
+            }
+
+            pendingOffset_ = 0;
+            pendingCount_  = got;
+            return true;
+        }
+
+        if (err == AVERROR_EOF) return false;
+
+        if (err != AVERROR(EAGAIN)) {
+            SetError("ошибка декодирования звука", err);
+            return false;
+        }
+
+        av_packet_unref(audioPacket_);
+        int rerr = av_read_frame(audioFmt_, audioPacket_);
+        if (rerr == AVERROR_EOF) {
+            avcodec_send_packet(audioCodec_, nullptr);  // слить остаток
+            continue;
+        }
+        if (rerr < 0) {
+            SetError("ошибка чтения звука", rerr);
+            return false;
+        }
+        if (audioPacket_->stream_index != audioStreamIndex_) continue;
+
+        if (avcodec_send_packet(audioCodec_, audioPacket_) < 0) {
+            SetError("декодер звука не принял пакет");
+            return false;
+        }
+    }
+}
+
+bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* dst) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!audioCodec_ || !dst) {
+        SetError("звук не открыт");
+        return false;
+    }
+    if (startSample < 0) startSample = 0;
+
+    const int channels = info_.audioChannels;
+
+    // Тишина по умолчанию: если файл кончился раньше запроса, Premiere получит
+    // нули, а не остатки прошлого куска
+    for (int c = 0; c < channels; ++c) {
+        std::fill_n(dst[c], sampleCount, 0.0f);
+    }
+
+    // Назад или далеко вперёд — перематываем. Небольшой прыжок вперёд дешевле
+    // домотать декодированием, как и с видео.
+    const int64_t available = audioCursor_ + pendingOffset_;
+    const bool needSeek = audioCursor_ < 0 || startSample < available ||
+                          startSample > available + info_.audioSampleRate;
+
+    if (needSeek) {
+        AVStream* st = audioFmt_->streams[audioStreamIndex_];
+        int64_t ts = (int64_t)((double)startSample / info_.audioSampleRate / av_q2d(st->time_base));
+        if (av_seek_frame(audioFmt_, audioStreamIndex_, ts, AVSEEK_FLAG_BACKWARD) < 0) {
+            SetError("перемотка звука не удалась");
+            return false;
+        }
+        avcodec_flush_buffers(audioCodec_);
+        pendingCount_  = 0;
+        pendingOffset_ = 0;
+        audioCursor_   = -1;
+    }
+
+    int64_t written = 0;
+    while (written < sampleCount) {
+        if (pendingCount_ <= 0) {
+            if (!DecodeMoreAudio()) break;   // файл кончился — остаток останется тишиной
+        }
+
+        const int64_t chunkStart = audioCursor_ + pendingOffset_;
+        const int64_t want       = startSample + written;
+
+        // Пропускаем всё, что лежит до запрошенной позиции: после перемотки
+        // декодер начинает с ближайшего целого кадра, а не с нужного отсчёта
+        if (chunkStart + pendingCount_ <= want) {
+            pendingCount_ = 0;
+            continue;
+        }
+        if (chunkStart > want) {
+            // Провал во времени (бывает в записях с разрывами) — оставляем тишину
+            const int64_t gap = std::min<int64_t>(chunkStart - want, sampleCount - written);
+            written += gap;
+            continue;
+        }
+
+        const int64_t skip = want - chunkStart;
+        const int64_t take = std::min<int64_t>(pendingCount_ - skip, sampleCount - written);
+
+        for (int c = 0; c < channels; ++c) {
+            memcpy(dst[c] + written,
+                   pending_[c].data() + pendingOffset_ + skip,
+                   (size_t)take * sizeof(float));
+        }
+
+        written        += take;
+        pendingOffset_ += skip + take;
+        pendingCount_  -= skip + take;
+    }
+
+    return true;
 }
 
 } // namespace av1imp

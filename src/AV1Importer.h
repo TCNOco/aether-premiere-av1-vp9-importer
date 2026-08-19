@@ -21,6 +21,7 @@
 #include "PrSDKPPixSuite.h"
 #include "PrSDKTimeSuite.h"
 #include "PrSDKMemoryManagerSuite.h"
+#include "PrSDKAudioSuite.h"
 
 #include <windows.h>
 
@@ -43,6 +44,12 @@ typedef struct
 
     csSDK_int32             importerID;
     PrTime                  ticksPerFrame;  // длительность кадра в тактах Premiere
+
+    // Какой поток файла обслуживает этот экземпляр. OBS пишет микрофон, игру,
+    // дискорд и музыку отдельными дорожками, и Premiere спрашивает про каждую
+    // отдельно: поток 0 — видео плюс первая дорожка, дальше только звук.
+    csSDK_int32             streamIdx;
+    int                     audioTrack;     // номер дорожки звука для этого потока
 
     PlugMemoryFuncsPtr      memFuncs;
     SPBasicSuite*           BasicSuite;
