@@ -51,7 +51,10 @@ bool EnsureDecoder(ImporterLocalRecPtr ldata)
     const std::string path = Utf8FromUtf16(ldata->filePath);
     if (path.empty()) return false;
 
-    return ldata->decoder->Open(path, /*preferHardware=*/true);
+    // Кадры отдаёт только поток 0; остальным нужен лишь звук, и декодер
+    // на видеокарте им создавать незачем
+    const bool needVideo = (ldata->streamIdx == 0);
+    return ldata->decoder->Open(path, /*preferHardware=*/true, needVideo);
 }
 
 // Дорожка звука открывается по требованию: Premiere спрашивает отсчёты
@@ -245,6 +248,11 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     av1imp::Log("imGetInfo8: спрашивают про %S (поток %d)",
                 ldata->filePath, fileInfo->streamIdx);
 
+    // Записать номер потока нужно до открытия: от него зависит,
+    // создавать ли декодер кадров
+    ldata->streamIdx  = fileInfo->streamIdx;
+    ldata->audioTrack = fileInfo->streamIdx;
+
     if (!EnsureDecoder(ldata)) {
         av1imp::Log("imGetInfo8: отказ — %s",
                     ldata->decoder ? ldata->decoder->LastError().c_str() : "нет декодера");
@@ -276,9 +284,6 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     // потоки 1..N — остальные дорожки. Отдавать их порознь обязательно:
     // OBS пишет микрофон, игру, дискорд и музыку отдельно, и сводить их
     // в одну дорожку означало бы потерять саму возможность их разделить.
-    ldata->streamIdx  = fileInfo->streamIdx;
-    ldata->audioTrack = fileInfo->streamIdx;
-
     const int audioTracks = mi.audioStreamCount;
 
     if (fileInfo->streamIdx > 0 && fileInfo->streamIdx >= audioTracks) {

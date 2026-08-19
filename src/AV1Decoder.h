@@ -10,6 +10,7 @@
 #include <string>
 #include <mutex>
 #include <vector>
+#include <map>
 
 struct AVFormatContext;
 struct AVCodecContext;
@@ -52,7 +53,13 @@ public:
 
     // Открыть файл. Путь — UTF-8. Возвращает false, если файл не открылся
     // или видеопоток не AV1 (импортёр не должен перехватывать чужие форматы).
-    bool Open(const std::string& utf8Path, bool preferHardware = true);
+    //
+    // needVideo=false открывает только разбор контейнера, без декодера кадров.
+    // Так работают экземпляры, обслуживающие дорожки звука: файл проверяется
+    // на AV1 по-прежнему, но лишний декодер на видеокарте не создаётся —
+    // иначе на четырёхдорожечной записи их было бы четыре вместо одного.
+    bool Open(const std::string& utf8Path, bool preferHardware = true,
+              bool needVideo = true);
 
     // Закрыть всё. Можно звать из любого потока: Premiere закрывает файл
     // не дожидаясь, пока другие его потоки договорят с декодером.
@@ -90,6 +97,8 @@ private:
     void CloseAudioLocked();
     bool DecodeUntil(int64_t targetFrame);
     bool ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride);
+    void StoreInCache(int64_t index, AVFrame* src);
+    void ClearCache();
     void SetError(const std::string& msg, int averr = 0);
 
     AVFormatContext* fmt_        = nullptr;
@@ -108,6 +117,15 @@ private:
     // на каждый кадр приходилось бы перематывать файл с начала.
     int64_t  lastDecodedFrame_ = -1;
     bool     eofReached_       = false;
+
+    // Кэш кадров. Заполняется только при отматывании назад: там мы всё равно
+    // декодируем весь отрезок от опорного кадра, и без кэша выбрасывали бы
+    // ровно те кадры, которые попросят следующим шагом.
+    std::map<int64_t, AVFrame*> frameCache_;
+    size_t   cacheBytes_    = 0;
+    size_t   cacheBudget_   = 256u * 1024 * 1024;
+    bool     cacheFill_     = false;
+    int64_t  lastRequested_ = -1;
 
     // --- звук ---
     AVFormatContext* audioFmt_   = nullptr;  // свой разбор контейнера, см. OpenAudio

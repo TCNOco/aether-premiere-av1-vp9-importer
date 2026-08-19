@@ -38,7 +38,7 @@ void Decoder::SetError(const std::string& msg, int averr) {
     lastError_ = averr ? msg + ": " + AvErr(averr) : msg;
 }
 
-bool Decoder::Open(const std::string& utf8Path, bool preferHardware) {
+bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVideo) {
     std::scoped_lock lock(mutex_, audioMutex_);
     CloseLocked();
 
@@ -72,7 +72,8 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware) {
         return false;
     }
 
-    if (!OpenCodec(preferHardware)) {
+    // Дорожкам звука декодер кадров не нужен — проверки на AV1 выше достаточно
+    if (needVideo && !OpenCodec(preferHardware)) {
         CloseLocked();
         return false;
     }
@@ -175,7 +176,60 @@ void Decoder::Close() {
     CloseLocked();
 }
 
+void Decoder::ClearCache() {
+    for (auto& item : frameCache_) {
+        av_frame_free(&item.second);
+    }
+    frameCache_.clear();
+    cacheBytes_ = 0;
+}
+
+// Сохранить кадр в кэше. Кадр с видеокарты сначала переносится в обычную память:
+// держать полсотни кадров в памяти видеокарты нельзя, её быстро не хватит.
+void Decoder::StoreInCache(int64_t index, AVFrame* src) {
+    if (frameCache_.count(index)) return;
+
+    AVFrame* copy = av_frame_alloc();
+    if (!copy) return;
+
+    if (src->hw_frames_ctx) {
+        if (av_hwframe_transfer_data(copy, src, 0) < 0) {
+            av_frame_free(&copy);
+            return;
+        }
+    } else if (av_frame_ref(copy, src) < 0) {
+        av_frame_free(&copy);
+        return;
+    }
+
+    const int size = av_image_get_buffer_size((AVPixelFormat)copy->format,
+                                              copy->width, copy->height, 1);
+    if (size <= 0) {
+        av_frame_free(&copy);
+        return;
+    }
+
+    // Тесним самые дальние от текущей позиции: при отматывании назад
+    // пригодятся ближайшие
+    while (cacheBytes_ + size > cacheBudget_ && !frameCache_.empty()) {
+        auto first = frameCache_.begin();
+        auto last  = std::prev(frameCache_.end());
+        auto drop  = (index - first->first) >= (last->first - index) ? first : last;
+
+        const int dropSize = av_image_get_buffer_size((AVPixelFormat)drop->second->format,
+                                                      drop->second->width,
+                                                      drop->second->height, 1);
+        cacheBytes_ -= (dropSize > 0 ? dropSize : 0);
+        av_frame_free(&drop->second);
+        frameCache_.erase(drop);
+    }
+
+    frameCache_[index] = copy;
+    cacheBytes_ += size;
+}
+
 void Decoder::CloseLocked() {
+    ClearCache();
     CloseAudioLocked();
     if (sws_)      { sws_freeContext(sws_); sws_ = nullptr; }
     if (packet_)   { av_packet_free(&packet_); }
@@ -227,6 +281,8 @@ bool Decoder::DecodeUntil(int64_t targetFrame) {
                 idx = (int64_t)(pts * av_q2d(st->time_base) * info_.fps + 0.5);
             }
             lastDecodedFrame_ = idx;
+
+            if (cacheFill_) StoreInCache(idx, frame_);
 
             if (idx >= targetFrame) return true;
             continue;  // ещё не дошли — декодируем дальше
@@ -300,7 +356,21 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride) {
     }
     if (frameIndex < 0) frameIndex = 0;
 
-    if (!DecodeUntil(frameIndex)) return false;
+    // Отматывание назад — единственный случай, когда кэш окупается: при чтении
+    // вперёд кадры и так идут подряд, а кэш только тратил бы память
+    const bool backward = (lastRequested_ >= 0 && frameIndex < lastRequested_);
+    lastRequested_ = frameIndex;
+
+    auto cached = frameCache_.find(frameIndex);
+    if (cached != frameCache_.end()) {
+        return ConvertToBGRA(cached->second, dst, dstStride);
+    }
+
+    cacheFill_ = backward;
+    const bool ok = DecodeUntil(frameIndex);
+    cacheFill_ = false;
+
+    if (!ok) return false;
     return ConvertToBGRA(frame_, dst, dstStride);
 }
 

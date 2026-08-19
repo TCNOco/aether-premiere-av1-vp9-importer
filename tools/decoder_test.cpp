@@ -99,6 +99,36 @@ int main(int argc, char** argv) {
     printf("sequential : %d/%d frames, %.1f ms total, %.1f fps\n",
            ok, kSeq, totalMs, ok * 1000.0 / totalMs);
 
+    // Обратная прокрутка — так монтажёр отматывает назад покадрово.
+    // Для межкадрового кодека это худший случай: каждый шаг назад требует
+    // вернуться к опорному кадру и декодировать оттуда заново.
+    const int kBack = 30;
+    const int64_t backFrom = wanted + 300;
+    dec.GetFrameBGRA(backFrom, buf.data(), stride);   // прогрев, в замер не входит
+
+    t0 = std::chrono::steady_clock::now();
+    ok = 0;
+    for (int i = 1; i <= kBack; ++i) {
+        if (dec.GetFrameBGRA(backFrom - i, buf.data(), stride)) ++ok;
+    }
+    t1 = std::chrono::steady_clock::now();
+    totalMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    printf("backward   : %d/%d frames, %.1f ms total, %.1f ms/frame\n",
+           ok, kBack, totalMs, totalMs / (ok ? ok : 1));
+
+    // Случайные прыжки — так ведёт себя перетаскивание указателя по таймлайну
+    const int kJumps = 20;
+    t0 = std::chrono::steady_clock::now();
+    ok = 0;
+    for (int i = 0; i < kJumps; ++i) {
+        const int64_t f = (info.frameCount > 0) ? (i * 7919) % info.frameCount : 0;
+        if (dec.GetFrameBGRA(f, buf.data(), stride)) ++ok;
+    }
+    t1 = std::chrono::steady_clock::now();
+    totalMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    printf("random     : %d/%d jumps, %.1f ms total, %.1f ms/jump\n",
+           ok, kJumps, totalMs, totalMs / (ok ? ok : 1));
+
     // --- звук ---
     printf("\naudio      : %d дорожек\n", info.audioStreamCount);
 
