@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 neoHaDe
+
 // Импортёр AV1 для Adobe Premiere Pro — слой между Premiere и AV1Decoder.
 //
 // Premiere общается с импортёром одной функцией xImportEntry: присылает номер

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 neoHaDe
+
 // Подгрузка библиотек ffmpeg из папки самого плагина.
 //
 // Зачем это нужно. Плагин лежит в MediaCore, а Windows ищет зависимые DLL рядом

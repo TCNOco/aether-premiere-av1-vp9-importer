@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 neoHaDe
+
 // AV1ImporterSettings.exe — окно настроек плагина.
 //
 // Отдельная программа, а не окно внутри Premiere, и это осознанно: настройка

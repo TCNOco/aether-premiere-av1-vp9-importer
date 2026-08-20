@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 neoHaDe
+
 // Exercises the decoding core without Premiere.
 //
 //   decoder_test.exe <file.mp4> [frame]

@@ -83,17 +83,23 @@ visible — switch with the setting below and judge on your own footage.
 
 ## Settings
 
-The plug-in has no settings dialog. To turn hardware decoding off — worth trying if
-the GPU driver misbehaves, or simply because software may be faster — put a file
-named `AV1Importer.ini` next to the plug-in:
+Decoding runs on the CPU by default. To change that, open **AV1 Importer —
+settings** from the Start menu; it is installed with the plug-in.
 
-```ini
-hardware=0
-```
+| | |
+|---|---|
+| Automatic | CPU on machines with 8 logical processors or more, GPU below that |
+| CPU (dav1d) | the faster path on this hardware — see the measurements above |
+| GPU (NVIDIA / Intel / AMD) | leaves the CPU free for the rest of the edit |
 
-Or set the environment variable `AV1IMPORTER_HARDWARE=0`, which overrides the file.
-Either way the choice is recorded in the log. The plug-in folder is
-`C:\Program Files\Adobe\Common\Plug-ins.0\MediaCore\AV1 Importer\`.
+The choice lands in `%LOCALAPPDATA%\AV1Importer\settings.ini` and applies when
+Premiere restarts. The environment variable `AV1IMPORTER_HARDWARE=0` (or `=1`)
+overrides the file without changing it, which is the quick way to test a hunch.
+Either way, the decoder actually used is recorded in the log.
+
+There is deliberately no settings dialog inside Premiere. The setting matters most
+when a graphics driver fault stops Premiere from starting — and inside Premiere it
+would be out of reach at exactly that moment.
 
 ## Building from source
 
@@ -193,12 +199,19 @@ importer failure looks the same, so this log is the main debugging tool.
 
 ## Licensing, Adobe's terms, and AV1 patents
 
-Short version: MIT covers this repository's own code and nothing else. Full detail
-in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+Short version: Apache 2.0 covers this repository's own code and nothing else. Full
+detail in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-**This project's code** — MIT, see [LICENSE](LICENSE). That licence applies only to
-the source here. It does not extend to the Adobe SDK or to FFmpeg, and it could
-not: neither is ours to license.
+**This project's code** — Apache License 2.0, see [LICENSE](LICENSE) and
+[NOTICE](NOTICE). That licence applies only to the source here. It does not extend
+to the Adobe SDK or to FFmpeg, and it could not: neither is ours to license.
+
+Releases up to 1.1.0 were MIT. The change was made on purpose: Apache 2.0 grants
+patent rights explicitly rather than leaving them to be inferred, and withdraws
+them from anyone who attacks the project with patents. For a codec plug-in that is
+a live question rather than boilerplate — see the patent note at the end. Nothing
+MIT permitted has been taken away; the conditions added are attribution, a note of
+what you changed, and keeping [NOTICE](NOTICE) with redistributions.
 
 **The Adobe SDK is not redistributed.** No headers, no sample code, no utilities,
 no other SDK component appears in this repository or in any release — by design,

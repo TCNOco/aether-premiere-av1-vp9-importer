@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 neoHaDe
+
 // Импортёр AV1 для Adobe Premiere Pro.
 //
 // Premiere сам умеет разбирать контейнер MP4/MKV, но не умеет распаковывать

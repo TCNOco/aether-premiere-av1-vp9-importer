@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 neoHaDe
+
 // Настройки плагина, общие для всех файлов.
 //
 // Живут в %LOCALAPPDATA%\AV1Importer\settings.ini, а не рядом с плагином:

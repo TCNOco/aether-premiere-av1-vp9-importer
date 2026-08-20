@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 neoHaDe
+
 // Проверка готового .prm без запуска Premiere.
 //
 //   plugin_test.exe <путь к AV1Importer.prm>

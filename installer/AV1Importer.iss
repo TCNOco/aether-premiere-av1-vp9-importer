@@ -82,6 +82,7 @@ Source: "..\ffmpeg\bin\swscale-9.dll";     DestDir: "{app}"; Flags: ignoreversio
 ; Лицензии кладём рядом с плагином: раздача библиотек ffmpeg под LGPL
 ; обязывает приложить текст лицензии к самим файлам, а не только к репозиторию
 Source: "..\LICENSE";                 DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "..\NOTICE";                  DestDir: "{app}"; DestName: "NOTICE.txt"; Flags: ignoreversion
 Source: "..\THIRD-PARTY-NOTICES.md";  DestDir: "{app}"; Flags: ignoreversion
 Source: "..\ffmpeg\LICENSE.txt";      DestDir: "{app}"; DestName: "LICENSE-ffmpeg.txt"; Flags: ignoreversion
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 neoHaDe
+
 // Журнал плагина.
 //
 // Внутри Premiere отладчик подключать неудобно, а любой отказ импортёра выглядит

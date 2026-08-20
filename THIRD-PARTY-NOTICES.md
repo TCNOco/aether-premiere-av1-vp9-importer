@@ -1,10 +1,12 @@
 # Third-party notices / Сторонние компоненты
 
-The MIT licence in [LICENSE](LICENSE) covers **only the source code in this
-repository**. It does not, and cannot, cover the third-party components below.
+The Apache License 2.0 in [LICENSE](LICENSE), together with [NOTICE](NOTICE),
+covers **only the source code in this repository**. It does not, and cannot, cover
+the third-party components below.
 
-Лицензия MIT в [LICENSE](LICENSE) распространяется **только на исходный код этого
-репозитория** и не покрывает перечисленные ниже сторонние компоненты.
+Лицензия Apache 2.0 в [LICENSE](LICENSE) вместе с [NOTICE](NOTICE) распространяется
+**только на исходный код этого репозитория** и не покрывает перечисленные ниже
+сторонние компоненты.
 
 ---
 
@@ -96,6 +98,12 @@ For an open-source plug-in the practical exposure is far lower than for a large
 commercial product, but it is not zero — particularly for heavy commercial use.
 **None of this is legal advice.** If you ship this in a commercial product, get
 your own.
+
+Apache 2.0 changes one part of this and not the other. Section 3 gives you an
+express patent licence **from this project's contributors**, and revokes it for
+anyone who sues the project over patent infringement. That is worth having, but it
+covers only patents its contributors hold — and they hold none of the codec patents
+that matter here. Against a third-party claim like Dolby's it does nothing.
 
 AV1 объявлен Alliance for Open Media бесплатным от отчислений по их Patent License
 1.0, но это покрывает только патенты участников AOMedia — претензии третьих сторон

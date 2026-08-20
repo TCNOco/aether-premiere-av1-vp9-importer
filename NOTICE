@@ -1,0 +1,12 @@
+AV1 / VP9 Importer for Adobe Premiere Pro
+Copyright 2026 neoHaDe
+
+This product includes software developed by neoHaDe
+(https://github.com/neoHaDe/premiere-av1-importer),
+licensed under the Apache License, Version 2.0.
+
+The Apache License covers this project's own source code only. The plug-in is
+built against the Adobe Premiere Pro C++ SDK (not redistributed here) and links
+dynamically against FFmpeg, which is licensed under the GNU Lesser General
+Public License version 3 or later. Neither is covered by the Apache License.
+See THIRD-PARTY-NOTICES.md for the full statement.

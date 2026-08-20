@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 neoHaDe
+
 // Слой декодирования AV1 поверх ffmpeg.
 //
 // Намеренно ничего не знает про Adobe SDK: его можно собрать и проверить обычной
