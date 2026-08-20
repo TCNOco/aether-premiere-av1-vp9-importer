@@ -17,10 +17,15 @@
 #include <windows.h>
 
 #include "AV1Log.h"
+#include "AV1Settings.h"
 
 namespace {
 
 HMODULE g_selfModule = nullptr;
+
+// Путь к папке плагина со слэшем на конце. Считается один раз при загрузке:
+// рядом лежат и библиотеки ffmpeg, и файл настроек.
+wchar_t g_pluginDir[MAX_PATH] = {};
 
 // Порядок важен ровно настолько, насколько мы хотим понятных ошибок:
 // зависимости всё равно подтянутся сами благодаря LOAD_WITH_ALTERED_SEARCH_PATH
@@ -34,13 +39,8 @@ const wchar_t* kFFmpegModules[] = {
 
 void PreloadFFmpeg()
 {
-    wchar_t dir[MAX_PATH] = {};
-    if (GetModuleFileNameW(g_selfModule, dir, MAX_PATH) == 0) return;
-
-    // Обрезаем имя файла, оставляя путь к папке плагина
-    wchar_t* lastSlash = wcsrchr(dir, L'\\');
-    if (!lastSlash) return;
-    *(lastSlash + 1) = 0;
+    const wchar_t* dir = g_pluginDir;
+    if (dir[0] == 0) return;
 
     for (const wchar_t* name : kFFmpegModules) {
         wchar_t full[MAX_PATH] = {};
@@ -59,11 +59,26 @@ void PreloadFFmpeg()
 
 } // namespace
 
+namespace av1imp {
+
+const wchar_t* PluginDirectory() { return g_pluginDir; }
+
+} // namespace av1imp
+
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH) {
         g_selfModule = module;
         DisableThreadLibraryCalls(module);
+
+        // Путь считаем первым делом: от него зависит и загрузка ffmpeg,
+        // и чтение настроек
+        if (GetModuleFileNameW(module, g_pluginDir, MAX_PATH) != 0) {
+            wchar_t* lastSlash = wcsrchr(g_pluginDir, L'\\');
+            if (lastSlash) *(lastSlash + 1) = 0;
+            else g_pluginDir[0] = 0;
+        }
+
         av1imp::LogReset();
         av1imp::Log("plug-in loaded into process");
         PreloadFFmpeg();

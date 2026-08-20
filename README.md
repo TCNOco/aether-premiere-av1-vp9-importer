@@ -24,14 +24,14 @@ if your source footage comes from the web, where it is what you are usually give
 
 To remove it, use *Apps & features* or the uninstaller in the plug-in folder.
 
-**Requirements:** Windows x64, Adobe Premiere Pro 2025 (25.x). Hardware decoding
-needs a GPU that supports the codec (AV1 needs NVIDIA RTX 30 or newer); without one
-the plug-in falls back to the CPU decoder automatically.
+**Requirements:** Windows x64, Adobe Premiere Pro 2025 (25.x). Nothing else — the
+plug-in decodes on the CPU when no supported GPU is present, and on this hardware
+that path is in fact the faster one.
 
 ## What works
 
-- **AV1 and VP9** video on the timeline, hardware-decoded where available
-  (`av1_cuvid` / `vp9_cuvid` on NVIDIA, with Intel and AMD paths present but untested)
+- **AV1 and VP9** video on the timeline, decoded on the GPU or the CPU — see the
+  measurements below, the answer is not the obvious one
 - **Multi-track audio kept separate** — OBS writes microphone, game, Discord and
   music as distinct streams, and they arrive as distinct tracks
 - Scrubbing, seeking and export
@@ -47,17 +47,53 @@ either.
 
 ## Performance
 
-Measured on 2560x1440@60, RTX 5080 (VP9 lands within a few per cent of AV1):
+Measured on an RTX 5080 with a 16-thread CPU; VP9 lands within a few per cent of AV1.
+
+### Hardware decoding is not the win you would expect
+
+Per frame, sequential playback:
+
+| 2560x1440@60 | Total | Decode | GPU→RAM | Colour |
+|---|---|---|---|---|
+| `av1_cuvid` (GPU) | 7.7 ms — 130 fps | 0.13 ms | **3.4 ms** | **4.2 ms** |
+| `libdav1d` (CPU) | 1.25 ms — **800 fps** | 0.55 ms | — | 0.7 ms |
+
+| 3840x2160@60 | Total | Decode | GPU→RAM | Colour |
+|---|---|---|---|---|
+| `av1_cuvid` (GPU) | 13 ms — 77 fps | 0.14 ms | 3.4 ms | 9.5 ms |
+| `libdav1d` (CPU) | 3.4 ms — **291 fps** | 0.63 ms | — | 2.8 ms |
+
+The software decoder is several times faster end to end, and the reason is
+structural: Premiere needs frames in system memory, so hardware decoding must pay
+for a copy out of VRAM that software decoding never makes. Decoding itself is
+negligible either way — under a millisecond.
+
+Two caveats before reading too much into this. The measurement is one machine with
+a strong CPU; on a weak one dav1d would lose. And a benchmark has the machine to
+itself, whereas a real edit has Premiere competing for the same cores. Both paths
+are far above the 60 fps playback needs, so for most work the difference is not
+visible — switch with the setting below and judge on your own footage.
+
+### Seeking
 
 | | |
 |---|---|
-| Sequential playback | 4 ms/frame — **250 fps**, four times faster than real time |
-| Step backwards | 5.9 ms/frame (71 ms without the frame cache) |
+| Step backwards | 5.6 ms/frame (71 ms without the frame cache) |
 | Random seek | 75 ms — one keyframe interval, inherent to the codec |
 
-Of those 4 ms, decoding takes 0.08 ms; the rest is moving the frame out of GPU
-memory and converting colour. In other words the GPU is not the bottleneck, and
-there is little left worth optimising.
+## Settings
+
+The plug-in has no settings dialog. To turn hardware decoding off — worth trying if
+the GPU driver misbehaves, or simply because software may be faster — put a file
+named `AV1Importer.ini` next to the plug-in:
+
+```ini
+hardware=0
+```
+
+Or set the environment variable `AV1IMPORTER_HARDWARE=0`, which overrides the file.
+Either way the choice is recorded in the log. The plug-in folder is
+`C:\Program Files\Adobe\Common\Plug-ins.0\MediaCore\AV1 Importer\`.
 
 ## Building from source
 

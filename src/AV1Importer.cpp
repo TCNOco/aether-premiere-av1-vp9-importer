@@ -7,6 +7,7 @@
 
 #include "AV1Importer.h"
 #include "AV1Log.h"
+#include "AV1Settings.h"
 
 #include <string>
 
@@ -54,7 +55,7 @@ bool EnsureDecoder(ImporterLocalRecPtr ldata)
     // Кадры отдаёт только поток 0; остальным нужен лишь звук, и декодер
     // на видеокарте им создавать незачем
     const bool needVideo = (ldata->streamIdx == 0);
-    return ldata->decoder->Open(path, /*preferHardware=*/true, needVideo);
+    return ldata->decoder->Open(path, av1imp::HardwareDecodingEnabled(), needVideo);
 }
 
 // Дорожка звука открывается по требованию: Premiere спрашивает отсчёты

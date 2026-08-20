@@ -99,11 +99,13 @@
     <ClCompile Include="AV1Importer.cpp" />
     <ClCompile Include="AV1Decoder.cpp" />
     <ClCompile Include="AV1Runtime.cpp" />
+    <ClCompile Include="AV1Settings.cpp" />
     <ClCompile Include="AV1Log.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AV1Importer.h" />
     <ClInclude Include="AV1Decoder.h" />
+    <ClInclude Include="AV1Settings.h" />
     <ClInclude Include="AV1Log.h" />
   </ItemGroup>
   <ItemGroup>

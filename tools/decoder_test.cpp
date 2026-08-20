@@ -64,7 +64,7 @@ bool SaveBMP(const char* path, const uint8_t* bgra, int w, int h, int stride)
 // The cache is filled only while scrubbing backwards, so we drive that motion
 // and compare against a second decoder that has no history at all.
 void CheckCacheMatchesFreshDecode(av1imp::Decoder& dec, const std::string& path,
-                                  const av1imp::MediaInfo& info)
+                                  const av1imp::MediaInfo& info, bool hardware)
 {
     if (info.frameCount < 400) {
         printf("  %-46s SKIP (clip too short)\n", "cached frame == freshly decoded frame");
@@ -81,7 +81,7 @@ void CheckCacheMatchesFreshDecode(av1imp::Decoder& dec, const std::string& path,
     const bool gotCached = dec.GetFrameBGRA(290, cached.data(), stride, 0, 0);
 
     av1imp::Decoder clean;
-    const bool opened = clean.Open(path, true);
+    const bool opened = clean.Open(path, hardware);
     const bool gotFresh = opened && clean.GetFrameBGRA(290, fresh.data(), stride, 0, 0);
 
     Check(gotCached && gotFresh && cached == fresh,
@@ -150,15 +150,24 @@ void CheckAudioIsRepeatable(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 int main(int argc, char** argv)
 {
     if (argc < 2) {
-        printf("Usage: decoder_test <file> [frame]\n");
+        printf("Usage: decoder_test <file> [frame] [--sw]\n");
+        printf("  --sw  force the software decoder, as the plug-in does when\n");
+        printf("        hardware decoding is switched off in its settings\n");
         return 1;
     }
 
-    const std::string path = argv[1];
-    const int64_t wanted = (argc > 2) ? _atoi64(argv[2]) : 0;
+    std::string path;
+    int64_t wanted = 0;
+    bool preferHardware = true;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--sw")      preferHardware = false;
+        else if (path.empty())  path = arg;
+        else                    wanted = _atoi64(arg.c_str());
+    }
 
     av1imp::Decoder dec;
-    if (!dec.Open(path, /*preferHardware=*/true)) {
+    if (!dec.Open(path, preferHardware)) {
         printf("OPEN FAILED: %s\n", dec.LastError().c_str());
         return 2;
     }
@@ -281,7 +290,7 @@ int main(int argc, char** argv)
     // --- checks ---
     printf("\nchecks:\n");
     CheckReducedSizeStaysInBuffer(dec, info);
-    CheckCacheMatchesFreshDecode(dec, path, info);
+    CheckCacheMatchesFreshDecode(dec, path, info, preferHardware);
     CheckAudioIsRepeatable(dec, info);
 
     printf("\n%s\n", g_failures == 0 ? "ALL CHECKS PASSED"
