@@ -24,6 +24,7 @@
 #include "PrSDKPPixCacheSuite.h"
 #include "PrSDKPPixSuite.h"
 #include "PrSDKTimeSuite.h"
+#include "PrSDKAppInfoSuite.h"
 #include "PrSDKMemoryManagerSuite.h"
 #include "PrSDKAudioSuite.h"
 
@@ -61,6 +62,11 @@ typedef struct
     PrSDKPPixCacheSuite*    PPixCacheSuite;
     PrSDKPPixSuite*         PPixSuite;
     PrSDKTimeSuite*         TimeSuite;
+
+    // Версия набора кэша, которую согласился отдать хост. Заголовки SDK знают
+    // восьмую, но Premiere постарше отдаёт седьмую и ниже, а отдавать набор
+    // положено ровно той версией, какой брали.
+    csSDK_int32             PPixCacheSuiteVersion;
 } ImporterLocalRec, *ImporterLocalRecPtr, **ImporterLocalRecH;
 
 extern "C" {

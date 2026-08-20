@@ -70,6 +70,59 @@ bool EnsureAudio(ImporterLocalRecPtr ldata)
     return ldata->decoder->OpenAudio(ldata->audioTrack);
 }
 
+// Хост может знать набор функций не той версии, что заголовки SDK. Adobe новые
+// функции дописывает в конец набора, поэтому берём самую свежую из тех, что хост
+// согласен отдать, а пользуемся только давно существующими. Без этого плагин,
+// собранный по свежему SDK, молча остаётся без кэша кадров на Premiere постарше.
+template <typename T>
+csSDK_int32 AcquireNewest(SPBasicSuite* basic, const char* name,
+                          csSDK_int32 newest, T** out)
+{
+    *out = nullptr;
+    for (csSDK_int32 version = newest; version >= 1; --version) {
+        if (basic->AcquireSuite(name, version, (const void**)out) == kSPNoError && *out) {
+            return version;
+        }
+        *out = nullptr;
+    }
+    return 0;
+}
+
+// Плагин лежит в общей папке MediaCore, а значит попадает разом во все
+// установленные приложения Adobe и во все их версии. Что именно нас загрузило —
+// первое, что нужно знать по чужому журналу.
+void LogHost(imStdParms* stdParms)
+{
+    av1imp::Log("host: import interface version %d (SDK headers know %d)",
+                stdParms->imInterfaceVer, IMPORTMOD_VERSION);
+
+    if (!stdParms->piSuites || !stdParms->piSuites->utilFuncs) return;
+    SPBasicSuite* basic = stdParms->piSuites->utilFuncs->getSPBasicSuite();
+    if (!basic) return;
+
+    PrSDKAppInfoSuite* appInfo = nullptr;
+    const csSDK_int32 version = AcquireNewest(basic, kPrSDKAppInfoSuite,
+                                              kPrSDKAppInfoSuiteVersion, &appInfo);
+    if (!version) {
+        av1imp::Log("host: app info suite unavailable");
+        return;
+    }
+
+    csSDK_uint32 fourCC = 0;
+    VersionInfo appVersion = {};
+    appInfo->GetAppInfo(PrSDKAppInfoSuite::kAppInfo_AppFourCC, &fourCC);
+    appInfo->GetAppInfo(PrSDKAppInfoSuite::kAppInfo_Version, &appVersion);
+
+    const char name[5] = { static_cast<char>((fourCC >> 24) & 0xFF),
+                           static_cast<char>((fourCC >> 16) & 0xFF),
+                           static_cast<char>((fourCC >> 8)  & 0xFF),
+                           static_cast<char>(fourCC & 0xFF), 0 };
+    av1imp::Log("host: %s %u.%u.%u", name,
+                appVersion.major, appVersion.minor, appVersion.patch);
+
+    basic->ReleaseSuite(kPrSDKAppInfoSuite, version);
+}
+
 ImporterLocalRecH AllocLocalRec(imStdParms* stdParms, void** privateData)
 {
     if (*privateData) {
@@ -111,6 +164,7 @@ static prMALError AV1Init(imStdParms* stdParms, imImportInfoRec* importInfo)
     importInfo->priority        = 100;
 
     av1imp::Log("imInit: priority %d", importInfo->priority);
+    LogHost(stdParms);
     return imIsCacheable;
 }
 
@@ -225,7 +279,9 @@ static prMALError AV1CloseFile(imStdParms* stdParms, imFileRef* fileRef, void* p
     }
     if (ldata->BasicSuite) {
         ldata->BasicSuite->ReleaseSuite(kPrSDKPPixCreatorSuite, kPrSDKPPixCreatorSuiteVersion);
-        ldata->BasicSuite->ReleaseSuite(kPrSDKPPixCacheSuite,   kPrSDKPPixCacheSuiteVersion);
+        if (ldata->PPixCacheSuiteVersion) {
+            ldata->BasicSuite->ReleaseSuite(kPrSDKPPixCacheSuite, ldata->PPixCacheSuiteVersion);
+        }
         ldata->BasicSuite->ReleaseSuite(kPrSDKPPixSuite,        kPrSDKPPixSuiteVersion);
         ldata->BasicSuite->ReleaseSuite(kPrSDKTimeSuite,        kPrSDKTimeSuiteVersion);
         ldata->BasicSuite = nullptr;
@@ -280,14 +336,23 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
         ldata->BasicSuite = stdParms->piSuites->utilFuncs->getSPBasicSuite();
     }
     if (ldata->BasicSuite && !ldata->PPixSuite) {
+        // Эти три набора первой версии и есть во всех Premiere, где плагины
+        // вообще живут
         ldata->BasicSuite->AcquireSuite(kPrSDKPPixCreatorSuite, kPrSDKPPixCreatorSuiteVersion,
                                         (const void**)&ldata->PPixCreatorSuite);
-        ldata->BasicSuite->AcquireSuite(kPrSDKPPixCacheSuite, kPrSDKPPixCacheSuiteVersion,
-                                        (const void**)&ldata->PPixCacheSuite);
         ldata->BasicSuite->AcquireSuite(kPrSDKPPixSuite, kPrSDKPPixSuiteVersion,
                                         (const void**)&ldata->PPixSuite);
         ldata->BasicSuite->AcquireSuite(kPrSDKTimeSuite, kPrSDKTimeSuiteVersion,
                                         (const void**)&ldata->TimeSuite);
+
+        // А вот кэш кадров дорос до восьмой версии, и просить восьмую у Premiere
+        // 2019 бессмысленно: набор не выдадут вовсе. Нужны нам только две первые
+        // функции набора, а они есть с самой первой версии.
+        ldata->PPixCacheSuiteVersion =
+            AcquireNewest(ldata->BasicSuite, kPrSDKPPixCacheSuite,
+                          kPrSDKPPixCacheSuiteVersion, &ldata->PPixCacheSuite);
+        av1imp::Log("suites: frame cache version %d%s", ldata->PPixCacheSuiteVersion,
+                    ldata->PPixCacheSuiteVersion ? "" : " - working without it");
     }
 
     // Какой поток спрашивают. Поток 0 — видео плюс первая дорожка звука,
@@ -439,7 +504,7 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
     if (!ldataH) return imOtherErr;
 
     ImporterLocalRecPtr ldata = *ldataH;
-    if (!ldata->PPixSuite || !ldata->PPixCreatorSuite || !ldata->PPixCacheSuite) {
+    if (!ldata->PPixSuite || !ldata->PPixCreatorSuite) {
         return imOtherErr;  // imGetInfo8 не отработал: наборов функций нет
     }
     if (!EnsureDecoder(ldata)) return imBadFile;
@@ -452,11 +517,16 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
 
     // Если кадр уже разбирали — Premiere вернёт его из своего кэша,
     // и на перемотке туда-сюда мы не декодируем одно и то же дважды
-    prMALError result = ldata->PPixCacheSuite->GetFrameFromCache(
-        ldata->importerID, 0, frameIndex, 1,
-        videoRec->inFrameFormats, videoRec->outFrame, nullptr, 0);
+    // Кэш кадров самого Premiere — не обязательное условие: без него мы просто
+    // распаковываем заново, опираясь на собственный кэш в декодере
+    prMALError result = imOtherErr;
+    if (ldata->PPixCacheSuite) {
+        result = ldata->PPixCacheSuite->GetFrameFromCache(
+            ldata->importerID, 0, frameIndex, 1,
+            videoRec->inFrameFormats, videoRec->outFrame, nullptr, 0);
 
-    if (result == suiteError_NoError) return result;
+        if (result == suiteError_NoError) return result;
+    }
 
     // Ноль означает «любой размер» — тогда отдаём как в файле. Ненулевой размер
     // Premiere просит при пониженном качестве воспроизведения, и кадр надо
@@ -494,8 +564,10 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
                     format->inFrameWidth, format->inFrameHeight, rowBytes);
     }
 
-    ldata->PPixCacheSuite->AddFrameToCache(ldata->importerID, 0, *videoRec->outFrame,
-                                           frameIndex, nullptr, 0);
+    if (ldata->PPixCacheSuite) {
+        ldata->PPixCacheSuite->AddFrameToCache(ldata->importerID, 0, *videoRec->outFrame,
+                                               frameIndex, nullptr, 0);
+    }
     return malNoError;
 }
 
@@ -552,14 +624,14 @@ PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
                                        reinterpret_cast<imSourceVideoRec*>(param2));
             break;
 
-        // Рукопожатие: плагин объявляет, какой версией интерфейса владеет.
-        // Без ответа Premiere считает импортёр устаревшим и не спрашивает у него
-        // ни формат пикселей, ни кадры — просто прочитает сведения о файле и уйдёт.
         case imImportAudio7:
             result = AV1ImportAudio7(stdParms, reinterpret_cast<imFileRef>(param1),
                                      reinterpret_cast<imImportAudioRec7*>(param2));
             break;
 
+        // Рукопожатие: плагин объявляет, какой версией интерфейса владеет.
+        // Без ответа Premiere считает импортёр устаревшим и не спрашивает у него
+        // ни формат пикселей, ни кадры — просто прочитает сведения о файле и уйдёт.
         case imGetSupports7:
             result = malSupports7;
             break;

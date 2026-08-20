@@ -24,9 +24,14 @@ if your source footage comes from the web, where it is what you are usually give
 
 To remove it, use *Apps & features* or the uninstaller in the plug-in folder.
 
-**Requirements:** Windows x64, Adobe Premiere Pro 2025 (25.x). Nothing else — the
-plug-in decodes on the CPU when no supported GPU is present, and on this hardware
-that path is in fact the faster one.
+**Requirements:** Windows x64 and Adobe Premiere Pro. Tested on 25.x only. The
+importer interface last changed in Premiere 23.2, and the plug-in asks the host for
+whichever suite versions it actually has, so 2023 and later ought to work — ought
+to, because nothing older than 25.x has been tried. Whatever it loads into is
+written to the log, so a report can say which version was involved.
+
+Nothing else is needed: with no supported GPU the plug-in decodes on the CPU, and
+on this hardware that path is the faster one anyway.
 
 ## What works
 

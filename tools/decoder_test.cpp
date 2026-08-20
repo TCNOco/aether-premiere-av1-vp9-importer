@@ -132,7 +132,16 @@ void CheckAudioIsRepeatable(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 
     const int ch = info.audioChannels;
     const int32_t count = 4800;
-    const int64_t at = (int64_t)info.audioSampleRate * 5;
+
+    // Positions come from the clip, not from a fixed number of seconds. With
+    // 5 and 15 seconds hard-coded, a short test file read past its own end and
+    // the check reported a failure that was nothing but the end of the file.
+    if (info.audioSampleCount < (int64_t)count * 4) {
+        printf("  %-46s SKIP (clip too short)\n", "same audio range reads identically");
+        return;
+    }
+    const int64_t at   = info.audioSampleCount / 4;
+    const int64_t away = info.audioSampleCount * 3 / 4;
 
     std::vector<std::vector<float>> a(ch, std::vector<float>(count));
     std::vector<std::vector<float>> b(ch, std::vector<float>(count));
@@ -142,10 +151,48 @@ void CheckAudioIsRepeatable(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
     for (int c = 0; c < ch; ++c) { pa[c] = a[c].data(); pb[c] = b[c].data(); ps[c] = scratch[c].data(); }
 
     const bool first = dec.GetAudio(at, count, pa.data());
-    dec.GetAudio((int64_t)info.audioSampleRate * 15, count, ps.data());  // force a seek away
+    dec.GetAudio(away, count, ps.data());   // force a seek away
     const bool again = dec.GetAudio(at, count, pb.data());
 
-    Check(first && again && a == b, "same audio range reads identically");
+    // Bit equality is the wrong thing to demand, and finding that out took an
+    // experiment. Decoding a range straight through and decoding it again after
+    // a seek differ in the first ~192 samples, by up to 0.005. That is not our
+    // doing: plain ffmpeg on the same file, once with -ss before the input and
+    // once after, differs in exactly the same 192 samples by 0.0055. An AAC
+    // decoder restarted mid-stream simply needs a few frames to settle, and no
+    // amount of pre-roll removes it - two seconds of pre-roll changed nothing.
+    //
+    // So what is checked is the shape of the difference, which separates the
+    // two cases cleanly: settling noise stays inside the first AAC frame and
+    // everything after it matches bit for bit, whereas the bug this check was
+    // written for - a seek landing on the wrong range - moves every sample.
+    const int   kSettling     = 1024;    // one AAC frame
+    const float kSettlingMax  = 0.02f;   // about -34 dBFS, well above the 0.005 seen
+
+    int   settled  = 0;          // samples that differ past the settling window
+    float worst    = 0.0f;       // largest difference inside it
+    int   firstAt  = -1;
+    int   lastAt   = -1;
+    for (int c = 0; c < ch; ++c) {
+        for (int i = 0; i < count; ++i) {
+            const float diff = a[c][i] - b[c][i];
+            const float mag  = diff < 0 ? -diff : diff;
+            if (mag == 0.0f) continue;
+
+            if (firstAt < 0) firstAt = i;
+            lastAt = i;
+            if (i >= kSettling) ++settled;
+            else if (mag > worst) worst = mag;
+        }
+    }
+
+    Check(first && again && settled == 0 && worst <= kSettlingMax,
+          "same audio range reads identically");
+
+    if (firstAt >= 0) {
+        printf("      settling after the seek: positions %d..%d, up to %.6f"
+               " (%d past the first AAC frame)\n", firstAt, lastAt, worst, settled);
+    }
 }
 
 } // namespace
@@ -267,7 +314,9 @@ int main(int argc, char** argv)
 
         // Read from the 10 s mark: the start of a recording is often quiet, and
         // a quiet start cannot be told apart from an empty track
-        const int64_t start = (int64_t)info.audioSampleRate * 10;
+        // A third of the way in: far enough from the start to be representative,
+        // and inside the file however short it is
+        const int64_t start = info.audioSampleCount / 3;
         if (!dec.GetAudio(start, want, ptrs.data())) {
             printf("  track %d: FAILED - %s\n", track, dec.LastError().c_str());
             continue;
