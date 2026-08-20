@@ -106,7 +106,7 @@ static prMALError AV1Init(imStdParms* stdParms, imImportInfoRec* importInfo)
     // их будет всё тот же штатный импортёр.
     importInfo->priority        = 100;
 
-    av1imp::Log("imInit: приоритет %d", importInfo->priority);
+    av1imp::Log("imInit: priority %d", importInfo->priority);
     return imIsCacheable;
 }
 
@@ -147,8 +147,10 @@ static prMALError AV1OpenFile8(imStdParms* stdParms, imFileRef* fileRef,
     ImporterLocalRecPtr ldata = *ldataH;
     CopyUtf16(ldata->filePath, 2048, openRec->fileinfo.filepath);
 
+    // См. раскладку в AV1GetInfo8: поток 0 несёт видео и дорожку звука 0,
+    // потоки 1..N — только звук соответствующей дорожки
     ldata->streamIdx  = openRec->inStreamIdx;
-    ldata->audioTrack = openRec->inStreamIdx;   // поток N обслуживает дорожку N
+    ldata->audioTrack = openRec->inStreamIdx;
 
     // Дескриптор нужен самому Premiere; читаем мы через ffmpeg, поэтому
     // открываем на чтение и разрешаем параллельное чтение другим.
@@ -164,13 +166,13 @@ static prMALError AV1OpenFile8(imStdParms* stdParms, imFileRef* fileRef,
     // Главная проверка: файл наш, только если внутри действительно AV1.
     // Иначе честно отдаём его обратно — Premiere передаст штатному импортёру.
     if (!EnsureDecoder(ldata)) {
-        av1imp::Log("imOpenFile8: отказ — %s",
-                    ldata->decoder ? ldata->decoder->LastError().c_str() : "нет декодера");
+        av1imp::Log("imOpenFile8: refused - %s",
+                    ldata->decoder ? ldata->decoder->LastError().c_str() : "no decoder");
         CloseHandle(ldata->fileRef);
         ldata->fileRef = imInvalidHandleValue;
         return imBadFile;
     }
-    av1imp::Log("imOpenFile8: принят, %dx%d, декодер %s",
+    av1imp::Log("imOpenFile8: accepted, %dx%d, decoder %s",
                 ldata->decoder->Info().width, ldata->decoder->Info().height,
                 ldata->decoder->Info().decoderName.c_str());
 
@@ -188,7 +190,7 @@ static prMALError AV1QuietFile(imStdParms* stdParms, imFileRef* fileRef, void* p
     if (!ldataH) return malNoError;
 
     ImporterLocalRecPtr ldata = *ldataH;
-    av1imp::Log("imQuietFile: поток %d", ldata->streamIdx);
+    av1imp::Log("imQuietFile: stream %d", ldata->streamIdx);
     if (ldata->decoder) {
         ldata->decoder->Close();  // сам объект оставляем: путь известен, откроемся заново
     }
@@ -206,7 +208,7 @@ static prMALError AV1CloseFile(imStdParms* stdParms, imFileRef* fileRef, void* p
     if (!ldataH) return malNoError;
 
     ImporterLocalRecPtr ldata = *ldataH;
-    av1imp::Log("imCloseFile: поток %d", ldata->streamIdx);
+    av1imp::Log("imCloseFile: stream %d", ldata->streamIdx);
 
     if (ldata->decoder) {
         delete ldata->decoder;
@@ -245,17 +247,20 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
         CopyUtf16(ldata->filePath, 2048, fileAccess->filepath);
     }
 
-    av1imp::Log("imGetInfo8: спрашивают про %S (поток %d)",
+    av1imp::Log("imGetInfo8: asked about %S (stream %d)",
                 ldata->filePath, fileInfo->streamIdx);
 
     // Записать номер потока нужно до открытия: от него зависит,
     // создавать ли декодер кадров
+    // Раскладка потоков, явно: поток 0 = видео + дорожка звука 0,
+    // потоки 1..N = только дорожка звука N. Номер дорожки совпадает с номером
+    // потока не случайно, а по этому правилу.
     ldata->streamIdx  = fileInfo->streamIdx;
     ldata->audioTrack = fileInfo->streamIdx;
 
     if (!EnsureDecoder(ldata)) {
-        av1imp::Log("imGetInfo8: отказ — %s",
-                    ldata->decoder ? ldata->decoder->LastError().c_str() : "нет декодера");
+        av1imp::Log("imGetInfo8: refused - %s",
+                    ldata->decoder ? ldata->decoder->LastError().c_str() : "no decoder");
         stdParms->piSuites->memFuncs->unlockHandle(reinterpret_cast<char**>(ldataH));
         return imBadFile;
     }
@@ -305,7 +310,7 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     }
 
     if (!fileInfo->hasVideo) {
-        av1imp::Log("imGetInfo8: поток %d — только звук, %d кан",
+        av1imp::Log("imGetInfo8: stream %d is audio only, %d ch",
                     fileInfo->streamIdx, mi.audioChannels);
         stdParms->piSuites->memFuncs->unlockHandle(reinterpret_cast<char**>(ldataH));
         // Есть ли ещё дорожки после этой
@@ -348,7 +353,7 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
         ldata->ticksPerFrame = ticksPerSecond * mi.fpsDen / mi.fpsNum;
     }
 
-    av1imp::Log("imGetInfo8: %dx%d, %d/%d кадр/с, %lld кадров, тип сжатия RAW",
+    av1imp::Log("imGetInfo8: %dx%d, %d/%d fps, %lld frames, subType RAW",
                 mi.width, mi.height, fileInfo->vidScale, fileInfo->vidSampleSize,
                 (long long)mi.frameCount);
 
@@ -371,22 +376,22 @@ static prMALError AV1ImportAudio7(imStdParms* stdParms, imFileRef fileRef,
 
     ImporterLocalRecPtr ldata = *ldataH;
     if (!EnsureDecoder(ldata) || !EnsureAudio(ldata)) {
-        av1imp::Log("imImportAudio7: звук недоступен — %s",
-                    ldata->decoder ? ldata->decoder->LastError().c_str() : "нет декодера");
+        av1imp::Log("imImportAudio7: audio unavailable - %s",
+                    ldata->decoder ? ldata->decoder->LastError().c_str() : "no decoder");
         return imFileReadFailed;
     }
 
     if (!ldata->decoder->GetAudio(audioRec->position,
                                   static_cast<int32_t>(audioRec->size),
                                   audioRec->buffer)) {
-        av1imp::Log("звук с %lld: ОШИБКА — %s", (long long)audioRec->position,
+        av1imp::Log("audio at %lld: FAILED - %s", (long long)audioRec->position,
                     ldata->decoder->LastError().c_str());
         return imFileReadFailed;
     }
 
     // Пишем каждый запрос: конформирование читает дорожку целиком, и по этим
     // строкам видно, на каком месте оно оборвалось, если оборвалось
-    av1imp::Log("звук: дорожка %d, с %lld, %u отсчётов",
+    av1imp::Log("audio: track %d, from %lld, %u samples",
                 ldata->audioTrack, (long long)audioRec->position, audioRec->size);
     return malNoError;
 }
@@ -447,11 +452,12 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
 
     if (result == suiteError_NoError) return result;
 
+    // Ноль означает «любой размер» — тогда отдаём как в файле. Ненулевой размер
+    // Premiere просит при пониженном качестве воспроизведения, и кадр надо
+    // масштабировать под него: буфер создаётся именно такой.
     imFrameFormat* format = &videoRec->inFrameFormats[0];
-    if (format->inFrameWidth == 0 && format->inFrameHeight == 0) {
-        format->inFrameWidth  = mi.width;
-        format->inFrameHeight = mi.height;
-    }
+    if (format->inFrameWidth <= 0)  format->inFrameWidth  = mi.width;
+    if (format->inFrameHeight <= 0) format->inFrameHeight = mi.height;
 
     prRect rect;
     prSetRect(&rect, 0, 0, format->inFrameWidth, format->inFrameHeight);
@@ -472,12 +478,13 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
     uint8_t* lastRow = reinterpret_cast<uint8_t*>(buffer)
                      + static_cast<size_t>(format->inFrameHeight - 1) * rowBytes;
 
-    if (!ldata->decoder->GetFrameBGRA(frameIndex, lastRow, -rowBytes)) {
-        av1imp::Log("кадр %d: ОШИБКА — %s", frameIndex, ldata->decoder->LastError().c_str());
+    if (!ldata->decoder->GetFrameBGRA(frameIndex, lastRow, -rowBytes,
+                                      format->inFrameWidth, format->inFrameHeight)) {
+        av1imp::Log("frame %d: FAILED - %s", frameIndex, ldata->decoder->LastError().c_str());
         return imFileReadFailed;
     }
     if (frameIndex < 3) {
-        av1imp::Log("кадр %d выдан (%dx%d, шаг %d)", frameIndex,
+        av1imp::Log("frame %d delivered (%dx%d, stride %d)", frameIndex,
                     format->inFrameWidth, format->inFrameHeight, rowBytes);
     }
 
@@ -567,6 +574,6 @@ PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
     // Пишем ВСЕ запросы, включая отвергнутые. Первая версия журнала их прятала
     // ради чистоты — и спрятала как раз то, что нужно: отказ на нужном запросе
     // выглядит для Premiere так же, как отсутствие плагина.
-    av1imp::Log("  запрос %s -> %d", av1imp::SelectorName(selector), result);
+    av1imp::Log("  selector %s -> %d", av1imp::SelectorName(selector), result);
     return result;
 }

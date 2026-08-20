@@ -69,11 +69,17 @@ public:
     const MediaInfo& Info() const { return info_; }
 
     // Выдать кадр по индексу в буфер вызывающего.
-    // Формат — BGRA, 8 бит на канал, строка dstStride байт, начало кадра сверху.
+    // Формат — BGRA, 8 бит на канал, строка dstStride байт.
+    //
+    // dstWidth/dstHeight — размер БУФЕРА, а не файла. Premiere при пониженном
+    // качестве воспроизведения просит уменьшенный кадр, и писать туда полное
+    // разрешение — выход за пределы буфера. Кадр масштабируется под запрос.
+    //
     // Отрицательный dstStride переворачивает кадр по вертикали — так его ждёт
     // Premiere, у которого у 32-битных буферов начало координат внизу слева.
     // Возвращает false, если кадр получить не удалось.
-    bool GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride);
+    bool GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
+                      int dstWidth, int dstHeight);
 
     // Открыть дорожку звука по её номеру среди звуковых (0 — первая).
     // Отдельно от видео: у звука свой разбор контейнера, иначе перемотка
@@ -108,7 +114,7 @@ private:
     void CloseLocked();
     void CloseAudioLocked();
     bool DecodeUntil(int64_t targetFrame);
-    bool ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride);
+    bool ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW, int dstH);
     void StoreInCache(int64_t index, AVFrame* src);
     void ClearCache();
     void SetError(const std::string& msg, int averr = 0);
@@ -119,6 +125,11 @@ private:
     AVFrame*         swFrame_    = nullptr;  // копия в обычной памяти, если декодировала видеокарта
     AVPacket*        packet_     = nullptr;
     SwsContext*      sws_        = nullptr;
+    int              swsSrcW_    = 0;   // с какими параметрами создан пересчётчик
+    int              swsSrcH_    = 0;
+    int              swsSrcFmt_  = -1;
+    int              swsDstW_    = 0;
+    int              swsDstH_    = 0;
     AVBufferRef*     hwDevice_   = nullptr;
 
     int      videoStream_ = -1;
@@ -135,7 +146,7 @@ private:
     // ровно те кадры, которые попросят следующим шагом.
     std::map<int64_t, AVFrame*> frameCache_;
     size_t   cacheBytes_    = 0;
-    size_t   cacheBudget_   = 256u * 1024 * 1024;
+    size_t   cacheBudget_   = 0;    // считается от разрешения, см. Open()
     bool     cacheFill_     = false;
     int64_t  lastRequested_ = -1;
 

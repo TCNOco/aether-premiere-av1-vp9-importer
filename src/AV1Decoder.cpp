@@ -26,7 +26,21 @@ std::string AvErr(int err) {
 
 // Порядок предпочтения декодеров. Аппаратный первым: на видеокарте AV1 1440p60
 // идёт в разы быстрее, а именно от этого зависит, можно ли монтировать без прокси.
-const char* kHardwareDecoders[] = { "av1_cuvid", "av1_qsv", "av1_amf" };
+//
+// Тип устройства обязан соответствовать декодеру. Раньше всем троим подсовывался
+// CUDA — на машине без NVIDIA это просто не создавалось, и qsv/amf оставались
+// без контекста. Проверено только на NVIDIA; остальные пути написаны по документации.
+struct HardwareDecoder {
+    const char*        name;
+    AVHWDeviceType     device;
+};
+
+const HardwareDecoder kHardwareDecoders[] = {
+    { "av1_cuvid", AV_HWDEVICE_TYPE_CUDA    },
+    { "av1_qsv",   AV_HWDEVICE_TYPE_QSV     },
+    { "av1_amf",   AV_HWDEVICE_TYPE_D3D11VA },
+};
+
 const char* kSoftwareDecoders[] = { "libdav1d", "av1" };
 
 } // namespace
@@ -45,20 +59,20 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
 
     int err = avformat_open_input(&fmt_, utf8Path.c_str(), nullptr, nullptr);
     if (err < 0) {
-        SetError("не удалось открыть файл", err);
+        SetError("cannot open file", err);
         return false;
     }
 
     err = avformat_find_stream_info(fmt_, nullptr);
     if (err < 0) {
-        SetError("не удалось прочитать сведения о потоках", err);
+        SetError("cannot read stream info", err);
         CloseLocked();
         return false;
     }
 
     videoStream_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     if (videoStream_ < 0) {
-        SetError("в файле нет видеопотока");
+        SetError("no video stream in file");
         CloseLocked();
         return false;
     }
@@ -68,7 +82,7 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
     // Плагин отвечает только за AV1. Всё остальное отдаём штатным импортёрам Premiere —
     // иначе перехватим форматы, которые он и сам прекрасно открывает.
     if (st->codecpar->codec_id != AV_CODEC_ID_AV1) {
-        SetError("видеопоток не AV1");
+        SetError("video stream is not AV1");
         CloseLocked();
         return false;
     }
@@ -111,10 +125,19 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
     swFrame_ = av_frame_alloc();
     packet_  = av_packet_alloc();
     if (!frame_ || !swFrame_ || !packet_) {
-        SetError("не хватило памяти под буферы кадров");
+        SetError("out of memory for frame buffers");
         CloseLocked();
         return false;
     }
+
+    // Бюджет кэша считаем от разрешения, а не берём константой: кадр 4K весит
+    // вчетверо больше, чем 1440p, и фиксированные 256 МБ вмещали бы уже не
+    // полсекунды видео, а пятую часть. Цель — около секунды при 60 кадрах/с,
+    // с потолком, чтобы не отъедать память у самого монтажа.
+    const size_t bytesPerFrame = (size_t)info_.width * info_.height * 3 / 2;  // NV12
+    const size_t wanted = bytesPerFrame * 60;
+    cacheBudget_ = std::min<size_t>(std::max<size_t>(wanted, 128u * 1024 * 1024),
+                                    512u * 1024 * 1024);
 
     lastDecodedFrame_ = -1;
     eofReached_ = false;
@@ -124,7 +147,8 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
 bool Decoder::OpenCodec(bool preferHardware) {
     AVStream* st = fmt_->streams[videoStream_];
 
-    auto tryDecoder = [&](const char* name, bool hardware) -> bool {
+    auto tryDecoder = [&](const char* name, AVHWDeviceType device) -> bool {
+        const bool hardware = (device != AV_HWDEVICE_TYPE_NONE);
         const AVCodec* dec = avcodec_find_decoder_by_name(name);
         if (!dec) return false;
 
@@ -141,11 +165,14 @@ bool Decoder::OpenCodec(bool preferHardware) {
 
         if (hardware) {
             AVBufferRef* hw = nullptr;
-            // CUDA для NVIDIA; для других вендоров ffmpeg подставит своё через имя декодера
-            if (av_hwdevice_ctx_create(&hw, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0) >= 0) {
-                ctx->hw_device_ctx = av_buffer_ref(hw);
-                av_buffer_unref(&hw);
+            if (av_hwdevice_ctx_create(&hw, device, nullptr, nullptr, 0) < 0) {
+                // Нет такого устройства на этой машине — этот декодер не наш,
+                // пробуем следующий, а не открываем его без контекста
+                avcodec_free_context(&ctx);
+                return false;
             }
+            ctx->hw_device_ctx = av_buffer_ref(hw);
+            av_buffer_unref(&hw);
         }
 
         if (avcodec_open2(ctx, dec, nullptr) < 0) {
@@ -160,15 +187,15 @@ bool Decoder::OpenCodec(bool preferHardware) {
     };
 
     if (preferHardware) {
-        for (const char* name : kHardwareDecoders) {
-            if (tryDecoder(name, true)) return true;
+        for (const HardwareDecoder& hw : kHardwareDecoders) {
+            if (tryDecoder(hw.name, hw.device)) return true;
         }
     }
     for (const char* name : kSoftwareDecoders) {
-        if (tryDecoder(name, false)) return true;
+        if (tryDecoder(name, AV_HWDEVICE_TYPE_NONE)) return true;
     }
 
-    SetError("не нашёлся ни один декодер AV1");
+    SetError("no AV1 decoder available");
     return false;
 }
 
@@ -262,7 +289,7 @@ bool Decoder::DecodeUntil(int64_t targetFrame) {
             ? (int64_t)((targetFrame / info_.fps) / av_q2d(st->time_base))
             : 0;
         if (av_seek_frame(fmt_, videoStream_, ts, AVSEEK_FLAG_BACKWARD) < 0) {
-            SetError("перемотка не удалась");
+            SetError("seek failed");
             return false;
         }
         avcodec_flush_buffers(codec_);
@@ -276,10 +303,21 @@ bool Decoder::DecodeUntil(int64_t targetFrame) {
         if (err == 0) {
             // Номер кадра считаем по метке времени: best_effort_timestamp
             // устойчивее к файлам без счётчика кадров.
-            int64_t pts = frame_->best_effort_timestamp;
-            int64_t idx = lastDecodedFrame_ + 1;
+            const int64_t pts = frame_->best_effort_timestamp;
+            const int64_t sequential = lastDecodedFrame_ + 1;
+
+            int64_t idx = sequential;
             if (pts != AV_NOPTS_VALUE && info_.fps > 0) {
                 idx = (int64_t)(pts * av_q2d(st->time_base) * info_.fps + 0.5);
+
+                // Метка времени — источник точный, но не всегда исправный.
+                // При плавающей частоте кадров или битом тайминге номер может
+                // не двигаться или поехать назад; тогда считаем последовательно.
+                // Условие не трогает нормальный случай и не мешает перемотке:
+                // сразу после неё lastDecodedFrame_ = -1, и метке верим.
+                if (lastDecodedFrame_ >= 0 && idx <= lastDecodedFrame_) {
+                    idx = sequential;
+                }
             }
             lastDecodedFrame_ = idx;
 
@@ -296,7 +334,7 @@ bool Decoder::DecodeUntil(int64_t targetFrame) {
         }
 
         if (err != AVERROR(EAGAIN)) {
-            SetError("ошибка декодирования", err);
+            SetError("decode error", err);
             return false;
         }
 
@@ -308,19 +346,19 @@ bool Decoder::DecodeUntil(int64_t targetFrame) {
             continue;
         }
         if (rerr < 0) {
-            SetError("ошибка чтения файла", rerr);
+            SetError("file read error", rerr);
             return false;
         }
         if (packet_->stream_index != videoStream_) continue;
 
         if (avcodec_send_packet(codec_, packet_) < 0) {
-            SetError("декодер не принял пакет");
+            SetError("decoder rejected packet");
             return false;
         }
     }
 }
 
-bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride) {
+bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW, int dstH) {
     AVFrame* srcFrame = src;
 
     // Если декодировала видеокарта, кадр лежит в её памяти — забираем в обычную
@@ -328,7 +366,7 @@ bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride) {
         const auto t0 = std::chrono::steady_clock::now();
         av_frame_unref(swFrame_);
         if (av_hwframe_transfer_data(swFrame_, src, 0) < 0) {
-            SetError("не удалось забрать кадр из памяти видеокарты");
+            SetError("cannot transfer frame from GPU memory");
             return false;
         }
         srcFrame = swFrame_;
@@ -338,12 +376,18 @@ bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride) {
 
     const auto tConv = std::chrono::steady_clock::now();
 
+    // Размер берём запрошенный, а не размер файла: Premiere при пониженном
+    // качестве воспроизведения создаёт буфер поменьше, и запись туда полного
+    // кадра выходила бы за его пределы.
+    //
+    // SWS_BICUBIC, а не BILINEAR: пока масштабирования не было, флаг ни на что
+    // не влиял, а при уменьшении разница видна.
     sws_ = sws_getCachedContext(sws_,
                                 srcFrame->width, srcFrame->height, (AVPixelFormat)srcFrame->format,
-                                info_.width, info_.height, AV_PIX_FMT_BGRA,
-                                SWS_BILINEAR, nullptr, nullptr, nullptr);
+                                dstW, dstH, AV_PIX_FMT_BGRA,
+                                SWS_BICUBIC, nullptr, nullptr, nullptr);
     if (!sws_) {
-        SetError("не удалось создать преобразователь цвета");
+        SetError("cannot create colour converter");
         return false;
     }
 
@@ -358,13 +402,18 @@ bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride) {
     return true;
 }
 
-bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride) {
+bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
+                           int dstWidth, int dstHeight) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!IsOpen() || !dst) {
-        SetError("файл не открыт");
+        SetError("file is not open");
         return false;
     }
     if (frameIndex < 0) frameIndex = 0;
+
+    // Ноль означает «как в файле» — удобно для проверочных программ
+    if (dstWidth  <= 0) dstWidth  = info_.width;
+    if (dstHeight <= 0) dstHeight = info_.height;
 
     // Отматывание назад — единственный случай, когда кэш окупается: при чтении
     // вперёд кадры и так идут подряд, а кэш только тратил бы память
@@ -373,7 +422,7 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride) {
 
     auto cached = frameCache_.find(frameIndex);
     if (cached != frameCache_.end()) {
-        return ConvertToBGRA(cached->second, dst, dstStride);
+        return ConvertToBGRA(cached->second, dst, dstStride, dstWidth, dstHeight);
     }
 
     cacheFill_ = backward;
@@ -383,8 +432,11 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride) {
         std::chrono::steady_clock::now() - tDec).count();
     cacheFill_ = false;
 
+    // При обрыве в конце файла DecodeUntil оставляет в frame_ последний удачно
+    // раскодированный кадр и сообщает об успехе — на таймлайне это лучше
+    // чёрного провала, а Premiere всё равно не запрашивает кадры за длиной.
     if (!ok) return false;
-    return ConvertToBGRA(frame_, dst, dstStride);
+    return ConvertToBGRA(frame_, dst, dstStride, dstWidth, dstHeight);
 }
 
 // ---------------------------------------------------------------------------
@@ -411,7 +463,7 @@ bool Decoder::OpenAudio(int ordinal) {
     CloseAudioLocked();
 
     if (!fmt_) {
-        SetError("файл не открыт");
+        SetError("file is not open");
         return false;
     }
 
@@ -419,11 +471,11 @@ bool Decoder::OpenAudio(int ordinal) {
     // пакетов двигает одну общую позицию, и перемотка видео сбивала бы звук.
     int err = avformat_open_input(&audioFmt_, fmt_->url, nullptr, nullptr);
     if (err < 0) {
-        SetError("не удалось открыть файл для звука", err);
+        SetError("cannot open file for audio", err);
         return false;
     }
     if ((err = avformat_find_stream_info(audioFmt_, nullptr)) < 0) {
-        SetError("не удалось прочитать сведения о звуке", err);
+        SetError("cannot read audio stream info", err);
         CloseAudioLocked();
         return false;
     }
@@ -434,7 +486,7 @@ bool Decoder::OpenAudio(int ordinal) {
         if (seen++ == ordinal) { audioStreamIndex_ = (int)i; break; }
     }
     if (audioStreamIndex_ < 0) {
-        SetError("нет звуковой дорожки с таким номером");
+        SetError("no audio track with that index");
         CloseAudioLocked();
         return false;
     }
@@ -442,7 +494,7 @@ bool Decoder::OpenAudio(int ordinal) {
     AVStream* st = audioFmt_->streams[audioStreamIndex_];
     const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
     if (!dec) {
-        SetError("нет декодера для этой звуковой дорожки");
+        SetError("no decoder for this audio track");
         CloseAudioLocked();
         return false;
     }
@@ -451,7 +503,7 @@ bool Decoder::OpenAudio(int ordinal) {
     if (!audioCodec_ ||
         avcodec_parameters_to_context(audioCodec_, st->codecpar) < 0 ||
         avcodec_open2(audioCodec_, dec, nullptr) < 0) {
-        SetError("не удалось открыть декодер звука");
+        SetError("cannot open audio decoder");
         CloseAudioLocked();
         return false;
     }
@@ -471,7 +523,7 @@ bool Decoder::OpenAudio(int ordinal) {
                               audioCodec_->sample_rate, 0, nullptr);
     av_channel_layout_uninit(&outLayout);
     if (err < 0 || swr_init(swr_) < 0) {
-        SetError("не удалось настроить преобразование звука", err);
+        SetError("cannot set up audio conversion", err);
         CloseAudioLocked();
         return false;
     }
@@ -479,7 +531,7 @@ bool Decoder::OpenAudio(int ordinal) {
     audioFrame_  = av_frame_alloc();
     audioPacket_ = av_packet_alloc();
     if (!audioFrame_ || !audioPacket_) {
-        SetError("не хватило памяти под буферы звука");
+        SetError("out of memory for audio buffers");
         CloseAudioLocked();
         return false;
     }
@@ -505,7 +557,7 @@ bool Decoder::DecodeMoreAudio() {
             const int got = swr_convert(swr_, reinterpret_cast<uint8_t**>(out), n,
                                         const_cast<const uint8_t**>(audioFrame_->data), n);
             if (got < 0) {
-                SetError("ошибка преобразования звука", got);
+                SetError("audio conversion error", got);
                 return false;
             }
 
@@ -527,7 +579,7 @@ bool Decoder::DecodeMoreAudio() {
         if (err == AVERROR_EOF) return false;
 
         if (err != AVERROR(EAGAIN)) {
-            SetError("ошибка декодирования звука", err);
+            SetError("audio decode error", err);
             return false;
         }
 
@@ -538,13 +590,13 @@ bool Decoder::DecodeMoreAudio() {
             continue;
         }
         if (rerr < 0) {
-            SetError("ошибка чтения звука", rerr);
+            SetError("audio read error", rerr);
             return false;
         }
         if (audioPacket_->stream_index != audioStreamIndex_) continue;
 
         if (avcodec_send_packet(audioCodec_, audioPacket_) < 0) {
-            SetError("декодер звука не принял пакет");
+            SetError("audio decoder rejected packet");
             return false;
         }
     }
@@ -553,7 +605,7 @@ bool Decoder::DecodeMoreAudio() {
 bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* dst) {
     std::lock_guard<std::mutex> lock(audioMutex_);
     if (!audioCodec_ || !dst) {
-        SetError("звук не открыт");
+        SetError("audio is not open");
         return false;
     }
     if (startSample < 0) startSample = 0;
@@ -574,9 +626,18 @@ bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* d
 
     if (needSeek) {
         AVStream* st = audioFmt_->streams[audioStreamIndex_];
-        int64_t ts = (int64_t)((double)startSample / info_.audioSampleRate / av_q2d(st->time_base));
+
+        // Разгон: перематываем на 200 мс раньше нужного места и доходим до него
+        // декодированием. Без этого чтение одного и того же куска дважды давало
+        // РАЗНЫЕ отсчёты — окна AAC перекрываются, и первые кадры после
+        // перемотки неточны, а сколько именно отбросит декодер, зависит от того,
+        // на какой пакет он попал. Лишние отсчёты отбрасывает цикл ниже.
+        const int64_t preroll = info_.audioSampleRate / 5;
+        const int64_t seekSample = startSample > preroll ? startSample - preroll : 0;
+
+        int64_t ts = (int64_t)((double)seekSample / info_.audioSampleRate / av_q2d(st->time_base));
         if (av_seek_frame(audioFmt_, audioStreamIndex_, ts, AVSEEK_FLAG_BACKWARD) < 0) {
-            SetError("перемотка звука не удалась");
+            SetError("audio seek failed");
             return false;
         }
         avcodec_flush_buffers(audioCodec_);

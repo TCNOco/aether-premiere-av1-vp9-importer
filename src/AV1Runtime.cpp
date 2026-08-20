@@ -51,10 +51,10 @@ void PreloadFFmpeg()
         // этой библиотеки в её же папке, а не рядом с Premiere
         HMODULE m = LoadLibraryExW(full, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (!m) {
-            av1imp::Log("ffmpeg: НЕ загружена %ls (код %lu)", name, GetLastError());
+            av1imp::Log("ffmpeg: FAILED to load %ls (error %lu)", name, GetLastError());
         }
     }
-    av1imp::Log("ffmpeg: подгружен из %ls", dir);
+    av1imp::Log("ffmpeg: loaded from %ls", dir);
 }
 
 } // namespace
@@ -65,7 +65,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         g_selfModule = module;
         DisableThreadLibraryCalls(module);
         av1imp::LogReset();
-        av1imp::Log("плагин загружен в процесс");
+        av1imp::Log("plug-in loaded into process");
         PreloadFFmpeg();
     }
     return TRUE;

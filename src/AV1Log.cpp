@@ -129,7 +129,7 @@ const char* SelectorName(int selector)
     }
     // Незнакомые номера всё равно показываем — их можно найти в PrSDKImport.h
     static thread_local char buf[32];
-    sprintf_s(buf, sizeof(buf), "запрос %d", selector);
+    sprintf_s(buf, sizeof(buf), "selector %d", selector);
     return buf;
 }
 
