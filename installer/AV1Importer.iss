@@ -9,8 +9,8 @@
 ; плагин ищет их именно там. Свободный выбор папки означал бы неработающую
 ; установку у половины пользователей.
 
-#define AppName        "AV1 Importer for Premiere Pro"
-#define AppVersion     "1.0.1"
+#define AppName        "AV1 / VP9 Importer for Premiere Pro"
+#define AppVersion     "1.1.0"
 #define AppPublisher   "neoHaDe"
 #define AppURL         "https://github.com/neoHaDe/premiere-av1-importer"
 #define PluginDir      "AV1 Importer"
@@ -23,7 +23,7 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}/issues
 VersionInfoVersion={#AppVersion}
-VersionInfoDescription=AV1 decoder plug-in for Adobe Premiere Pro
+VersionInfoDescription=AV1 and VP9 decoder plug-in for Adobe Premiere Pro
 
 ; Плагины Adobe живут в общей папке, туда нужны права администратора
 PrivilegesRequired=admin

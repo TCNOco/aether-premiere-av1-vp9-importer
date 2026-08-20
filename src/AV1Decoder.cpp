@@ -24,24 +24,56 @@ std::string AvErr(int err) {
     return buf;
 }
 
-// Порядок предпочтения декодеров. Аппаратный первым: на видеокарте AV1 1440p60
-// идёт в разы быстрее, а именно от этого зависит, можно ли монтировать без прокси.
+// Какие кодеки берём на себя и чем их распаковывать.
 //
-// Тип устройства обязан соответствовать декодеру. Раньше всем троим подсовывался
-// CUDA — на машине без NVIDIA это просто не создавалось, и qsv/amf оставались
-// без контекста. Проверено только на NVIDIA; остальные пути написаны по документации.
+// Список намеренно короткий: плагин закрывает ровно те кодеки, которых Premiere
+// не умеет сам. Расширять его «на всякий случай» вредно — приоритет у плагина
+// выше штатного импортёра, и каждый лишний кодек означает перехват файлов,
+// которые Premiere прекрасно открывал и без нас.
+//
+// Внутри кодека аппаратный декодер идёт первым: на видеокарте 1440p60 быстрее
+// в разы, а от этого зависит, можно ли монтировать без прокси. Тип устройства
+// обязан соответствовать декодеру — иначе на машине без нужного железа контекст
+// просто не создаётся, и декодер открывается пустым.
 struct HardwareDecoder {
     const char*        name;
     AVHWDeviceType     device;
 };
 
-const HardwareDecoder kHardwareDecoders[] = {
+struct SupportedCodec {
+    AVCodecID              id;
+    const char*            name;          // как показываем в сведениях и журнале
+    const HardwareDecoder* hardware;      // список, конец — name == nullptr
+    const char* const*     software;      // список, конец — nullptr
+};
+
+const HardwareDecoder kAV1Hardware[] = {
     { "av1_cuvid", AV_HWDEVICE_TYPE_CUDA    },
     { "av1_qsv",   AV_HWDEVICE_TYPE_QSV     },
     { "av1_amf",   AV_HWDEVICE_TYPE_D3D11VA },
+    { nullptr,     AV_HWDEVICE_TYPE_NONE    },
+};
+const char* const kAV1Software[] = { "libdav1d", "av1", nullptr };
+
+const HardwareDecoder kVP9Hardware[] = {
+    { "vp9_cuvid", AV_HWDEVICE_TYPE_CUDA    },
+    { "vp9_qsv",   AV_HWDEVICE_TYPE_QSV     },
+    { "vp9_amf",   AV_HWDEVICE_TYPE_D3D11VA },
+    { nullptr,     AV_HWDEVICE_TYPE_NONE    },
+};
+const char* const kVP9Software[] = { "libvpx-vp9", "vp9", nullptr };
+
+const SupportedCodec kSupportedCodecs[] = {
+    { AV_CODEC_ID_AV1, "AV1", kAV1Hardware, kAV1Software },
+    { AV_CODEC_ID_VP9, "VP9", kVP9Hardware, kVP9Software },
 };
 
-const char* kSoftwareDecoders[] = { "libdav1d", "av1" };
+const SupportedCodec* FindCodec(int codecId) {
+    for (const SupportedCodec& c : kSupportedCodecs) {
+        if (c.id == codecId) return &c;
+    }
+    return nullptr;
+}
 
 } // namespace
 
@@ -79,13 +111,15 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
 
     AVStream* st = fmt_->streams[videoStream_];
 
-    // Плагин отвечает только за AV1. Всё остальное отдаём штатным импортёрам Premiere —
-    // иначе перехватим форматы, которые он и сам прекрасно открывает.
-    if (st->codecpar->codec_id != AV_CODEC_ID_AV1) {
-        SetError("video stream is not AV1");
+    // Всё, чего нет в списке, отдаём штатным импортёрам Premiere — иначе
+    // перехватим форматы, которые он и сам прекрасно открывает.
+    const SupportedCodec* codec = FindCodec(st->codecpar->codec_id);
+    if (!codec) {
+        SetError("video codec is not supported by this plug-in");
         CloseLocked();
         return false;
     }
+    codecId_ = st->codecpar->codec_id;
 
     // Дорожкам звука декодер кадров не нужен — проверки на AV1 выше достаточно
     if (needVideo && !OpenCodec(preferHardware)) {
@@ -113,7 +147,7 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
         ? st->nb_frames
         : (info_.fps > 0 ? (int64_t)(info_.durationSec * info_.fps + 0.5) : 0);
 
-    info_.codecName = "AV1";
+    info_.codecName = codec->name;
 
     for (unsigned i = 0; i < fmt_->nb_streams; ++i) {
         if (fmt_->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
@@ -186,16 +220,22 @@ bool Decoder::OpenCodec(bool preferHardware) {
         return true;
     };
 
-    if (preferHardware) {
-        for (const HardwareDecoder& hw : kHardwareDecoders) {
-            if (tryDecoder(hw.name, hw.device)) return true;
-        }
-    }
-    for (const char* name : kSoftwareDecoders) {
-        if (tryDecoder(name, AV_HWDEVICE_TYPE_NONE)) return true;
+    const SupportedCodec* codec = FindCodec(codecId_);
+    if (!codec) {
+        SetError("video codec is not supported by this plug-in");
+        return false;
     }
 
-    SetError("no AV1 decoder available");
+    if (preferHardware) {
+        for (const HardwareDecoder* hw = codec->hardware; hw->name; ++hw) {
+            if (tryDecoder(hw->name, hw->device)) return true;
+        }
+    }
+    for (const char* const* name = codec->software; *name; ++name) {
+        if (tryDecoder(*name, AV_HWDEVICE_TYPE_NONE)) return true;
+    }
+
+    SetError("no decoder available for this codec");
     return false;
 }
 
@@ -268,6 +308,7 @@ void Decoder::CloseLocked() {
     if (fmt_)      { avformat_close_input(&fmt_); }
 
     videoStream_      = -1;
+    codecId_          = 0;
     lastDecodedFrame_ = -1;
     eofReached_       = false;
     info_ = MediaInfo{};

@@ -29,7 +29,7 @@ int wmain(int argc, wchar_t** argv)
 
     HMODULE plugin = LoadLibraryExW(argv[1], nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!plugin) {
-        printf("FAIL: библиотека не загрузилась, код %lu\n", GetLastError());
+        printf("FAIL: library did not load, error %lu\n", GetLastError());
         return 2;
     }
     printf("load       : ok\n");
@@ -41,15 +41,15 @@ int wmain(int argc, wchar_t** argv)
     bool ffmpegOk = true;
     for (const wchar_t* m : modules) {
         if (!GetModuleHandleW(m)) {
-            wprintf(L"FAIL: не подгружена %s\n", m);
+            wprintf(L"FAIL: %s was not preloaded\n", m);
             ffmpegOk = false;
         }
     }
-    printf("ffmpeg     : %s\n", ffmpegOk ? "подгружен из папки плагина" : "НЕ НАЙДЕН");
+    printf("ffmpeg     : %s\n", ffmpegOk ? "preloaded from the plug-in folder" : "NOT FOUND");
 
     ImportEntryProc entry = (ImportEntryProc)GetProcAddress(plugin, "xImportEntry");
     if (!entry) {
-        printf("FAIL: нет точки входа xImportEntry\n");
+        printf("FAIL: no xImportEntry export\n");
         return 3;
     }
     printf("entry      : ok\n");
@@ -67,7 +67,7 @@ int wmain(int argc, wchar_t** argv)
     imIndFormatRec fmt = {};
     r = entry(imGetIndFormat, &stdParms, reinterpret_cast<void*>(0), &fmt);
     if (r != malNoError) {
-        printf("FAIL: imGetIndFormat вернул %d\n", r);
+        printf("FAIL: imGetIndFormat returned %d\n", r);
         return 4;
     }
 
@@ -81,7 +81,7 @@ int wmain(int argc, wchar_t** argv)
 
     // Второй индекс должен отсекаться — иначе Premiere зациклится на опросе
     r = entry(imGetIndFormat, &stdParms, reinterpret_cast<void*>(1), &fmt);
-    printf("index 1    : %s\n", r == imBadFormatIndex ? "корректно отклонён" : "ОШИБКА");
+    printf("index 1    : %s\n", r == imBadFormatIndex ? "correctly rejected" : "WRONG");
 
     FreeLibrary(plugin);
     return ffmpegOk ? 0 : 5;

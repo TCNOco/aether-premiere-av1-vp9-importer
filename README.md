@@ -1,16 +1,19 @@
-# AV1 Importer for Adobe Premiere Pro
+# AV1 / VP9 Importer for Adobe Premiere Pro
 
-Drag an AV1 file onto the timeline and it just works — no transcoding, no proxies.
+Drag an AV1 or VP9 file onto the timeline and it just works — no transcoding,
+no proxies.
 
 [Русская версия](README.ru.md)
 
-Premiere Pro 25.x **cannot decode AV1**. Its demuxer parses the container and
-recognises the stream as `av01`, but there is no decoder, so the import fails with
-*"File uses unsupported video compression type av01"*. This plug-in adds the missing
-decoder, using FFmpeg and — where the hardware allows — the GPU.
+Premiere Pro 25.x **cannot decode AV1 or VP9**. For AV1 its demuxer parses the
+container and recognises the stream as `av01`, but there is no decoder, so the
+import fails with *"File uses unsupported video compression type av01"*. VP9
+usually arrives in WebM, which Premiere cannot even open. This plug-in adds the
+missing decoders, using FFmpeg and — where the hardware allows — the GPU.
 
 That matters if you record with OBS: AV1 gives the same picture quality at a
-noticeably lower bitrate, but the recordings were unusable in Premiere.
+noticeably lower bitrate, but the recordings were unusable in Premiere. VP9 matters
+if your source footage comes from the web, where it is what you are usually given.
 
 ## Install
 
@@ -22,27 +25,29 @@ noticeably lower bitrate, but the recordings were unusable in Premiere.
 To remove it, use *Apps & features* or the uninstaller in the plug-in folder.
 
 **Requirements:** Windows x64, Adobe Premiere Pro 2025 (25.x). Hardware decoding
-needs an NVIDIA GPU with AV1 support (RTX 30 series and newer); without one the
-plug-in falls back to the CPU decoder automatically.
+needs a GPU that supports the codec (AV1 needs NVIDIA RTX 30 or newer); without one
+the plug-in falls back to the CPU decoder automatically.
 
 ## What works
 
-- Video on the timeline, hardware-decoded where available
+- **AV1 and VP9** video on the timeline, hardware-decoded where available
+  (`av1_cuvid` / `vp9_cuvid` on NVIDIA, with Intel and AMD paths present but untested)
 - **Multi-track audio kept separate** — OBS writes microphone, game, Discord and
   music as distinct streams, and they arrive as distinct tracks
 - Scrubbing, seeking and export
 - MP4, MKV, WebM, MOV, M4V containers
 
-Files that are *not* AV1 are handed straight back to Premiere's own importer, so
+Files with any other codec are handed straight back to Premiere's own importer, so
 nothing about your existing footage changes.
 
 One caveat about MKV and WebM: Premiere has no native support for those containers
-at all, so the plug-in demuxes them itself. That works — but only for AV1 inside.
-An MKV holding H.264 is refused by the plug-in and Premiere cannot open it either.
+at all, so the plug-in demuxes them itself. That works — but only for the codecs
+above. An MKV holding H.264 is refused by the plug-in and Premiere cannot open it
+either.
 
 ## Performance
 
-Measured on 2560x1440@60 AV1, RTX 5080:
+Measured on 2560x1440@60, RTX 5080 (VP9 lands within a few per cent of AV1):
 
 | | |
 |---|---|

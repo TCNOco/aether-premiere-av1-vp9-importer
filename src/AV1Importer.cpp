@@ -163,7 +163,7 @@ static prMALError AV1OpenFile8(imStdParms* stdParms, imFileRef* fileRef,
         return imBadFile;
     }
 
-    // Главная проверка: файл наш, только если внутри действительно AV1.
+    // Главная проверка: файл наш, только если внутри поддерживаемый кодек.
     // Иначе честно отдаём его обратно — Premiere передаст штатному импортёру.
     if (!EnsureDecoder(ldata)) {
         av1imp::Log("imOpenFile8: refused - %s",
@@ -172,7 +172,8 @@ static prMALError AV1OpenFile8(imStdParms* stdParms, imFileRef* fileRef,
         ldata->fileRef = imInvalidHandleValue;
         return imBadFile;
     }
-    av1imp::Log("imOpenFile8: accepted, %dx%d, decoder %s",
+    av1imp::Log("imOpenFile8: accepted, %s %dx%d, decoder %s",
+                ldata->decoder->Info().codecName.c_str(),
                 ldata->decoder->Info().width, ldata->decoder->Info().height,
                 ldata->decoder->Info().decoderName.c_str());
 
@@ -353,7 +354,8 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
         ldata->ticksPerFrame = ticksPerSecond * mi.fpsDen / mi.fpsNum;
     }
 
-    av1imp::Log("imGetInfo8: %dx%d, %d/%d fps, %lld frames, subType RAW",
+    av1imp::Log("imGetInfo8: %s %dx%d, %d/%d fps, %lld frames, subType RAW",
+                mi.codecName.c_str(),
                 mi.width, mi.height, fileInfo->vidScale, fileInfo->vidSampleSize,
                 (long long)mi.frameCount);
 
