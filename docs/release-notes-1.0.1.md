@@ -51,13 +51,12 @@ decoded but delivered as 8-bit), and long recordings remain untested.
 ## Install
 
 Download `AV1Importer-Setup-1.0.1.exe`, close Premiere Pro and Media Encoder, run
-it. Administrator rights are required. The installer is not code-signed, so
-Windows will warn about an unknown publisher — verify the download instead:
+it. Administrator rights are required. Installing over 1.0.0 replaces it; no need
+to uninstall first.
+
+The installer is not code-signed, so Windows will warn about an unknown publisher.
+Verify the download instead:
 
 ```
 SHA256  16ad77b4e945c32165b9f2b0f391f3351b86bd0332f1522659e6c123ae9cf377
 ```
-
-Download `AV1Importer-Setup-1.0.1.exe`, close Premiere Pro and Media Encoder, run
-it. Administrator rights are required. Installing over 1.0.0 replaces it; no need
-to uninstall first.
