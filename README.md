@@ -77,9 +77,14 @@ Two console programs let you test almost everything without launching Premiere,
 which is what makes this project practical to work on:
 
 ```
-build\decoder_test.exe <file.mp4>                    metadata, a frame, timings, audio levels
+build\decoder_test.exe <file.mp4>                    metadata, timings, audio levels, checks
 build\plugin_test.exe  build\plugin\AV1Importer.prm  plug-in loading and its answers
 ```
+
+`decoder_test` ends with correctness checks and exits non-zero if any fails: a
+cached frame against a freshly decoded one, buffer bounds when Premiere asks for a
+reduced size, and whether the same audio range reads identically twice. The last
+one found a real bug the first time it ran.
 
 ## How it works
 
