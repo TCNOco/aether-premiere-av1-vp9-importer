@@ -6,7 +6,7 @@ cd /d "%~dp0"
 if not exist build mkdir build
 
 REM decoder_test — ядро декодирования, работает с файлом напрямую
-cl /nologo /std:c++17 /EHsc /O2 /MD ^
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
    /I"ffmpeg\include" ^
    src\AV1Decoder.cpp tools\decoder_test.cpp ^
@@ -15,7 +15,7 @@ cl /nologo /std:c++17 /EHsc /O2 /MD ^
 if errorlevel 1 exit /b 1
 
 REM plugin_test — загружает собранный .prm так же, как это сделает Premiere
-cl /nologo /std:c++17 /EHsc /O2 /MD ^
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
    /DPRWIN_ENV ^
    /I"sdk\Premiere Pro 26.0 C++ SDK\Examples\Headers" ^
    tools\plugin_test.cpp ^

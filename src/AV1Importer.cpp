@@ -55,7 +55,7 @@ bool EnsureDecoder(ImporterLocalRecPtr ldata)
     // Кадры отдаёт только поток 0; остальным нужен лишь звук, и декодер
     // на видеокарте им создавать незачем
     const bool needVideo = (ldata->streamIdx == 0);
-    return ldata->decoder->Open(path, av1imp::HardwareDecodingEnabled(), needVideo);
+    return ldata->decoder->Open(path, av1imp::PreferHardware(), needVideo);
 }
 
 // Дорожка звука открывается по требованию: Premiere спрашивает отсчёты

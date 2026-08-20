@@ -32,7 +32,6 @@ ArchitecturesInstallIn64BitMode=x64compatible
 
 DefaultDirName={commonpf}\Adobe\Common\Plug-ins\7.0\MediaCore\{#PluginDir}
 DisableDirPage=yes
-DisableProgramGroupPage=yes
 DefaultGroupName={#AppName}
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\AV1Importer.prm
@@ -49,6 +48,9 @@ SolidCompression=yes
 WizardStyle=modern
 LicenseFile=..\LICENSE
 
+[Icons]
+Name: "{autoprograms}\AV1 Importer — настройки"; Filename: "{app}\AV1ImporterSettings.exe"; Comment: "Переключить декодирование между процессором и видеокартой"
+
 [Languages]
 Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
@@ -57,10 +59,16 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 ru.NoPremiere=Не найдена папка плагинов Adobe:%n%n%1%n%nПохоже, Adobe Premiere Pro не установлен. Продолжить всё равно?
 en.NoPremiere=Adobe plug-in folder not found:%n%n%1%n%nAdobe Premiere Pro does not appear to be installed. Continue anyway?
 ru.CloseFirst=Перед установкой закройте Adobe Premiere Pro и Media Encoder.
+ru.OpenSettings=Открыть настройки плагина
+en.OpenSettings=Open plug-in settings
 en.CloseFirst=Please close Adobe Premiere Pro and Media Encoder before installing.
 
 [Files]
 Source: "..\build\Release\AV1Importer.prm"; DestDir: "{app}"; Flags: ignoreversion
+
+; Окно переключения декодера. Отдельная программа, а не окно внутри Premiere:
+; настройка нужна тогда, когда Premiere из-за драйвера не запускается
+Source: "..\build\Release\AV1ImporterSettings.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Библиотеки ffmpeg обязаны лежать рядом с плагином: Windows ищет их возле
 ; исполняемого файла (то есть возле Premiere), поэтому плагин загружает их
@@ -76,6 +84,9 @@ Source: "..\ffmpeg\bin\swscale-9.dll";     DestDir: "{app}"; Flags: ignoreversio
 Source: "..\LICENSE";                 DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "..\THIRD-PARTY-NOTICES.md";  DestDir: "{app}"; Flags: ignoreversion
 Source: "..\ffmpeg\LICENSE.txt";      DestDir: "{app}"; DestName: "LICENSE-ffmpeg.txt"; Flags: ignoreversion
+
+[Run]
+Filename: "{app}\AV1ImporterSettings.exe"; Description: "{cm:OpenSettings}"; Flags: postinstall nowait skipifsilent
 
 [Code]
 

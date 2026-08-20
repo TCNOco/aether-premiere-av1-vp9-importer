@@ -1,95 +1,124 @@
 #include "AV1Settings.h"
-#include "AV1Log.h"
 
 #include <windows.h>
+#include <shlobj.h>
 
 #include <cstdio>
-#include <cstdlib>
+#include <cstring>
 #include <cwchar>
 
 namespace av1imp {
 
 namespace {
 
-// «Выключено» понимаем широко: человек, отключающий аппаратный декодер по совету
-// из issue, напишет что угодно из этого, и спорить с ним — плохая идея.
-bool LooksDisabled(const wchar_t* value)
+// Ниже этого числа логических процессоров считаем, что программный декодер
+// не вытянет, и берём видеокарту. Порог взят с потолка: замерить получилось
+// только на одной машине (16 потоков), где процессор выигрывал вшестеро.
+const DWORD kSoftwareNeedsThreads = 8;
+
+bool LooksDisabled(const wchar_t* v)
 {
-    return _wcsicmp(value, L"0")     == 0 ||
-           _wcsicmp(value, L"off")   == 0 ||
-           _wcsicmp(value, L"false") == 0 ||
-           _wcsicmp(value, L"no")    == 0;
+    return _wcsicmp(v, L"0") == 0 || _wcsicmp(v, L"off") == 0 ||
+           _wcsicmp(v, L"false") == 0 || _wcsicmp(v, L"no") == 0;
 }
 
-// Ищем hardware=... в AV1Importer.ini рядом с плагином.
-// Формат намеренно простейший: файл правят руками, часто в спешке.
-bool ReadHardwareFromFile(bool& outEnabled)
+const wchar_t* SettingsFolder()
 {
-    wchar_t path[MAX_PATH] = {};
-    if (swprintf_s(path, MAX_PATH, L"%sAV1Importer.ini", PluginDirectory()) < 0) {
-        return false;
+    static wchar_t folder[MAX_PATH] = {};
+    if (folder[0]) return folder;
+
+    wchar_t* base = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &base))) {
+        swprintf_s(folder, MAX_PATH, L"%s\\AV1Importer", base);
+        CoTaskMemFree(base);
+    }
+    return folder;
+}
+
+} // namespace
+
+const wchar_t* SettingsFilePath()
+{
+    static wchar_t path[MAX_PATH] = {};
+    if (path[0]) return path;
+
+    const wchar_t* folder = SettingsFolder();
+    if (folder[0]) swprintf_s(path, MAX_PATH, L"%s\\settings.ini", folder);
+    return path;
+}
+
+DecodeMode CurrentMode()
+{
+    // Переменная среды главнее файла и ничего не сохраняет
+    wchar_t env[64] = {};
+    if (GetEnvironmentVariableW(L"AV1IMPORTER_HARDWARE", env, 64) > 0) {
+        return LooksDisabled(env) ? DecodeMode::Software : DecodeMode::Hardware;
     }
 
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"rt") != 0 || !f) return false;
+    const wchar_t* path = SettingsFilePath();
+    if (!path[0]) return DecodeMode::Auto;
 
-    bool found = false;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"rt") != 0 || !f) return DecodeMode::Auto;
+
+    DecodeMode mode = DecodeMode::Auto;
     char line[256];
     while (fgets(line, sizeof(line), f)) {
         char* p = line;
         while (*p == ' ' || *p == '\t') ++p;
-        if (_strnicmp(p, "hardware", 8) != 0) continue;
+        if (_strnicmp(p, "decode", 6) != 0) continue;
 
-        p += 8;
+        p += 6;
         while (*p == ' ' || *p == '\t') ++p;
         if (*p != '=') continue;
         ++p;
         while (*p == ' ' || *p == '\t') ++p;
 
         char value[32] = {};
-        sscanf_s(p, "%31s", value, (unsigned)sizeof(value));
-
-        wchar_t wide[32] = {};
-        MultiByteToWideChar(CP_ACP, 0, value, -1, wide, 32);
-
-        outEnabled = !LooksDisabled(wide);
-        found = true;
+        if (sscanf_s(p, "%31s", value, (unsigned)sizeof(value)) == 1) {
+            if (_stricmp(value, "software") == 0)      mode = DecodeMode::Software;
+            else if (_stricmp(value, "hardware") == 0) mode = DecodeMode::Hardware;
+        }
         break;
     }
 
     fclose(f);
-    return found;
+    return mode;
 }
 
-} // namespace
-
-bool HardwareDecodingEnabled()
+bool SaveMode(DecodeMode mode)
 {
-    static bool resolved = false;
-    static bool enabled  = true;
+    const wchar_t* folder = SettingsFolder();
+    if (!folder[0]) return false;
+    CreateDirectoryW(folder, nullptr);   // если уже есть — не беда
 
-    if (resolved) return enabled;
-    resolved = true;
+    const wchar_t* path = SettingsFilePath();
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"wt") != 0 || !f) return false;
 
-    // Переменная среды главнее файла: ею удобно проверить догадку, не трогая
-    // установленный плагин, и она же работает, если папка защищена от записи
-    wchar_t env[64] = {};
-    if (GetEnvironmentVariableW(L"AV1IMPORTER_HARDWARE", env, 64) > 0) {
-        enabled = !LooksDisabled(env);
-        Log("settings: hardware decoding %s (AV1IMPORTER_HARDWARE)",
-            enabled ? "on" : "OFF");
-        return enabled;
+    const char* value = mode == DecodeMode::Software ? "software"
+                      : mode == DecodeMode::Hardware ? "hardware"
+                                                     : "auto";
+
+    // Файл человекочитаемый: его могут править руками по совету из issue
+    fprintf(f, "; AV1 / VP9 Importer for Premiere Pro\n");
+    fprintf(f, "; decode = auto | software | hardware\n");
+    fprintf(f, "decode=%s\n", value);
+    fclose(f);
+    return true;
+}
+
+bool PreferHardware()
+{
+    switch (CurrentMode()) {
+        case DecodeMode::Software: return false;
+        case DecodeMode::Hardware: return true;
+        default: break;
     }
 
-    bool fromFile = true;
-    if (ReadHardwareFromFile(fromFile)) {
-        enabled = fromFile;
-        Log("settings: hardware decoding %s (AV1Importer.ini)",
-            enabled ? "on" : "OFF");
-        return enabled;
-    }
-
-    return enabled;   // по умолчанию включено, в журнал не пишем
+    SYSTEM_INFO si = {};
+    GetSystemInfo(&si);
+    return si.dwNumberOfProcessors < kSoftwareNeedsThreads;
 }
 
 } // namespace av1imp
