@@ -19,42 +19,61 @@ if your source footage comes from the web, where it is what you are usually give
 
 ## Will it work for you
 
-**Applications.** The plug-in installs into the folder Adobe applications share, so
-every one of them picks it up. Which of them were actually tried:
+One table for all of it: where the plug-in goes, what it opens, and what it does
+not do. "Yes" means tested — live or by an automated check; where nothing was
+tried, the table says so.
 
-| | |
-|---|---|
-| Premiere Pro CC 2019 — 13.1.5 | tested, the oldest version verified |
-| Premiere Pro 2020 – 2024 | not tried, expected to work — see the note below |
-| Premiere Pro 2025 — 25.x | tested, the main target |
-| After Effects 25.3.2 | tested: import, audio tracks, preview, render |
-| Media Encoder 25.6.4 | tested: a whole export, 1265 frames, no errors |
-| macOS | no. The decoding core is portable, the rest is Win32 |
+| | | |
+|---|---|---|
+| **Applications** | Premiere Pro CC 2019 — 13.1.5 | **yes**, the oldest version verified |
+| | Premiere Pro 2020 – 2024 | **not tried**, see the note below the table |
+| | Premiere Pro 2025 — 25.x | **yes**, the main target |
+| | Premiere Pro 2026 — 26.0.0.72 | **yes**, the newest version verified |
+| | After Effects 25.3.2 | **yes** — import, audio tracks, preview, render |
+| | Media Encoder 25.6.4 | **yes** — a whole export, 1265 frames, no errors |
+| **System** | Windows x64 | **yes**, the only one |
+| | macOS | **no** — the decoding core is portable, the rest is Win32 |
+| **Video codecs** | AV1 | **yes** |
+| | VP9 | **yes** |
+| | everything else | **handed back** — Premiere opens it itself |
+| **Containers** | MP4, MOV, M4V | **yes** — with AV1 or VP9 inside |
+| | MKV, WebM | **yes** — Premiere cannot open them at all |
+| | Audio-only MKA, MKV, WebM | **yes** — for the same reason |
+| | Audio-only MP4 and M4A | **no, deliberately** — Premiere opens those itself |
+| | OGV, FLV, TS, VOB | **no** — those carry other codecs, not these two |
+| **Picture** | 8-bit | **yes** |
+| | 10-bit | **yes** — delivered as 16-bit in Adobe's range, see below |
+| | 12-bit | **not tried** — the same path as 10-bit |
+| | Alpha, VP9 in WebM | **yes** — CPU decoding only, see below |
+| | Alpha in AV1 | **no** — stored differently, not done |
+| | HDR | **partly** — decoded, transfer metadata is not passed on |
+| | Interlaced | **no** |
+| **Timing** | Constant frame rate | **yes** |
+| | Variable frame rate | **yes** — the frame is found by time, see below |
+| | Files that do not start at zero | **yes** — picture and sound share one clip zero |
+| | Timecode from the file | **no** |
+| **Audio** | AAC, Opus, FLAC | **yes**, tested |
+| | anything else FFmpeg decodes | **expected** — only video has a codec list |
+| | Multiple tracks | **yes**, they stay separate |
+| | Mono, stereo | **yes** |
+| | 5.1 and above | **not tried** — the channel count is passed through as is |
+| **Hardware** | CPU decoding | **yes**, the default — it is faster, see the measurements |
+| | NVIDIA — `av1_cuvid`, `vp9_cuvid` | **yes**, tested on an RTX 5080 |
+| | Intel QSV, AMD AMF | **not tried** — the code is there, the hardware was not |
 
-The gap in the middle is a deliberate decision rather than an oversight. The
-importer interface was version 21 in 2019 and is 24 today, so 2020–2024 sit between
-two versions that are known good, and the plug-in asks the host for whichever suite
-versions it actually has instead of demanding the newest — which is exactly what
-2019 exercised, taking version 7 of the frame-cache suite where 2025 gives 8.
+The plug-in installs into the folder Adobe applications share, so all of them pick
+it up at once — there is nothing to install per application.
 
-**Formats.**
+The gap between 2019 and 2025 is a deliberate decision rather than an oversight.
+The importer interface was version 21 in 2019 and is 24 today, so 2020–2024 sit
+between two versions that are known good, and the plug-in asks the host for
+whichever suite versions it actually has instead of demanding the newest — which
+is exactly what 2019 exercised, taking version 7 of the frame-cache suite where
+2025 gives 8. For the same reason Premiere 2026 worked without a single change.
 
-| | |
-|---|---|
-| AV1 | yes — MP4, MKV, WebM, MOV, M4V |
-| VP9 | yes — the same containers |
-| Multi-track audio | yes, tracks stay separate |
-| Variable frame rate | yes — the picture is found by time, not by frame number |
-| Files that do not start at zero | yes — picture and sound share one clip zero |
-| 10-bit | yes — delivered as 16-bit, see below |
-| HDR | decoded, but the transfer metadata is not passed on yet |
-| Alpha channel | yes, for VP9 in WebM — decoded on the CPU, see below |
-| Audio-only MKV, MKA, WebM | yes — Premiere cannot open those containers at all |
-| Audio-only MP4 and M4A | no, deliberately — Premiere opens those itself |
-| Every other codec | handed straight back to Premiere's own importer |
-
-**Hardware.** Windows x64, nothing else. Without a supported GPU the plug-in decodes
-on the CPU, and on this hardware that path is the faster one anyway.
+The list of extensions is deliberately wider than the list of codecs: an MP4 can
+hold anything, so the file is opened first and handed back if what is inside is
+neither AV1 nor VP9. Taking someone else's file is worse than not taking your own.
 
 ## Install
 
@@ -87,7 +106,6 @@ host: PPro 13.1.5
 - **Multi-track audio kept separate.** OBS writes microphone, game, Discord and
   music as distinct streams, and they arrive as distinct tracks
 - Scrubbing, seeking and export
-- MP4, MKV, WebM, MOV, M4V, MKA containers
 - **Files with no video at all**, when the container is one Premiere cannot open:
   a Matroska or WebM holding only audio. The same rule as everywhere else decides
   it — an audio-only MP4 or M4A is refused, because Premiere opens those itself
