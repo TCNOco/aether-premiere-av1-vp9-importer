@@ -103,8 +103,8 @@ host: PPro 13.1.5
 
 - **AV1 and VP9** video on the timeline, decoded on the GPU or the CPU, and which
   of the two wins is not the obvious answer, see the measurements below
-- **Multi-track audio kept separate.** OBS writes microphone, game, Discord and
-  music as distinct streams, and they arrive as distinct tracks
+- **Multi-track audio kept separate.** A recording can carry several audio streams
+  at once, and they arrive as separate tracks instead of being mixed into one
 - Scrubbing, seeking and export
 - **Files with no video at all**, when the container is one Premiere cannot open:
   a Matroska or WebM holding only audio. The same rule as everywhere else decides
