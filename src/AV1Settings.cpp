@@ -139,4 +139,47 @@ bool PreferHardware()
     return si.dwNumberOfProcessors < kSoftwareNeedsThreads;
 }
 
+// Асинхронная выдача. По умолчанию включена — выключенная возможность никем
+// не проверяется и тихо гниёт, — но выключатель есть, потому что это отдельный
+// поток внутри чужого процесса, и если он однажды окажется виноват, человек
+// должен уметь его отключить, не удаляя плагин.
+bool AsyncDeliveryEnabled()
+{
+    // Переменная среды главнее файла, как и у выбора декодера
+    wchar_t env[64] = {};
+    if (GetEnvironmentVariableW(L"AETHER_ASYNC", env, 64) > 0) {
+        return !LooksDisabled(env);
+    }
+
+    const wchar_t* path = SettingsFilePath();
+    if (!path[0]) return true;
+
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"rt") != 0 || !f) return true;
+
+    bool enabled = true;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        char* p = line;
+        while (*p == ' ' || *p == '\t') ++p;
+        if (_strnicmp(p, "async", 5) != 0) continue;
+
+        p += 5;
+        while (*p == ' ' || *p == '\t') ++p;
+        if (*p != '=') continue;
+        ++p;
+        while (*p == ' ' || *p == '\t') ++p;
+
+        char value[32] = {};
+        if (sscanf_s(p, "%31s", value, (unsigned)sizeof(value)) == 1) {
+            if (_stricmp(value, "off")   == 0 || _stricmp(value, "0")     == 0 ||
+                _stricmp(value, "false") == 0 || _stricmp(value, "no")    == 0) {
+                enabled = false;
+            }
+        }
+    }
+    fclose(f);
+    return enabled;
+}
+
 } // namespace av1imp

@@ -22,6 +22,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include "PrSDKStructs.h"
@@ -32,6 +35,7 @@
 #include "PrSDKPPixSuite.h"
 #include "PrSDKTimeSuite.h"
 #include "PrSDKAppInfoSuite.h"
+#include "PrSDKAsyncImporter.h"
 
 typedef prMALError (*ImportEntryProc)(csSDK_int32, imStdParms*, void*, void*);
 
@@ -79,6 +83,16 @@ struct FakeFrame
 
 std::vector<FakeFrame*> g_frames;
 
+// Замок к нему нужен по-настоящему.
+//
+// Асинхронный импортёр создаёт кадры из нескольких потоков сразу, и первая
+// версия этой проверки падала с нарушением доступа: четыре потока портили
+// общий вектор. Ошибка была в самом поддельном хосте — настоящий Premiere
+// раздаёт буферы из любого потока, — но найдена она была только потому, что
+// проверка полезла в многопоточность.
+std::mutex g_framesMutex;
+
+
 prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pixelFormat,
                         const prRect* rect)
 {
@@ -105,7 +119,10 @@ prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pix
     f->data.assign(static_cast<size_t>(f->pix.rowbytes) * height, 0xCD);
     f->pix.pix = f->data.data();
 
-    g_frames.push_back(f);
+    {
+        std::lock_guard<std::mutex> lock(g_framesMutex);
+        g_frames.push_back(f);
+    }
     *outHand = reinterpret_cast<PPixHand>(f);
     return suiteError_NoError;
 }
@@ -264,6 +281,20 @@ void BuildHostTables()
 // Один прогон: открыть файл, спросить сведения, взять кадры и звук
 // ---------------------------------------------------------------------------
 
+// Асинхронная выдача: заказать кадры вперёд, потом забрать.
+//
+// Проверяем не «не упало», а совпадение: те же кадры, полученные асинхронно,
+// обязаны быть побайтово теми же, что и обычным путём. Иначе поток внутри
+// чужого процесса — это просто новый способ отдать не тот кадр.
+struct AsyncResult
+{
+    bool created   = false;
+    int  delivered = 0;
+    bool matchesSync = true;   // совпали ли пиксели с обычным путём
+    bool survived  = false;    // дожили ли до aiClose
+    bool stressSurvived = true; // пережили ли параллельные вызовы и закрытие
+};
+
 struct RunResult
 {
     bool                 opened     = false;
@@ -277,7 +308,205 @@ struct RunResult
     int                  cacheVersion = 0;
     PrPixelFormat        pixelFormat  = PrPixelFormat_BGRA_4444_8u;
     std::vector<uint8_t> firstFrame;   // для сверки между профилями
+    AsyncResult          async;
 };
+
+// Гоняем асинхронный путь по уже открытому файлу.
+//
+// Порядок вызовов взят из SDK: создать, заказать, забрать, отменить, слить,
+// закрыть. Заказываем ВРАЗБИВКУ и забираем не в том порядке, в каком
+// заказывали, — именно так ведёт себя хост при перемотке, и именно на этом
+// ломается наивная реализация с одним «текущим кадром».
+AsyncResult RunAsync(ImportEntryProc entry, imStdParms* stdParms,
+                     imFileRef fileRef, void* privateData,
+                     PrTime ticksPerFrame,
+                     const std::vector<uint8_t>& syncFrameZero,
+                     int width, int height, PrPixelFormat pixelFormat)
+{
+    AsyncResult out;
+
+    imAsyncImporterCreationRec creation = {};
+    creation.inPrivateData = privateData;
+
+    if (entry(imCreateAsyncImporter, stdParms, &creation, nullptr) != malNoError ||
+        !creation.outAsyncEntry || !creation.outAsyncPrivateData) {
+        return out;   // не создался — не беда, но и проверять нечего
+    }
+    out.created = true;
+
+    AsyncImporterEntry async = creation.outAsyncEntry;
+    void* asyncData = creation.outAsyncPrivateData;
+
+    // Заказываем вперёд с запасом и не подряд
+    const int wanted[] = { 0, 3, 1, 7, 2, 5 };
+    for (int frame : wanted) {
+        aiAsyncRequest req = {};
+        req.inPrivateData = asyncData;
+        req.inSourceRec.inFrameTime = static_cast<PrTime>(frame) * ticksPerFrame;
+        async(aiInitiateAsyncRead, &req);
+    }
+
+    // Один заказ отменяем: отмена — подсказка, и после неё кадр всё равно
+    // обязан отдаться, просто медленнее
+    {
+        aiAsyncRequest cancel = {};
+        cancel.inPrivateData = asyncData;
+        cancel.inSourceRec.inFrameTime = static_cast<PrTime>(7) * ticksPerFrame;
+        async(aiCancelAsyncRead, &cancel);
+    }
+
+    // Забираем в другом порядке
+    const int fetch[] = { 1, 0, 5, 7, 2, 3 };
+    for (int frame : fetch) {
+        PPixHand hand = nullptr;
+        // Формат тот же, что взял обычный путь: у 10-битного файла он
+        // шестнадцатибитный, и сравнивать его с восьмибитным бессмысленно —
+        // первая версия этой проверки именно так и «нашла расхождение»
+        imFrameFormat format = {};
+        format.inPixelFormat  = pixelFormat;
+        format.inFrameWidth   = width;
+        format.inFrameHeight  = height;
+
+        imSourceVideoRec videoRec = {};
+        videoRec.inPrivateData     = asyncData;
+        videoRec.inFrameFormats    = &format;
+        videoRec.inNumFrameFormats = 1;
+        videoRec.outFrame          = &hand;
+        videoRec.inFrameTime       = static_cast<PrTime>(frame) * ticksPerFrame;
+
+        if (async(aiGetFrame, &videoRec) == aiNoError && hand) {
+            FakeFrame* f = FrameOf(hand);
+            bool written = false;
+            for (uint8_t b : f->data) { if (b != 0xCD) { written = true; break; } }
+            if (written) {
+                ++out.delivered;
+                if (frame == 0 && !syncFrameZero.empty() && f->data != syncFrameZero) {
+                    out.matchesSync = false;
+                }
+            }
+        }
+    }
+
+    async(aiFlush, asyncData);
+    async(aiClose, asyncData);
+    out.survived = true;
+    return out;
+}
+
+// Два злых сценария для асинхронного пути.
+//
+// Оба взяты из правил SDK, а не выдуманы: «все вызовы реентерабельны, кроме
+// закрытия» и «закрытие может быть вызвано, пока другие вызовы ещё
+// выполняются». Второе особенно опасно — закрытие освобождает состояние
+// импортёра, и если это случится из-под работающего вызова, получится
+// обращение к освобождённой памяти внутри Premiere.
+//
+// Чего здесь СОЗНАТЕЛЬНО нет: вызовов после закрытия. SDK обещает, что их не
+// будет, состояние к тому моменту освобождено, и проверять этим плагин значит
+// проверять не его, а собственную невнимательность.
+bool RunAsyncStress(ImportEntryProc entry, imStdParms* stdParms,
+                    void* privateData, PrTime ticksPerFrame,
+                    int width, int height)
+{
+    auto askForFrame = [&](AsyncImporterEntry async, void* asyncData, int frame) {
+        PPixHand hand = nullptr;
+        imFrameFormat format = {};
+        format.inPixelFormat = PrPixelFormat_BGRA_4444_8u;
+        format.inFrameWidth  = width;
+        format.inFrameHeight = height;
+
+        imSourceVideoRec videoRec = {};
+        videoRec.inPrivateData     = asyncData;
+        videoRec.inFrameFormats    = &format;
+        videoRec.inNumFrameFormats = 1;
+        videoRec.outFrame          = &hand;
+        videoRec.inFrameTime       = static_cast<PrTime>(frame) * ticksPerFrame;
+        async(aiGetFrame, &videoRec);
+    };
+
+    // --- 1. Много потоков разом, закрытие уже после того, как все вышли -----
+    {
+        imAsyncImporterCreationRec creation = {};
+        creation.inPrivateData = privateData;
+        if (entry(imCreateAsyncImporter, stdParms, &creation, nullptr) != malNoError ||
+            !creation.outAsyncEntry || !creation.outAsyncPrivateData) {
+            return true;   // асинхронный путь не предложен — мучить нечего
+        }
+
+        AsyncImporterEntry async = creation.outAsyncEntry;
+        void* asyncData = creation.outAsyncPrivateData;
+
+        std::atomic<bool> stop(false);
+        std::vector<std::thread> crowd;
+
+        for (int t = 0; t < 4; ++t) {
+            crowd.emplace_back([&, t]() {
+                for (int i = 0; !stop.load(); ++i) {
+                    const int frame = (i * 3 + t) % 24;
+
+                    aiAsyncRequest req = {};
+                    req.inPrivateData = asyncData;
+                    req.inSourceRec.inFrameTime =
+                        static_cast<PrTime>(frame) * ticksPerFrame;
+                    async(aiInitiateAsyncRead, &req);
+
+                    if ((i & 3) == 0) async(aiCancelAsyncRead, &req);
+                    askForFrame(async, asyncData, frame);
+                }
+            });
+        }
+
+        Sleep(400);
+        stop.store(true);
+        for (std::thread& th : crowd) th.join();   // никого внутри не осталось
+
+        async(aiFlush, asyncData);
+        async(aiClose, asyncData);
+    }
+
+    // --- 2. Закрытие ровно во время работающего вызова ----------------------
+    //
+    // Один поток делает РОВНО ОДИН запрос кадра подальше от начала, чтобы он
+    // заведомо был внутри; главный тем временем закрывает. Правило «никаких
+    // вызовов после закрытия» соблюдено: больше этот поток не зовёт никого.
+    {
+        imAsyncImporterCreationRec creation = {};
+        creation.inPrivateData = privateData;
+        if (entry(imCreateAsyncImporter, stdParms, &creation, nullptr) != malNoError ||
+            !creation.outAsyncEntry || !creation.outAsyncPrivateData) {
+            return true;
+        }
+
+        AsyncImporterEntry async = creation.outAsyncEntry;
+        void* asyncData = creation.outAsyncPrivateData;
+
+        // Заказываем далёкий кадр, чтобы работнику было чем заняться
+        for (int frame = 40; frame < 56; ++frame) {
+            aiAsyncRequest req = {};
+            req.inPrivateData = asyncData;
+            req.inSourceRec.inFrameTime = static_cast<PrTime>(frame) * ticksPerFrame;
+            async(aiInitiateAsyncRead, &req);
+        }
+
+        // Ждём, пока поток дойдёт до самого вызова, и только потом закрываем.
+        // Полной гарантии тут быть не может — между поднятием флага и входом
+        // в плагин остаются микросекунды, — но случай «поток ещё не запустился»
+        // этим снимается, а он и есть основной.
+        std::atomic<bool> about(false);
+        std::thread one([&]() {
+            about.store(true);
+            askForFrame(async, asyncData, 55);
+        });
+        while (!about.load()) { Sleep(0); }
+        Sleep(20);
+        async(aiFlush, asyncData);
+        async(aiClose, asyncData);
+
+        one.join();
+    }
+
+    return true;
+}
 
 RunResult Run(ImportEntryProc entry, const HostProfile& profile,
               const wchar_t* mediaPath)
@@ -372,10 +601,38 @@ RunResult Run(ImportEntryProc entry, const HostProfile& profile,
     audioRec.privateData = openRec.privatedata;
     out.audioGot = entry(imImportAudio7, &stdParms, fileRef, &audioRec) == malNoError;
 
+    // Асинхронный путь гоняем на том же открытом файле и сравниваем нулевой
+    // кадр с тем, что дал обычный путь чуть выше
+    if (out.hasVideo && out.width > 0 && out.height > 0) {
+        PrTime ticksPerSecond = 0;
+        g_timeSuite.GetTicksPerSecond(&ticksPerSecond);
+        const PrTime ticksPerFrame =
+            (fileInfo.vidScale > 0)
+                ? ticksPerSecond * fileInfo.vidSampleSize / fileInfo.vidScale
+                : ticksPerSecond / 30;
+
+        out.async = RunAsync(entry, &stdParms, fileRef, openRec.privatedata,
+                             ticksPerFrame, out.firstFrame, out.width, out.height,
+                             out.pixelFormat);
+
+        // Злые сценарии гоняем только на самом свежем профиле: они одинаковы
+        // для всех хостов, а времени берут заметно
+        if (profile.interfaceVer >= 24) {
+            out.async.stressSurvived =
+                RunAsyncStress(entry, &stdParms, openRec.privatedata,
+                               ticksPerFrame, out.width, out.height);
+        } else {
+            out.async.stressSurvived = true;
+        }
+    }
+
     entry(imCloseFile, &stdParms, &fileRef, openRec.privatedata);
 
-    for (FakeFrame* f : g_frames) delete f;
-    g_frames.clear();
+    {
+        std::lock_guard<std::mutex> lock(g_framesMutex);
+        for (FakeFrame* f : g_frames) delete f;
+        g_frames.clear();
+    }
     return out;
 }
 
@@ -384,9 +641,10 @@ RunResult Run(ImportEntryProc entry, const HostProfile& profile,
 int wmain(int argc, wchar_t** argv)
 {
     if (argc < 3) {
-        printf("Usage: host_test <path to AV1Importer.prm> <media file>\n");
+        printf("Usage: host_test <path to Aether.prm> <media file>\n");
         return 1;
     }
+
 
     HMODULE plugin = LoadLibraryExW(argv[1], nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!plugin) {
@@ -400,6 +658,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     BuildHostTables();
+
 
     // Версии интерфейса импортёра из PrSDKImport.h: 24 = Premiere 23.2 и новее
     // (с тех пор не менялась), 21 = 13.0, то есть 2019 год.
@@ -446,6 +705,21 @@ int wmain(int argc, wchar_t** argv)
                   "frame cache taken at a version the host has");
         } else {
             Check(r.cacheVersion == 0, "no frame cache, and the plug-in went on anyway");
+        }
+
+        // Асинхронная выдача. Хост вправе ею не пользоваться, поэтому
+        // «не создался» — не провал; а вот созданный обязан отдать кадры
+        // и отдать ТЕ ЖЕ САМЫЕ.
+        if (!r.hasVideo) {
+            printf("    %-44s SKIP (no video track)\n", "async delivery");
+        } else if (!r.async.created) {
+            printf("    %-44s SKIP (not offered)\n", "async delivery");
+        } else {
+            printf("    async: %d of 6 frames delivered\n", r.async.delivered);
+            Check(r.async.delivered == 6, "async delivered every frame asked for");
+            Check(r.async.matchesSync,    "async frame 0 identical to the plain path");
+            Check(r.async.survived,       "async importer closed without taking us down");
+            Check(r.async.stressSurvived, "async survives concurrent calls and a close mid-work");
         }
 
         // Кадр обязан быть тем же самым независимо от возраста хоста: версия

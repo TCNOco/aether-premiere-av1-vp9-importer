@@ -745,6 +745,32 @@ bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW,
     return true;
 }
 
+void Decoder::LimitCacheToFrames(int frames) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (frames <= 0 || info_.width <= 0 || info_.height <= 0) return;
+
+    const size_t bytesPerFrame = (size_t)info_.width * info_.height * 3 / 2;  // NV12
+    const size_t wanted = bytesPerFrame * (size_t)frames;
+    if (wanted < cacheBudget_) cacheBudget_ = wanted;
+}
+
+bool Decoder::PrefetchFrame(int64_t frameIndex) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!IsOpen() || !info_.hasVideo || !codec_) return false;
+    if (frameIndex < 0) frameIndex = 0;
+
+    // Уже лежит — работы нет
+    if (frameCache_.count(frameIndex)) return true;
+
+    // Кэш заполняется только при отматывании назад, иначе он был бы пустой
+    // тратой памяти на обычном чтении вперёд. Здесь наоборот: смысл всей
+    // затеи в том, чтобы кадр дождался запроса, поэтому включаем его явно.
+    cacheFill_ = true;
+    const bool ok = DecodeUntil(frameIndex);
+    cacheFill_ = false;
+    return ok;
+}
+
 bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
                            int dstWidth, int dstHeight, FrameFormat format) {
     std::lock_guard<std::mutex> lock(mutex_);

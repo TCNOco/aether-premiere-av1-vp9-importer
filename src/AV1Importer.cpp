@@ -9,6 +9,7 @@
 // imUnsupported, и Premiere просто не будет этим пользоваться.
 
 #include "AV1Importer.h"
+#include "AV1Async.h"
 #include "AV1Log.h"
 #include "AV1Settings.h"
 
@@ -420,9 +421,13 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     fileInfo->vidInfo.noDuration     = imNoDurationFalse;
     fileInfo->vidInfo.hasPulldown    = kPrFalse;
 
-    // Кадры выдаём через imGetSourceVideo; асинхронного пути пока нет
+    // Оба пути сразу: обычный остаётся, асинхронный хост использует, если
+    // захочет. Заявляем асинхронный только когда он включён в настройках —
+    // иначе Premiere спросит imCreateAsyncImporter, получит отказ и будет
+    // спрашивать снова.
     fileInfo->vidInfo.supportsGetSourceVideo = kPrTrue;
-    fileInfo->vidInfo.supportsAsyncIO        = kPrFalse;
+    fileInfo->vidInfo.supportsAsyncIO        =
+        av1imp::AsyncEnabled() ? kPrTrue : kPrFalse;
 
     // Частоту передаём дробью — иначе 59.94 превратится в 60 и картинка уедет
     fileInfo->vidScale      = mi.fpsNum > 0 ? mi.fpsNum : 30;
@@ -689,6 +694,21 @@ PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
             result = AV1PreferredFrameSize(stdParms,
                         reinterpret_cast<imPreferredFrameSizeRec*>(param1));
             break;
+
+        case imCreateAsyncImporter: {
+            imAsyncImporterCreationRec* rec =
+                reinterpret_cast<imAsyncImporterCreationRec*>(param1);
+            if (!rec) { result = imOtherErr; break; }
+
+            ImporterLocalRecH ldataH =
+                reinterpret_cast<ImporterLocalRecH>(rec->inPrivateData);
+            if (!ldataH) { result = imOtherErr; break; }
+
+            // Отказ здесь не беда: хост просто останется на обычном пути
+            result = av1imp::CreateAsyncImporter(*ldataH, rec)
+                     ? malNoError : imOtherErr;
+            break;
+        }
 
         case imGetSourceVideo:
             result = AV1GetSourceVideo(stdParms, reinterpret_cast<imFileRef>(param1),
