@@ -15,6 +15,7 @@ extern "C" {
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 
 namespace av1imp {
@@ -190,17 +191,24 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
     info_.fpsNum = fr.num;
     info_.fpsDen = fr.den;
 
+    if (info_.fps > 0) {
+        toleranceTicks_ = (int64_t)(0.25 / info_.fps / av_q2d(st->time_base));
+    }
+
     if (st->duration != AV_NOPTS_VALUE) {
         info_.durationSec = st->duration * av_q2d(st->time_base);
     } else if (fmt_->duration != AV_NOPTS_VALUE) {
         info_.durationSec = fmt_->duration / (double)AV_TIME_BASE;
     }
 
-    // nb_frames заполнен не всегда (например, во фрагментированном MP4) —
-    // тогда считаем по длительности и частоте кадров.
-    info_.frameCount = st->nb_frames > 0
-        ? st->nb_frames
-        : (info_.fps > 0 ? (int64_t)(info_.durationSec * info_.fps + 0.5) : 0);
+    // Длина клипа в кадрах ТАЙМЛАЙНА, а не в кадрах источника. При постоянной
+    // частоте это одно и то же, при плавающей — нет: в нашем проверочном файле
+    // 350 кадров источника на 10 секунд, а таймлайн 60 fps держит их 601.
+    // Поэтому длительность важнее счётчика кадров, а не наоборот; nb_frames
+    // остаётся на случай, когда длительности в контейнере нет.
+    info_.frameCount = (info_.fps > 0 && info_.durationSec > 0)
+        ? (int64_t)(info_.durationSec * info_.fps + 0.5)
+        : st->nb_frames;
 
     info_.codecName = codec->name;
 
@@ -213,6 +221,7 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
     frame_   = av_frame_alloc();
     swFrame_ = av_frame_alloc();
     lastFrame_ = av_frame_alloc();
+    aheadFrame_ = av_frame_alloc();
     packet_  = av_packet_alloc();
     if (!frame_ || !swFrame_ || !packet_) {
         SetError("out of memory for frame buffers");
@@ -327,6 +336,9 @@ void Decoder::StoreInCache(int64_t index, AVFrame* src) {
             av_frame_free(&copy);
             return;
         }
+        // Перенос забирает только пиксели: без этого у кадра из кэша не
+        // осталось бы метки времени, и он не смог бы сказать, откуда он
+        av_frame_copy_props(copy, src);
     } else if (av_frame_ref(copy, src) < 0) {
         av_frame_free(&copy);
         return;
@@ -366,6 +378,7 @@ void Decoder::CloseLocked() {
     if (frame_)    { av_frame_free(&frame_); }
     if (swFrame_)  { av_frame_free(&swFrame_); }
     if (lastFrame_){ av_frame_free(&lastFrame_); }
+    if (aheadFrame_){ av_frame_free(&aheadFrame_); }
     if (codec_)    { avcodec_free_context(&codec_); }
     if (hwDevice_) { av_buffer_unref(&hwDevice_); }
     if (fmt_)      { avformat_close_input(&fmt_); }
@@ -374,68 +387,157 @@ void Decoder::CloseLocked() {
     codecId_          = 0;
     lastDecodedFrame_ = -1;
     eofReached_       = false;
+    lastFrameTimeSec_ = 0.0;
+    curValid_         = false;
+    aheadValid_       = false;
+    toleranceTicks_   = 0;
     info_ = MediaInfo{};
 }
 
+// Метка времени исходника, в которую попадает кадр таймлайна с этим номером.
+int64_t Decoder::TargetTicks(int64_t timelineFrame) const {
+    if (!fmt_ || videoStream_ < 0 || info_.fps <= 0) return timelineFrame;
+    const double tb = av_q2d(fmt_->streams[videoStream_]->time_base);
+    return (int64_t)llround(timelineFrame / info_.fps / tb);
+}
+
+// Номер кадра таймлайна, с которого начинает показываться кадр с этой меткой.
+int64_t Decoder::TimelineIndexOf(int64_t ts) const {
+    if (!fmt_ || videoStream_ < 0) return 0;
+    // Без частоты кадров метка и есть номер, см. DecodeUntil
+    if (info_.fps <= 0) return ts > 0 ? ts : 0;
+    const double tb  = av_q2d(fmt_->streams[videoStream_]->time_base);
+    const double sec = ts * tb;
+    // Вверх, а не вниз: кадр становится нужным начиная с ПЕРВОГО момента
+    // таймлайна, который не раньше него. Округление вниз давало кадр вперёд
+    // на файле, где видео начинается позже общего нуля клипа, — и кэш отдавал
+    // не то, что посчитал бы сам декодер.
+    const int64_t idx = (int64_t)ceil(sec * info_.fps - 0.25);
+    return idx > 0 ? idx : 0;
+}
+
+// Время кадра в секундах от общего нуля клипа.
+double Decoder::FrameTimeSec(const AVFrame* f) const {
+    if (!f || !fmt_ || videoStream_ < 0) return 0.0;
+    const int64_t pts = f->best_effort_timestamp != AV_NOPTS_VALUE
+                        ? f->best_effort_timestamp : f->pts;
+    if (pts == AV_NOPTS_VALUE) return 0.0;
+    return pts * av_q2d(fmt_->streams[videoStream_]->time_base);
+}
+
+// Найти кадр источника, который виден в момент, когда Premiere показывает
+// кадр таймлайна с номером targetFrame.
+//
+// Это не одно и то же, и в этом вся суть. Таймлайн идёт с постоянной частотой,
+// источник — как получится: запись с экрана выдаёт то десять кадров в секунду,
+// то шестьдесят, а в заголовке контейнера при этом стоит одно число. Считать
+// номер кадра как «метка × частота» можно ровно до первого такого файла: у нас
+// на нём каждый второй запрос возвращал самый первый кадр записи, в том числе
+// на пятой секунде.
+//
+// Правило вместо арифметики: показать последний кадр, чья метка не позже
+// нужного момента. Узнать, что он последний, можно только заглянув на кадр
+// вперёд — длительность кадра из контейнера для этого не годится, Matroska
+// проставляет её из заголовка и на плавающей частоте пишет всем кадрам одно
+// и то же. Заглянувший кадр не выбрасывается, а остаётся до следующего
+// запроса: при обычном воспроизведении подряд он и окажется нужным.
 bool Decoder::DecodeUntil(int64_t targetFrame) {
-    AVStream* st = fmt_->streams[videoStream_];
+    // Частота кадров известна не всегда. Без неё времени нет, и остаётся
+    // единственное, что есть у любого файла, — порядок кадров: тогда «метка»
+    // это просто номер по счёту, и вся логика ниже работает как была.
+    const bool    byTime     = info_.fps > 0;
+    const int64_t targetTs   = byTime ? TargetTicks(targetFrame) : targetFrame;
+    const int64_t frameTicks = byTime ? (TargetTicks(1) - TargetTicks(0)) : 1;
+
+    // Отдать выбранный кадр наружу. Ссылка, а не копия: пикселей не трогаем.
+    auto deliver = [this]() {
+        av_frame_unref(frame_);
+        return av_frame_ref(frame_, lastFrame_) == 0;
+    };
 
     // Назад или далеко вперёд — перематываем. Вперёд на несколько кадров дешевле
     // просто домотать декодированием: перемотка всегда идёт до ключевого кадра,
     // и на длинном интервале между ними обходится дороже.
     const int64_t kForwardScanLimit = 64;
-    bool needSeek = (targetFrame <= lastDecodedFrame_) ||
-                    (targetFrame - lastDecodedFrame_ > kForwardScanLimit) ||
-                    (lastDecodedFrame_ < 0);
+    const bool needSeek = !curValid_ ||
+                          targetTs < curTs_ ||
+                          (targetFrame - lastDecodedFrame_ > kForwardScanLimit);
 
     if (needSeek) {
-        int64_t ts = info_.fps > 0
-            ? (int64_t)((targetFrame / info_.fps) / av_q2d(st->time_base))
-            : 0;
-        if (av_seek_frame(fmt_, videoStream_, ts, AVSEEK_FLAG_BACKWARD) < 0) {
+        // Без частоты кадров цель в метках времени не выразить — отматываем
+        // к началу и доходим по порядку
+        const int64_t seekTs = byTime ? targetTs : 0;
+        if (av_seek_frame(fmt_, videoStream_, seekTs, AVSEEK_FLAG_BACKWARD) < 0) {
             SetError("seek failed");
             return false;
         }
         avcodec_flush_buffers(codec_);
+        curValid_         = false;
+        aheadValid_       = false;
         lastDecodedFrame_ = -1;
-        eofReached_ = false;
+        eofReached_       = false;
     }
 
     while (true) {
-        int err = avcodec_receive_frame(codec_, frame_);
+        // Сначала разбираемся с уже раскодированным кадром, если он есть
+        if (aheadValid_) {
+            if (aheadTs_ <= targetTs + toleranceTicks_) {
+                // До цели не дошли — этот кадр становится текущим
+                av_frame_unref(lastFrame_);
+                av_frame_move_ref(lastFrame_, aheadFrame_);
+                curTs_            = aheadTs_;
+                curValid_         = true;
+                aheadValid_       = false;
+                lastDecodedFrame_ = TimelineIndexOf(curTs_);
+
+                if (cacheFill_) StoreInCache(lastDecodedFrame_, lastFrame_);
+
+                // Кадр лёг ровно в запрошенный момент — заглядывать вперёд
+                // незачем: следующий будет уже за целью, а лучше «точно в
+                // момент» ничего не бывает. Так постоянная частота не платит
+                // за разведку ничего, а платила заметно: лишний кадр после
+                // перемотки стоил 3% на случайных прыжках, потому что
+                // многопоточный декодер отдаёт кадры не по одному.
+                //
+                // Допуск здесь тот же, что и при выборе кадра, и по той же
+                // причине: метки в Matroska округлены до миллисекунд.
+                if (llabs(curTs_ - targetTs) <= toleranceTicks_) return deliver();
+
+                continue;
+            }
+
+            // Перешагнули цель: нужный кадр — текущий, а этот подождёт
+            if (curValid_) return deliver();
+
+            // Цель раньше самого первого кадра файла — отдаём первый.
+            // Так бывает у файлов, где видео начинается позже звука.
+            av_frame_unref(lastFrame_);
+            av_frame_move_ref(lastFrame_, aheadFrame_);
+            curTs_            = aheadTs_;
+            curValid_         = true;
+            aheadValid_       = false;
+            lastDecodedFrame_ = TimelineIndexOf(curTs_);
+            return deliver();
+        }
+
+        int err = avcodec_receive_frame(codec_, aheadFrame_);
 
         if (err == 0) {
-            // Номер кадра считаем по метке времени: best_effort_timestamp
-            // устойчивее к файлам без счётчика кадров.
-            const int64_t pts = frame_->best_effort_timestamp;
-            const int64_t sequential = lastDecodedFrame_ + 1;
+            const int64_t pts = aheadFrame_->best_effort_timestamp != AV_NOPTS_VALUE
+                                ? aheadFrame_->best_effort_timestamp
+                                : aheadFrame_->pts;
 
-            int64_t idx = sequential;
-            if (pts != AV_NOPTS_VALUE && info_.fps > 0) {
-                idx = (int64_t)(pts * av_q2d(st->time_base) * info_.fps + 0.5);
-
-                // Метка времени — источник точный, но не всегда исправный.
-                // При плавающей частоте кадров или битом тайминге номер может
-                // не двигаться или поехать назад; тогда считаем последовательно.
-                // Условие не трогает нормальный случай и не мешает перемотке:
-                // сразу после неё lastDecodedFrame_ = -1, и метке верим.
-                if (lastDecodedFrame_ >= 0 && idx <= lastDecodedFrame_) {
-                    idx = sequential;
-                }
+            // Кадр без метки времени внутри файла, где метки есть, — считаем
+            // его на кадр позже предыдущего, а не на один тик
+            if (!byTime) {
+                aheadTs_ = curValid_ ? curTs_ + 1 : 0;
+            } else if (pts != AV_NOPTS_VALUE) {
+                aheadTs_ = pts;
+            } else {
+                aheadTs_ = curValid_ ? curTs_ + frameTicks : targetTs;
             }
-            lastDecodedFrame_ = idx;
-
-            // Держим ссылку на последний целый кадр: в конце файла отдавать
-            // будет уже нечего, а чёрный провал на таймлайне хуже повтора
-            if (lastFrame_) {
-                av_frame_unref(lastFrame_);
-                av_frame_ref(lastFrame_, frame_);
-            }
-
-            if (cacheFill_) StoreInCache(idx, frame_);
-
-            if (idx >= targetFrame) return true;
-            continue;  // ещё не дошли — декодируем дальше
+            aheadValid_ = true;
+            continue;
         }
 
         if (err == AVERROR_EOF) {
@@ -446,10 +548,10 @@ bool Decoder::DecodeUntil(int64_t targetFrame) {
             // ПЕРЕД тем, как вернуть ошибку: в frame_ оставалось 0x0 с форматом
             // -1. Дальше он уходил в swscale, а тот на такое не отвечает ошибкой,
             // а падает по av_assert0 — то есть уносит с собой весь Premiere.
-            // Поэтому отдаём сохранённую копию последнего целого кадра.
-            if (lastFrame_ && lastFrame_->width > 0 && lastFrame_->format >= 0) {
-                av_frame_unref(frame_);
-                if (av_frame_ref(frame_, lastFrame_) == 0) return true;
+            // Поэтому отдаём последний целый кадр: на таймлайне повтор лучше
+            // чёрного провала.
+            if (curValid_ && lastFrame_->width > 0 && lastFrame_->format >= 0) {
+                return deliver();
             }
             SetError("end of file reached before the requested frame");
             return false;
@@ -479,7 +581,6 @@ bool Decoder::DecodeUntil(int64_t targetFrame) {
         }
     }
 }
-
 bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW, int dstH,
                             FrameFormat format) {
     AVFrame* srcFrame = src;
@@ -587,6 +688,7 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
 
     auto cached = frameCache_.find(frameIndex);
     if (cached != frameCache_.end()) {
+        lastFrameTimeSec_ = FrameTimeSec(cached->second);
         return ConvertToBGRA(cached->second, dst, dstStride, dstWidth, dstHeight, format);
     }
 
@@ -597,10 +699,11 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
         std::chrono::steady_clock::now() - tDec).count();
     cacheFill_ = false;
 
-    // При обрыве в конце файла DecodeUntil оставляет в frame_ последний удачно
+    // При обрыве в конце файла DecodeUntil отдаёт последний удачно
     // раскодированный кадр и сообщает об успехе — на таймлайне это лучше
     // чёрного провала, а Premiere всё равно не запрашивает кадры за длиной.
     if (!ok) return false;
+    lastFrameTimeSec_ = FrameTimeSec(frame_);
     return ConvertToBGRA(frame_, dst, dstStride, dstWidth, dstHeight, format);
 }
 

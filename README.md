@@ -44,6 +44,7 @@ versions it actually has instead of demanding the newest — which is exactly wh
 | AV1 | yes — MP4, MKV, WebM, MOV, M4V |
 | VP9 | yes — the same containers |
 | Multi-track audio | yes, tracks stay separate |
+| Variable frame rate | yes — the picture is found by time, not by frame number |
 | 10-bit | yes — delivered as 16-bit, see below |
 | HDR | decoded, but the transfer metadata is not passed on yet |
 | Alpha channel | yes, for VP9 in WebM — decoded on the CPU, see below |
@@ -352,6 +353,28 @@ twice as bright and clipped, which is the kind of bug that survives a long time.
 `decoder_test` checks both halves on a 10-bit file: that the output carries more
 than 256 distinct values per channel — otherwise it is 8-bit data in a wider buffer
 — and that nothing exceeds 32768.
+
+### A timeline frame is not a source frame
+
+Premiere asks for frame number N of a timeline that runs at a fixed rate. A
+source does not have to oblige. A screen recorder writes ten frames in one second
+and sixty in the next, while the container header still states a single number,
+and the two counts have nothing to do with each other: our test file holds 350
+source frames across ten seconds that a 60 fps timeline divides into 601.
+
+So the frame to show is not computed, it is **looked up by time**: the last frame
+whose timestamp is no later than N divided by the rate. Knowing that a frame is
+the last one requires seeing the one after it — the frame duration stored in the
+container is no help, Matroska fills it in from the header and states the same
+value for every frame no matter how far apart they really are.
+
+Reading one frame ahead is not free, and the measurement says where: sequential
+reading and backwards stepping do not change, but every seek used to pay for one
+extra decode — 3% on random jumps, because a threaded decoder does not hand back
+frames one at a time. The way out is that most files do not need the lookahead at
+all: when a frame lands exactly on the requested instant, nothing later can be a
+better answer, and it is delivered immediately. Constant frame rate therefore
+pays nothing, and variable frame rate pays one frame.
 
 ### The frame cache
 

@@ -35,6 +35,7 @@ $expect = [ordered]@{
     "vp9.webm"        = "accept"
     "vp9_alpha.webm"  = "accept"
     "audio_only.mka"  = "accept"
+    "vfr.mkv"         = "accept"
     "audio_only.mp4"  = "refuse"
     "h264.mp4"        = "refuse"
 }

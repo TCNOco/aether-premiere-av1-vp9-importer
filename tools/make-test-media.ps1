@@ -78,6 +78,20 @@ Make "audio_only.mp4" @(
     "-f","lavfi","-i","sine=frequency=440:duration=4",
     "-c:a","aac")
 
+# Variable frame rate: ten frames a second for the first half, sixty for the
+# second. Nothing announces that in the header - Matroska still says 60 - so a
+# plug-in that trusts the declared rate lines the picture up wrongly.
+#
+# Made by dropping five frames out of every six in the first half rather than by
+# rewriting timestamps: that leaves the spacing genuinely uneven and the
+# timestamps monotonic, the way a screen recorder produces it.
+Make "vfr.mkv" @(
+    "-f","lavfi","-i","testsrc2=size=320x180:rate=60:duration=10",
+    "-f","lavfi","-i","sine=frequency=440:duration=10",
+    "-filter_complex","[0:v]select='if(lt(n,300),not(mod(n,6)),1)'[v]",
+    "-map","[v]","-map","1:a","-fps_mode:v","vfr",
+    "-c:v","libsvtav1","-preset","12","-crf","50","-g","60","-c:a","aac")
+
 # H.264, the most ordinary file there is - must be handed back untouched.
 # libopenh264 rather than libx264: the LGPL FFmpeg build has no x264 in it.
 Make "h264.mp4" @(

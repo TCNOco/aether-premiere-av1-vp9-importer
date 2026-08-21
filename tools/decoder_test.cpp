@@ -192,6 +192,70 @@ void CheckReadingPastTheEnd(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
            justPast ? "frame returned" : "refused");
 }
 
+// Кадр таймлайна и кадр источника - разные вещи, и связывает их время.
+// Premiere просит кадр номер N постоянной частоты; отдать нужно тот кадр
+// источника, который в этот момент виден, то есть последний с меткой не
+// позже N/fps. Пока частота постоянная, разницы не видно - поэтому ошибку
+// в этом месте легко не заметить годами.
+//
+// Правило простое: картинка не имеет права убегать вперёд запроса и не имеет
+// права отстать сильнее, чем длится один кадр источника. Запас в 0.25 с взят
+// под материал из tools\make-test-media.ps1, где самый редкий кадр держится
+// 0.1 с; на постоянной частоте расхождение выходит нулевым.
+void CheckTimelinePicksFrameByTime(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
+{
+    const char* nameAhead = "picture never runs ahead of the timeline";
+    const char* nameLag   = "picture never falls behind the timeline";
+    const char* nameMoves = "picture advances together with the timeline";
+
+    if (!info.hasVideo || info.fps <= 0 || info.frameCount <= 2) {
+        printf("  %-46s SKIP (no video)\n", nameAhead);
+        return;
+    }
+
+    const int stride = info.width * 4;
+    std::vector<uint8_t> buf((size_t)stride * info.height, 0);
+
+    const double frameSec = 1.0 / info.fps;
+    const double ahead    = frameSec * 0.5;   // допуск на округление меток в контейнере
+    const double lag      = 0.25;
+
+    double worstAhead = 0.0, worstLag = 0.0;
+    double firstSeen = 0.0, lastSeen = 0.0;
+    int64_t firstIdx = 0, lastIdx = 0;
+    bool haveFirst = false, decoded = true;
+
+    // Идём по клипу с шагом, а не подряд: нужен весь ролик, а не его начало
+    const int64_t step = info.frameCount > 40 ? info.frameCount / 40 : 1;
+    for (int64_t n = 0; n < info.frameCount - 1; n += step) {
+        if (!dec.GetFrameBGRA(n, buf.data(), stride, info.width, info.height)) {
+            decoded = false;
+            break;
+        }
+        const double want = n * frameSec;
+        const double got  = dec.LastFrameTimeSec();
+
+        if (got - want > worstAhead) worstAhead = got - want;
+        if (want - got > worstLag)   worstLag   = want - got;
+
+        if (!haveFirst) { firstSeen = got; firstIdx = n; haveFirst = true; }
+        lastSeen = got; lastIdx = n;
+    }
+
+    printf("      worst ahead %.3f s, worst behind %.3f s\n", worstAhead, worstLag);
+
+    Check(decoded && worstAhead <= ahead, nameAhead);
+    Check(decoded && worstLag   <= lag,   nameLag);
+
+    // Отдельно - застревание: при неверном начале отсчёта декодер отдавал
+    // один и тот же первый кадр на любой запрос, и оба правила выше это
+    // пропускали, потому что расхождение считалось от неверного нуля
+    const double travelled = lastSeen - firstSeen;
+    const double expected  = (double)(lastIdx - firstIdx) * frameSec;
+    printf("      timeline moved %.2f s, picture moved %.2f s\n", expected, travelled);
+    Check(decoded && expected > 0 && travelled > expected * 0.9, nameMoves);
+}
+
 void CheckReducedSizeStaysInBuffer(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 {
     if (!info.hasVideo) {
@@ -474,6 +538,7 @@ int main(int argc, char** argv)
     CheckReducedSizeStaysInBuffer(dec, info);
     CheckCacheMatchesFreshDecode(dec, path, info, preferHardware);
     CheckAudioIsRepeatable(dec, info);
+    CheckTimelinePicksFrameByTime(dec, info);
 
     printf("\n%s\n", g_failures == 0 ? "ALL CHECKS PASSED"
                                      : "SOME CHECKS FAILED");
