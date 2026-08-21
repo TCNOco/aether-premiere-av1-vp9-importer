@@ -178,7 +178,7 @@ static prMALError AV1GetIndFormat(imStdParms* stdParms, csSDK_size_t index,
     if (index != 0) return imBadFormatIndex;
 
     // Расширения перечисляются через нули: AV1 кладут в эти контейнеры
-    static const char kExtensions[] = "mp4\0mkv\0webm\0mov\0m4v\0";
+    static const char kExtensions[] = "mp4\0mkv\0webm\0mov\0m4v\0mka\0";
 
     rec->filetype         = AV1_FILE_TYPE;
     rec->canWriteTimecode = kPrFalse;
@@ -230,10 +230,15 @@ static prMALError AV1OpenFile8(imStdParms* stdParms, imFileRef* fileRef,
         ldata->fileRef = imInvalidHandleValue;
         return imBadFile;
     }
-    av1imp::Log("imOpenFile8: accepted, %s %dx%d, decoder %s",
-                ldata->decoder->Info().codecName.c_str(),
-                ldata->decoder->Info().width, ldata->decoder->Info().height,
-                ldata->decoder->Info().decoderName.c_str());
+    if (ldata->decoder->Info().hasVideo) {
+        av1imp::Log("imOpenFile8: accepted, %s %dx%d, decoder %s",
+                    ldata->decoder->Info().codecName.c_str(),
+                    ldata->decoder->Info().width, ldata->decoder->Info().height,
+                    ldata->decoder->Info().decoderName.c_str());
+    } else {
+        av1imp::Log("imOpenFile8: accepted, no video, %d audio track(s)",
+                    ldata->decoder->Info().audioStreamCount);
+    }
 
     *fileRef                   = ldata->fileRef;
     openRec->fileinfo.fileref  = ldata->fileRef;
@@ -366,7 +371,9 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
         return imBadStreamIndex;
     }
 
-    fileInfo->hasVideo    = (fileInfo->streamIdx == 0) ? kPrTrue : kPrFalse;
+    // Поток 0 обычно несёт видео плюс первую дорожку звука — но у файла без
+    // видеодорожки (звук в Matroska или WebM) видео нет и в нулевом потоке
+    fileInfo->hasVideo    = (fileInfo->streamIdx == 0 && mi.hasVideo) ? kPrTrue : kPrFalse;
     fileInfo->hasAudio    = kPrFalse;
     fileInfo->accessModes = kRandomAccessImport;
     fileInfo->hasDataRate = kPrFalse;

@@ -106,10 +106,44 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
     }
 
     videoStream_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+
+    // Файл без видео — тоже наш случай, но не всякий.
+    //
+    // Правило то же, что и для видео: берём только то, что Premiere не открывает
+    // сам. Matroska и WebM он не понимает вовсе, поэтому звуковая дорожка в них
+    // без нас пропадёт совсем. А вот m4a или mp4 со звуком он открывает
+    // прекрасно, и лезть туда значит отбирать работающее.
     if (videoStream_ < 0) {
-        SetError("no video stream in file");
-        CloseLocked();
-        return false;
+        const bool ourContainer =
+            fmt_->iformat && fmt_->iformat->name &&
+            (strstr(fmt_->iformat->name, "matroska") || strstr(fmt_->iformat->name, "webm"));
+
+        if (!ourContainer) {
+            SetError("no video stream, and this container is not ours");
+            CloseLocked();
+            return false;
+        }
+        if (av_find_best_stream(fmt_, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0) < 0) {
+            SetError("no video and no audio in file");
+            CloseLocked();
+            return false;
+        }
+
+        info_.hasVideo = false;
+
+        // Длительность обычно считается по видеодорожке; здесь её нет, а
+        // без длины Premiere не покажет клип вовсе
+        if (fmt_->duration != AV_NOPTS_VALUE) {
+            info_.durationSec = fmt_->duration / (double)AV_TIME_BASE;
+        }
+
+        for (unsigned i = 0; i < fmt_->nb_streams; ++i) {
+            if (fmt_->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+                ++info_.audioStreamCount;
+            }
+        }
+        info_.codecName = "audio only";
+        return true;
     }
 
     AVStream* st = fmt_->streams[videoStream_];
@@ -534,6 +568,10 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
     std::lock_guard<std::mutex> lock(mutex_);
     if (!IsOpen() || !dst) {
         SetError("file is not open");
+        return false;
+    }
+    if (!info_.hasVideo || !codec_) {
+        SetError("this file has no video");
         return false;
     }
     if (frameIndex < 0) frameIndex = 0;

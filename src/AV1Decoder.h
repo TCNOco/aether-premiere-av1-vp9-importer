@@ -47,6 +47,7 @@ struct MediaInfo {
     double   durationSec    = 0.0;
     int      bitDepth       = 8;     // бит на канал в самом файле: 8 или 10
     bool     hasAlpha       = false; // в файле есть прозрачность
+    bool     hasVideo       = true;  // false — файл только со звуком
     bool     hardwareDecode = false; // декодирует видеокарта, а не процессор
     std::string codecName;
     std::string decoderName;

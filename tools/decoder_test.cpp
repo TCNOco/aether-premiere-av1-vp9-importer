@@ -69,6 +69,10 @@ bool SaveBMP(const char* path, const uint8_t* bgra, int w, int h, int stride)
 void CheckCacheMatchesFreshDecode(av1imp::Decoder& dec, const std::string& path,
                                   const av1imp::MediaInfo& info, bool hardware)
 {
+    if (!info.hasVideo) {
+        printf("  %-46s SKIP (no video)\n", "cached frame == freshly decoded frame");
+        return;
+    }
     if (info.frameCount < 400) {
         printf("  %-46s SKIP (clip too short)\n", "cached frame == freshly decoded frame");
         return;
@@ -167,6 +171,10 @@ void CheckAlphaSurvives(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 
 void CheckReadingPastTheEnd(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 {
+    if (!info.hasVideo) {
+        printf("  %-46s SKIP (no video)\n", "reading past the end");
+        return;
+    }
     const int stride = info.width * 4;
     std::vector<uint8_t> buf((size_t)stride * info.height, 0);
 
@@ -186,6 +194,10 @@ void CheckReadingPastTheEnd(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 
 void CheckReducedSizeStaysInBuffer(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 {
+    if (!info.hasVideo) {
+        printf("  %-46s SKIP (no video)\n", "reduced-size frame is produced");
+        return;
+    }
     const int w = info.width / 2;
     const int h = info.height / 2;
     const int stride = w * 4;
@@ -331,6 +343,9 @@ int main(int argc, char** argv)
     }
 
     const auto& info = dec.Info();
+    if (!info.hasVideo) {
+        printf("video      : none, %d audio track(s)\n", info.audioStreamCount);
+    } else {
     printf("resolution : %dx%d, %d bit%s\n", info.width, info.height, info.bitDepth,
            info.hasAlpha ? ", with alpha" : "");
     printf("fps        : %.3f (%d/%d)\n", info.fps, info.fpsNum, info.fpsDen);
@@ -405,6 +420,8 @@ int main(int argc, char** argv)
     totalMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
     printf("random     : %d/%d jumps, %.1f ms total, %.1f ms/jump\n",
            ok, kJumps, totalMs, totalMs / (ok ? ok : 1));
+
+    }   // конец видеочасти: у файла без видео её нет вовсе
 
     // --- audio ---
     printf("\naudio      : %d track(s)\n", info.audioStreamCount);

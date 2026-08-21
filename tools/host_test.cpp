@@ -271,6 +271,7 @@ struct RunResult
     int                  framesGot  = 0;
     bool                 audioGot   = false;
     bool                 hasAudio   = false;   // в файле вообще есть звук?
+    bool                 hasVideo   = true;    // а видео?
     int                  width      = 0;
     int                  height     = 0;
     int                  cacheVersion = 0;
@@ -309,11 +310,13 @@ RunResult Run(ImportEntryProc entry, const HostProfile& profile,
     const prMALError infoResult = entry(imGetInfo8, &stdParms, &openRec.fileinfo, &fileInfo);
     // imIterateStreams означает «есть ещё потоки», это тоже успех
     out.gotInfo = (infoResult == malNoError || infoResult == imIterateStreams);
+    out.hasVideo = (fileInfo.hasVideo != 0);
     out.width   = fileInfo.vidInfo.imageWidth;
     out.height  = fileInfo.vidInfo.imageHeight;
     out.cacheVersion = g_cacheVersionGiven;
     if (!out.gotInfo) return out;
 
+    if (out.hasVideo) {
     imIndPixelFormatRec pixFmt = {};
     pixFmt.privatedata    = openRec.privatedata;
     pixFmt.outPixelFormat = PrPixelFormat_BGRA_4444_8u;
@@ -349,6 +352,8 @@ RunResult Run(ImportEntryProc entry, const HostProfile& profile,
             }
         }
     }
+
+    }   // конец видеочасти
 
     // Звук: одна десятая секунды с начала. Файл без звуковой дорожки — случай
     // законный (графика с прозрачностью, к примеру), и требовать от него отсчёты
@@ -415,13 +420,21 @@ int wmain(int argc, wchar_t** argv)
 
         const RunResult r = Run(entry, profile, argv[2]);
 
-        printf("    accepted the file, %dx%d, frame cache suite %d, pixels %s\n",
-               r.width, r.height, r.cacheVersion,
-               r.pixelFormat == PrPixelFormat_BGRA_4444_16u ? "16u" : "8u");
+    if (r.hasVideo) {
+            printf("    accepted the file, %dx%d, frame cache suite %d, pixels %s\n",
+                   r.width, r.height, r.cacheVersion,
+                   r.pixelFormat == PrPixelFormat_BGRA_4444_16u ? "16u" : "8u");
+        } else {
+            printf("    accepted the file, no video, frame cache suite %d\n", r.cacheVersion);
+        }
 
         Check(r.opened,           "file opened");
         Check(r.gotInfo,          "file info returned");
-        Check(r.framesGot == 2,   "both frames delivered");
+        if (r.hasVideo) {
+            Check(r.framesGot == 2, "both frames delivered");
+        } else {
+            printf("    %-44s SKIP (no video track)\n", "both frames delivered");
+        }
         if (r.hasAudio) {
             Check(r.audioGot,     "audio delivered");
         } else {
@@ -437,7 +450,9 @@ int wmain(int argc, wchar_t** argv)
 
         // Кадр обязан быть тем же самым независимо от возраста хоста: версия
         // набора влияет на скорость, а не на пиксели
-        if (reference.empty()) {
+        if (!r.hasVideo) {
+            // сверять нечего
+        } else if (reference.empty()) {
             reference = r.firstFrame;
         } else {
             Check(!r.firstFrame.empty() && r.firstFrame == reference,

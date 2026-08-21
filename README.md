@@ -45,6 +45,8 @@ versions it actually has instead of demanding the newest — which is exactly wh
 | 10-bit | yes — delivered as 16-bit, see below |
 | HDR | decoded, but the transfer metadata is not passed on yet |
 | Alpha channel | yes, for VP9 in WebM — decoded on the CPU, see below |
+| Audio-only MKV, MKA, WebM | yes — Premiere cannot open those containers at all |
+| Audio-only MP4 and M4A | no, deliberately — Premiere opens those itself |
 | Every other codec | handed straight back to Premiere's own importer |
 
 **Hardware.** Windows x64, nothing else. Without a supported GPU the plug-in decodes
@@ -74,7 +76,10 @@ host: PPro 13.1.5
 - **Multi-track audio kept separate.** OBS writes microphone, game, Discord and
   music as distinct streams, and they arrive as distinct tracks
 - Scrubbing, seeking and export
-- MP4, MKV, WebM, MOV, M4V containers
+- MP4, MKV, WebM, MOV, M4V, MKA containers
+- **Files with no video at all**, when the container is one Premiere cannot open:
+  a Matroska or WebM holding only audio. The same rule as everywhere else decides
+  it — an audio-only MP4 or M4A is refused, because Premiere opens those itself
 
 Files with any other codec are handed straight back to Premiere's own importer, so
 nothing about your existing footage changes.
