@@ -46,6 +46,7 @@ struct MediaInfo {
     int64_t  frameCount     = 0;     // может быть оценкой, если в контейнере нет точного числа
     double   durationSec    = 0.0;
     int      bitDepth       = 8;     // бит на канал в самом файле: 8 или 10
+    bool     hasAlpha       = false; // в файле есть прозрачность
     bool     hardwareDecode = false; // декодирует видеокарта, а не процессор
     std::string codecName;
     std::string decoderName;
@@ -145,6 +146,11 @@ private:
     AVCodecContext*  codec_      = nullptr;
     AVFrame*         frame_      = nullptr;  // кадр из декодера (может быть в памяти видеокарты)
     AVFrame*         swFrame_    = nullptr;  // копия в обычной памяти, если декодировала видеокарта
+
+    // Последний удачно раскодированный кадр. Нужен именно отдельным: при конце
+    // файла avcodec_receive_frame очищает frame_ ещё до того, как вернёт
+    // AVERROR_EOF, и «отдать то, что осталось в frame_» уже нечего.
+    AVFrame*         lastFrame_  = nullptr;
     AVPacket*        packet_     = nullptr;
     SwsContext*      sws_        = nullptr;
     int              swsSrcW_    = 0;   // с какими параметрами создан пересчётчик

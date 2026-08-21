@@ -399,7 +399,9 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     // зрения Premiere источник несжатый.
     fileInfo->vidInfo.subType        = imUncompressed;
     fileInfo->vidInfo.fieldType      = prFieldsNone;
-    fileInfo->vidInfo.alphaType      = alphaNone;
+    // Прозрачность объявляем прямой, а не умноженной: ffmpeg отдаёт альфу
+    // как есть, ни на что цвет не домножая
+    fileInfo->vidInfo.alphaType      = mi.hasAlpha ? alphaStraight : alphaNone;
     fileInfo->vidInfo.pixelAspectNum = 1;
     fileInfo->vidInfo.pixelAspectDen = 1;
     fileInfo->vidInfo.isStill        = kPrFalse;

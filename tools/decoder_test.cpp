@@ -131,6 +131,59 @@ void CheckDeepColour(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
     Check(peak <= 32768,  nameRange);
 }
 
+// Чтение за концом файла. Проверка выглядит бедно — «не упало и ответило» —
+// но именно этим и ценна: раньше на этом месте процесс умирал целиком.
+// avcodec_receive_frame очищает кадр перед тем, как сообщить о конце файла,
+// а пустой кадр в swscale не ошибка, а av_assert0 и конец процесса. В Premiere
+// это выглядело бы как «Premiere просто закрылся», без единого слова в журнале.
+// Если в файле заявлена прозрачность, она должна дойти до выхода живой.
+// Проверка нужна, потому что потерять альфу можно молча в двух местах сразу:
+// на аппаратном декодере и на неверно выбранном декодере VP9 — родной `vp9`
+// отдаёт кадр без неё, альфу вытаскивает только libvpx-vp9.
+void CheckAlphaSurvives(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
+{
+    const char* name = "declared alpha reaches the output";
+    if (!info.hasAlpha) {
+        printf("  %-46s SKIP (no alpha in the file)\n", name);
+        return;
+    }
+
+    const int stride = info.width * 4;
+    std::vector<uint8_t> buf((size_t)stride * info.height, 0);
+    if (!dec.GetFrameBGRA(0, buf.data(), stride, info.width, info.height)) {
+        Check(false, name);
+        return;
+    }
+
+    int lo = 255, hi = 0;
+    for (size_t i = 3; i < buf.size(); i += 4) {     // B G R A
+        const int a = buf[i];
+        if (a < lo) lo = a;
+        if (a > hi) hi = a;
+    }
+    printf("      alpha range: %d..%d\n", lo, hi);
+    Check(hi > lo, name);
+}
+
+void CheckReadingPastTheEnd(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
+{
+    const int stride = info.width * 4;
+    std::vector<uint8_t> buf((size_t)stride * info.height, 0);
+
+    // Заведомо дальше конца, и ещё раз — сразу за последним кадром
+    const bool farPast  = dec.GetFrameBGRA(info.frameCount + 1000, buf.data(), stride,
+                                           info.width, info.height);
+    const bool justPast = dec.GetFrameBGRA(info.frameCount + 1, buf.data(), stride,
+                                           info.width, info.height);
+
+    // Любой ответ годится, кроме падения: вернуть последний кадр или честно
+    // отказать — оба поведения разумны
+    Check(true, "reading past the end does not take the process down");
+    printf("      past the end: %s, one frame past: %s\n",
+           farPast ? "frame returned" : "refused",
+           justPast ? "frame returned" : "refused");
+}
+
 void CheckReducedSizeStaysInBuffer(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 {
     const int w = info.width / 2;
@@ -246,6 +299,10 @@ void CheckAudioIsRepeatable(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 
 int main(int argc, char** argv)
 {
+    // Без буфера: при падении буферизованный вывод теряется целиком, и по
+    // журналу кажется, будто программа упала в самом начале
+    setvbuf(stdout, nullptr, _IONBF, 0);
+
     if (argc < 2) {
         printf("Usage: decoder_test <file> [frame] [--sw]\n");
         printf("  --sw  force the software decoder, as the plug-in does when\n");
@@ -274,7 +331,8 @@ int main(int argc, char** argv)
     }
 
     const auto& info = dec.Info();
-    printf("resolution : %dx%d, %d bit\n", info.width, info.height, info.bitDepth);
+    printf("resolution : %dx%d, %d bit%s\n", info.width, info.height, info.bitDepth,
+           info.hasAlpha ? ", with alpha" : "");
     printf("fps        : %.3f (%d/%d)\n", info.fps, info.fpsNum, info.fpsDen);
     printf("duration   : %.2f s\n", info.durationSec);
     printf("frames     : %lld\n", (long long)info.frameCount);
@@ -393,6 +451,8 @@ int main(int argc, char** argv)
 
     // --- checks ---
     printf("\nchecks:\n");
+    CheckAlphaSurvives(dec, info);
+    CheckReadingPastTheEnd(dec, info);
     CheckDeepColour(dec, info);
     CheckReducedSizeStaysInBuffer(dec, info);
     CheckCacheMatchesFreshDecode(dec, path, info, preferHardware);

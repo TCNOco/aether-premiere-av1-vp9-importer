@@ -124,6 +124,24 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
     }
     codecId_ = st->codecpar->codec_id;
 
+    // Глубину и прозрачность выясняем ДО открытия декодера: от них зависит,
+    // какой декодер вообще годится.
+    //
+    // Глубина берётся из потока, а не из декодера: у аппаратного пути pix_fmt
+    // это AV_PIX_FMT_CUDA, и глубины там нет.
+    if (const AVPixFmtDescriptor* desc =
+            av_pix_fmt_desc_get((AVPixelFormat)st->codecpar->format)) {
+        info_.bitDepth = desc->comp[0].depth;
+        info_.hasAlpha = (desc->flags & AV_PIX_FMT_FLAG_ALPHA) != 0;
+    }
+
+    // У VP9 прозрачность лежит не в самом потоке, а рядом с ним: Matroska несёт
+    // альфу отдельным довеском к блоку и помечает дорожку тегом alpha_mode.
+    // По формату потока её не видно — там обычный yuv420p.
+    if (const AVDictionaryEntry* tag = av_dict_get(st->metadata, "alpha_mode", nullptr, 0)) {
+        if (tag->value && atoi(tag->value) != 0) info_.hasAlpha = true;
+    }
+
     // Дорожкам звука декодер кадров не нужен — проверки на AV1 выше достаточно
     if (needVideo && !OpenCodec(preferHardware)) {
         CloseLocked();
@@ -152,13 +170,6 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
 
     info_.codecName = codec->name;
 
-    // Глубина берётся из самого потока, а не из декодера: у аппаратного пути
-    // pix_fmt это AV_PIX_FMT_CUDA, и глубины там нет
-    if (const AVPixFmtDescriptor* desc =
-            av_pix_fmt_desc_get((AVPixelFormat)st->codecpar->format)) {
-        info_.bitDepth = desc->comp[0].depth;
-    }
-
     for (unsigned i = 0; i < fmt_->nb_streams; ++i) {
         if (fmt_->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
             ++info_.audioStreamCount;
@@ -167,6 +178,7 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
 
     frame_   = av_frame_alloc();
     swFrame_ = av_frame_alloc();
+    lastFrame_ = av_frame_alloc();
     packet_  = av_packet_alloc();
     if (!frame_ || !swFrame_ || !packet_) {
         SetError("out of memory for frame buffers");
@@ -235,6 +247,12 @@ bool Decoder::OpenCodec(bool preferHardware) {
         SetError("video codec is not supported by this plug-in");
         return false;
     }
+
+    // Прозрачность умеет только программный путь. Аппаратные декодеры про
+    // довесок Matroska не знают вовсе и отдают кадр без альфы — проверено:
+    // vp9_cuvid на файле с прозрачностью выдаёт сплошную непрозрачность.
+    // Молча потерять альфу хуже, чем декодировать медленнее.
+    if (info_.hasAlpha) preferHardware = false;
 
     if (preferHardware) {
         for (const HardwareDecoder* hw = codec->hardware; hw->name; ++hw) {
@@ -313,6 +331,7 @@ void Decoder::CloseLocked() {
     if (packet_)   { av_packet_free(&packet_); }
     if (frame_)    { av_frame_free(&frame_); }
     if (swFrame_)  { av_frame_free(&swFrame_); }
+    if (lastFrame_){ av_frame_free(&lastFrame_); }
     if (codec_)    { avcodec_free_context(&codec_); }
     if (hwDevice_) { av_buffer_unref(&hwDevice_); }
     if (fmt_)      { avformat_close_input(&fmt_); }
@@ -372,6 +391,13 @@ bool Decoder::DecodeUntil(int64_t targetFrame) {
             }
             lastDecodedFrame_ = idx;
 
+            // Держим ссылку на последний целый кадр: в конце файла отдавать
+            // будет уже нечего, а чёрный провал на таймлайне хуже повтора
+            if (lastFrame_) {
+                av_frame_unref(lastFrame_);
+                av_frame_ref(lastFrame_, frame_);
+            }
+
             if (cacheFill_) StoreInCache(idx, frame_);
 
             if (idx >= targetFrame) return true;
@@ -380,8 +406,19 @@ bool Decoder::DecodeUntil(int64_t targetFrame) {
 
         if (err == AVERROR_EOF) {
             eofReached_ = true;
-            // Последний кадр всё ещё в frame_ — отдаём его, это лучше чёрного экрана
-            return lastDecodedFrame_ >= 0;
+
+            // Здесь пряталось падение. Комментарий раньше уверял, что «последний
+            // кадр всё ещё в frame_», но avcodec_receive_frame очищает кадр
+            // ПЕРЕД тем, как вернуть ошибку: в frame_ оставалось 0x0 с форматом
+            // -1. Дальше он уходил в swscale, а тот на такое не отвечает ошибкой,
+            // а падает по av_assert0 — то есть уносит с собой весь Premiere.
+            // Поэтому отдаём сохранённую копию последнего целого кадра.
+            if (lastFrame_ && lastFrame_->width > 0 && lastFrame_->format >= 0) {
+                av_frame_unref(frame_);
+                if (av_frame_ref(frame_, lastFrame_) == 0) return true;
+            }
+            SetError("end of file reached before the requested frame");
+            return false;
         }
 
         if (err != AVERROR(EAGAIN)) {
@@ -424,6 +461,20 @@ bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW,
         srcFrame = swFrame_;
         stats_.transferMs += std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - t0).count();
+    }
+
+    // Вторая линия обороны. Кадр без формата или без размеров swscale не
+    // отвергает, а роняет процесс по av_assert0 — внутри Premiere это была бы
+    // не ошибка импорта, а закрывшийся Premiere. Настоящую причину чинит
+    // DecodeUntil, но проверка тут стоит и остаётся: цена ей ноль.
+    if (srcFrame->width <= 0 || srcFrame->height <= 0 ||
+        srcFrame->format < 0 ||
+        !av_pix_fmt_desc_get((AVPixelFormat)srcFrame->format)) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "decoded frame is unusable: %dx%d, pixel format %d",
+                 srcFrame->width, srcFrame->height, srcFrame->format);
+        SetError(msg);
+        return false;
     }
 
     const auto tConv = std::chrono::steady_clock::now();

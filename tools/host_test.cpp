@@ -270,6 +270,7 @@ struct RunResult
     bool                 gotInfo    = false;
     int                  framesGot  = 0;
     bool                 audioGot   = false;
+    bool                 hasAudio   = false;   // в файле вообще есть звук?
     int                  width      = 0;
     int                  height     = 0;
     int                  cacheVersion = 0;
@@ -349,7 +350,10 @@ RunResult Run(ImportEntryProc entry, const HostProfile& profile,
         }
     }
 
-    // Звук: одна десятая секунды с начала
+    // Звук: одна десятая секунды с начала. Файл без звуковой дорожки — случай
+    // законный (графика с прозрачностью, к примеру), и требовать от него отсчёты
+    // значит проверять не плагин, а свои ожидания.
+    out.hasAudio = (fileInfo.audInfo.numChannels > 0);
     const int    channels = fileInfo.audInfo.numChannels > 0 ? fileInfo.audInfo.numChannels : 2;
     const size_t samples  = 4800;
     std::vector<std::vector<float>> audio(channels, std::vector<float>(samples, 0.0f));
@@ -418,7 +422,11 @@ int wmain(int argc, wchar_t** argv)
         Check(r.opened,           "file opened");
         Check(r.gotInfo,          "file info returned");
         Check(r.framesGot == 2,   "both frames delivered");
-        Check(r.audioGot,         "audio delivered");
+        if (r.hasAudio) {
+            Check(r.audioGot,     "audio delivered");
+        } else {
+            printf("    %-44s SKIP (no audio track)\n", "audio delivered");
+        }
 
         if (profile.hasFrameCache) {
             Check(r.cacheVersion > 0 && r.cacheVersion <= profile.maxSuiteVersion,

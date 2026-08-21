@@ -51,10 +51,12 @@ them see it. That was an assumption until it was checked; now the log names the 
 
 | | |
 |---|---|
-| After Effects 25.3.2 | import, four separate audio tracks, preview at 42 fps on 1440p |
+| After Effects 25.3.2 | import, four separate audio tracks, preview at 42 fps on 1440p, render |
 | Media Encoder 25.6.4 | a full export: 1265 frames, no errors, 71 fps |
 
-Rendering out of After Effects itself has still not been tried.
+Every combination of the three applications has been through at least one real file
+now — import in all of them, export out of Premiere, After Effects and Media
+Encoder.
 
 ## 10-bit
 
@@ -134,5 +136,5 @@ The installer is not code-signed, so Windows will warn about an unknown publishe
 Verify the download instead:
 
 ```
-SHA256  47538f93c9bf30e17195e7610b84a8003ee2bc28dc0c0c86cf9760fe1bc2ed8d
+SHA256  310d3d7de721d1018c3b54b669b976b6951dfe953b9104ddb398e97a7b21c3bc
 ```

@@ -25,7 +25,7 @@ every one of them picks it up. Which of them were actually tried:
 | Premiere Pro CC 2019 — 13.1.5 | tested, the oldest version verified |
 | Premiere Pro 2020 – 2024 | not tried, expected to work — see the note below |
 | Premiere Pro 2025 — 25.x | tested, the main target |
-| After Effects 25.3.2 | tested: import, audio tracks, preview |
+| After Effects 25.3.2 | tested: import, audio tracks, preview, render |
 | Media Encoder 25.6.4 | tested: a whole export, 1265 frames, no errors |
 | macOS | no. The decoding core is portable, the rest is Win32 |
 
@@ -44,7 +44,7 @@ versions it actually has instead of demanding the newest — which is exactly wh
 | Multi-track audio | yes, tracks stay separate |
 | 10-bit | yes — delivered as 16-bit, see below |
 | HDR | decoded, but the transfer metadata is not passed on yet |
-| Alpha channel | no |
+| Alpha channel | yes, for VP9 in WebM — decoded on the CPU, see below |
 | Every other codec | handed straight back to Premiere's own importer |
 
 **Hardware.** Windows x64, nothing else. Without a supported GPU the plug-in decodes
@@ -106,8 +106,7 @@ Media Encoder answers the same way. A full export of that recording pulled all
 long and took 17.8 seconds to render, so the plug-in is not what the export waits
 for. Exporting out of Premiere Pro CC 2019 works as well.
 
-Tested on one recording per application. Rendering out of After Effects itself has
-not been tried.
+Rendering out of After Effects works too. Tested on one recording per application.
 
 ## Performance
 
@@ -295,6 +294,25 @@ Two non-obvious build requirements follow:
 ```
 lib /def:ffmpeg\lib\avcodec-62.def /name:avcodec-62.dll /out:ffmpeg\lib-msvc\avcodec.lib /machine:x64
 ```
+
+### Alpha hides in two places at once
+
+A VP9 file with transparency will quietly arrive fully opaque unless two separate
+things go right, and neither of them announces itself.
+
+**The alpha is not in the video stream.** Matroska carries it as an extra block
+attached to each frame and marks the track with an `alpha_mode` tag. The stream's
+own pixel format still reads `yuv420p`, so asking the format whether there is
+transparency gives the wrong answer. The tag is the only honest source.
+
+**Only one of the two VP9 decoders returns it.** FFmpeg's native `vp9` decoder
+drops the alpha silently; `libvpx-vp9` returns `yuva420p`. Hardware decoders drop
+it too — `vp9_cuvid` was measured returning a solid opaque channel. So a file with
+transparency is forced onto the CPU path even when the GPU is set as preferred.
+Losing the alpha without a word is worse than decoding more slowly.
+
+`decoder_test` checks the result rather than the intent: if the file declares
+alpha, the delivered frames must contain more than one alpha value.
 
 ### Adobe's 16-bit is not the obvious 16-bit
 
