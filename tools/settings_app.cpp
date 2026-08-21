@@ -120,14 +120,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show)
     wc.hInstance     = inst;
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.lpszClassName = L"AV1ImporterSettings";
+    wc.lpszClassName = L"AetherSettings";
     RegisterClassExW(&wc);
 
     RECT r = { 0, 0, 470, 278 };
     AdjustWindowRect(&r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
 
     HWND w = CreateWindowExW(0, wc.lpszClassName,
-                             L"AV1 / VP9 Importer — настройки",
+                             L"Aether — настройки",
                              WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                              CW_USEDEFAULT, CW_USEDEFAULT,
                              r.right - r.left, r.bottom - r.top,

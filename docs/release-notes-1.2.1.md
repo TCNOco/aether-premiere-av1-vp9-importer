@@ -1,8 +1,39 @@
-# AV1 / VP9 Importer for Premiere Pro 1.2.1
+# Aether 1.2.1
 
-A colour fix that changes how every clip looks, a log that stopped costing a
-third of the decoder's work, and a new test layer that feeds the core deliberately
-broken files.
+The project has a name: what was "AV1 / VP9 Importer" is now **Aether**. Along
+with that, a colour fix that changes how every clip looks, a log that stopped
+costing a third of the decoder's work, and a new test layer that feeds the core
+deliberately broken files.
+
+## The name
+
+The rename goes all the way down — the plug-in file, the folder it installs into,
+the entry in *Apps & features*, the settings window, the log, and the name
+Premiere shows in its list of formats:
+
+| | before | now |
+|---|---|---|
+| Installer | `AV1Importer-Setup-x.y.z.exe` | `AetherSetup-1.2.1.exe` |
+| Plug-in | `MediaCore\AV1 Importer\AV1Importer.prm` | `MediaCore\Aether\Aether.prm` |
+| In Premiere's format list | AV1 / VP9 Video (ffmpeg) | Aether - AV1 / VP9 (ffmpeg) |
+| Start menu | AV1 Importer — settings | Aether — settings |
+| Log and settings | `%LOCALAPPDATA%\AV1Importer\` | `%LOCALAPPDATA%\Aether\` |
+
+Renaming an installed folder is the kind of change that quietly leaves the old
+copy behind, and two importers in `MediaCore` both claiming `av01` would compete
+for every file — with the winner decided by whatever order Premiere happens to
+walk the folder in. Nobody could diagnose that from the outside. So the installer
+removes the previous installation before writing the new one and keeps the same
+application id, so *Apps & features* shows one entry rather than two. Verified by
+installing the previous version and then this one over it.
+
+The decoder setting — CPU or GPU — moves across on its own: the plug-in copies it
+once if the new settings folder is empty while the old one is not.
+
+Names inside the source code deliberately did not change. Files are still
+`AV1Decoder.cpp`, `AV1Importer.cpp`, the namespace is still `av1imp`. Renaming
+those would touch every file, change nothing a user can observe, and bury the
+history of those files under a rename commit.
 
 ## Colours change with this update, and they change to the right ones
 
@@ -109,13 +140,13 @@ left in `DllMain` is reading the plug-in's own path, which touches nothing.
 
 ## Install
 
-Download `AV1Importer-Setup-1.2.1.exe`, close Premiere Pro, After Effects and
-Media Encoder, run it. Administrator rights are required. Installs over any
-earlier version; no need to uninstall first.
+Download `AetherSetup-1.2.1.exe`, close Premiere Pro, After Effects and Media
+Encoder, run it. Administrator rights are required. Installs over any earlier
+version, including one under the old name; no need to uninstall first.
 
 The installer is not code-signed, so Windows will warn about an unknown
 publisher. Verify the download instead:
 
 ```
-SHA256  125f101fd21b185d5d66beaee10742d9d923d249c59b84cb27b82e936031600c
+SHA256  bb16f94a3a66d47e3837c64115f83e658e31f5b944b509794e6204071f36cf8b
 ```

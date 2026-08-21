@@ -15,9 +15,9 @@ if "%ISCC%"=="" (
     exit /b 1
 )
 
-if not exist "%~dp0..\build\Release\AV1Importer.prm" (
+if not exist "%~dp0..\build\Release\Aether.prm" (
     echo Build the plug-in first: build.bat
     exit /b 1
 )
 
-"%ISCC%" "%~dp0AV1Importer.iss"
+"%ISCC%" "%~dp0Aether.iss"

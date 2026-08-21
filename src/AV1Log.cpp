@@ -34,7 +34,7 @@ std::wstring g_path;
 // дешевле открытия файла.
 FILE* g_file = nullptr;
 
-// %LOCALAPPDATA%\AV1Importer\log.txt — не в папке плагина: та лежит
+// %LOCALAPPDATA%\Aether\log.txt — не в папке плагина: та лежит
 // в Program Files, а Premiere работает без прав администратора
 std::wstring MakeLogPath()
 {
@@ -45,7 +45,7 @@ std::wstring MakeLogPath()
     std::wstring dir = local;
     CoTaskMemFree(local);
 
-    dir += L"\\AV1Importer";
+    dir += L"\\Aether";
     CreateDirectoryW(dir.c_str(), nullptr);
     return dir + L"\\log.txt";
 }
@@ -78,7 +78,7 @@ void LogReset()
     if (g_file) {
         SYSTEMTIME t;
         GetLocalTime(&t);
-        fprintf(g_file, "=== AV1 Importer, запуск %02d:%02d:%02d ===\n",
+        fprintf(g_file, "=== Aether, запуск %02d:%02d:%02d ===\n",
                 t.wHour, t.wMinute, t.wSecond);
         fflush(g_file);
     }

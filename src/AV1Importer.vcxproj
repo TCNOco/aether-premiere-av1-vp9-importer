@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <!--
     Импортёр AV1 для Adobe Premiere Pro.
@@ -47,7 +47,7 @@
   <PropertyGroup>
     <OutDir>$(SolutionDir)..\build\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)..\build\obj\$(Configuration)\</IntDir>
-    <TargetName>AV1Importer</TargetName>
+    <TargetName>Aether</TargetName>
     <!-- Premiere ищет плагины-импортёры с расширением .prm -->
     <TargetExt>.prm</TargetExt>
   </PropertyGroup>

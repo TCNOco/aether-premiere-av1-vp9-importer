@@ -1,6 +1,6 @@
-# AV1 / VP9 Importer for Adobe Premiere Pro, After Effects and Media Encoder
+# Aether — an AV1 / VP9 importer for Adobe Premiere Pro, After Effects and Media Encoder
 
-[![core checks](https://github.com/neoHaDe/premiere-av1-vp9-importer/actions/workflows/core-checks.yml/badge.svg)](https://github.com/neoHaDe/premiere-av1-vp9-importer/actions/workflows/core-checks.yml)
+[![core checks](https://github.com/neoHaDe/aether-premiere-av1-vp9-importer/actions/workflows/core-checks.yml/badge.svg)](https://github.com/neoHaDe/aether-premiere-av1-vp9-importer/actions/workflows/core-checks.yml)
 
 Drag an AV1 or VP9 file onto the timeline and it just works: no transcoding,
 no proxies.
@@ -79,7 +79,7 @@ neither AV1 nor VP9. Taking someone else's file is worse than not taking your ow
 
 ## Install
 
-1. Download `AV1Importer-Setup-x.y.z.exe` from [Releases](../../releases).
+1. Download `AetherSetup-x.y.z.exe` from [Releases](../../releases).
 2. Close Premiere Pro, After Effects and Media Encoder.
 3. Run it. Administrator rights are required: Adobe plug-ins live in a shared
    system folder.
@@ -202,7 +202,7 @@ conversion into a 16-bit-per-component layout. At 1280x720 the same comparison i
 
 ## Settings
 
-Decoding runs on the CPU by default. To change that, open **AV1 Importer —
+Decoding runs on the CPU by default. To change that, open **Aether —
 settings** from the Start menu; it is installed with the plug-in.
 
 | | |
@@ -211,7 +211,7 @@ settings** from the Start menu; it is installed with the plug-in.
 | CPU (dav1d) | the faster path on this hardware, see the measurements above |
 | GPU (NVIDIA / Intel / AMD) | leaves the CPU free for the rest of the edit |
 
-The choice lands in `%LOCALAPPDATA%\AV1Importer\settings.ini` and applies when
+The choice lands in `%LOCALAPPDATA%\Aether\settings.ini` and applies when
 Premiere restarts. The environment variable `AV1IMPORTER_HARDWARE=0` (or `=1`)
 overrides the file without changing it, which is the quick way to test a hunch.
 Either way, the decoder actually used is recorded in the log.
@@ -234,7 +234,7 @@ You will need, none of which are in this repository:
 - **Inno Setup 6**, only to build the installer
 
 ```
-build.bat                        the plug-in -> build\Release\AV1Importer.prm
+build.bat                        the plug-in -> build\Release\Aether.prm
 build-test.bat                   the test programs
 installer\build-installer.bat    the installer -> dist\
 ```
@@ -244,8 +244,8 @@ which is what makes this project practical to work on:
 
 ```
 build\decoder_test.exe <file.mp4>                          metadata, timings, audio levels, checks
-build\plugin_test.exe  <AV1Importer.prm>                   plug-in loading and its answers
-build\host_test.exe    <AV1Importer.prm> <file.mp4>        the whole import, from a fake host
+build\plugin_test.exe  <Aether.prm>                   plug-in loading and its answers
+build\host_test.exe    <Aether.prm> <file.mp4>        the whole import, from a fake host
 ```
 
 `host_test` is the interesting one. It impersonates Premiere and drives the built
@@ -486,7 +486,7 @@ budget is 256 MB, and the frames farthest from the current position are evicted.
 
 ### The log
 
-`%LOCALAPPDATA%\AV1Importer\log.txt`, rewritten each time Premiere starts. It
+`%LOCALAPPDATA%\Aether\log.txt`, rewritten each time Premiere starts. It
 records every selector Premiere sends, by name, **including the ones the plug-in
 rejects**. The cause of failure hid among exactly those. Inside Premiere every
 importer failure looks the same, so this log is the main debugging tool.

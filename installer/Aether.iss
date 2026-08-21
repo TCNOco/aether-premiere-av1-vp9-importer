@@ -1,7 +1,7 @@
-; Установщик плагина AV1 / VP9 Importer для приложений Adobe.
+; Установщик Aether — импортёра AV1 и VP9 для приложений Adobe.
 ;
 ; Собирается компилятором Inno Setup:
-;   ISCC.exe installer\AV1Importer.iss
+;   ISCC.exe installer\Aether.iss
 ; (или через installer\build-installer.bat, который сам найдёт компилятор)
 ;
 ; Путь установки не даётся на выбор намеренно: приложения Adobe ищут плагины
@@ -15,11 +15,16 @@
 ; Картинки и значок рисуются кодом — installer\make-art.py, — чтобы их можно
 ; было пересобрать, а не хранить как двоичные файлы неизвестного происхождения.
 
-#define AppName        "AV1 / VP9 Importer for Premiere Pro"
+#define AppName        "Aether - AV1 / VP9 Importer for Adobe"
 #define AppVersion     "1.2.1"
 #define AppPublisher   "neoHaDe"
-#define AppURL         "https://github.com/neoHaDe/premiere-av1-vp9-importer"
-#define PluginDir      "AV1 Importer"
+#define AppURL         "https://github.com/neoHaDe/aether-premiere-av1-vp9-importer"
+#define PluginDir      "Aether"
+
+; Как папка называлась раньше. Нужна не для истории: установка под прежним
+; именем осталась бы лежать рядом, и два импортёра спорили бы за один и тот же
+; av01 — а кто победит, зависит от порядка обхода папки.
+#define OldPluginDir   "AV1 Importer"
 
 [Setup]
 AppId={{7C4A1E92-AV01-4C31-9E7B-1D2F3A4B5C60}
@@ -29,7 +34,7 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}/issues
 VersionInfoVersion={#AppVersion}
-VersionInfoDescription=AV1 and VP9 decoder plug-in for Adobe Premiere Pro
+VersionInfoDescription=Aether - AV1 and VP9 decoder plug-in for Adobe
 
 ; Плагины Adobe живут в общей папке, туда нужны права администратора
 PrivilegesRequired=admin
@@ -39,9 +44,13 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; Папку берём из реестра Adobe, см. GetMediaCore ниже
 DefaultDirName={code:GetMediaCore}\{#PluginDir}
 DisableDirPage=yes
+
+; Папка сменила имя вместе с плагином, поэтому запомненная от прошлой
+; установки здесь только помешала бы
+UsePreviousAppDir=no
 DefaultGroupName={#AppName}
 UninstallDisplayName={#AppName}
-UninstallDisplayIcon={app}\av1importer.ico
+UninstallDisplayIcon={app}\aether.ico
 
 ; Выбор языка первым окном, всегда — а не только когда система не совпала
 ; ни с одним из них. Русский и английский тут равноправны, и угадывать за
@@ -58,11 +67,11 @@ CloseApplications=yes
 RestartApplications=no
 
 OutputDir=..\dist
-OutputBaseFilename=AV1Importer-Setup-{#AppVersion}
+OutputBaseFilename=AetherSetup-{#AppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-SetupIconFile=av1importer.ico
+SetupIconFile=aether.ico
 WizardImageFile=wizard-large.bmp
 WizardSmallImageFile=wizard-small.bmp
 LicenseFile=..\LICENSE
@@ -72,8 +81,8 @@ Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
-ru.SettingsShortcut=AV1 Importer — настройки
-en.SettingsShortcut=AV1 Importer settings
+ru.SettingsShortcut=Aether — настройки
+en.SettingsShortcut=Aether settings
 ru.SettingsComment=Переключить декодирование между процессором и видеокартой
 en.SettingsComment=Switch decoding between the CPU and the graphics card
 ru.OpenSettings=Открыть настройки плагина
@@ -95,18 +104,24 @@ en.FoundNone=No Adobe applications were found on this computer.%n%nYou can still
 en.FoundClose=These applications have to be closed. If any of them is open, the installer will offer to close it.
 en.FoundWhere=Installing into:
 
+[InstallDelete]
+; Прежняя установка целиком. Файлы там останутся собственностью старой записи
+; в «Программах и компонентах», но запись мы перезаписываем своей (AppId тот
+; же), так что удалить их больше некому.
+Type: filesandordirs; Name: "{code:GetMediaCore}\{#OldPluginDir}"
+
 [Icons]
-Name: "{autoprograms}\{cm:SettingsShortcut}"; Filename: "{app}\AV1ImporterSettings.exe"; Comment: "{cm:SettingsComment}"
+Name: "{autoprograms}\{cm:SettingsShortcut}"; Filename: "{app}\AetherSettings.exe"; Comment: "{cm:SettingsComment}"
 
 [Files]
-Source: "..\build\Release\AV1Importer.prm"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\build\Release\Aether.prm"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Окно переключения декодера. Отдельная программа, а не окно внутри Premiere:
 ; настройка нужна тогда, когда Premiere из-за драйвера не запускается
-Source: "..\build\Release\AV1ImporterSettings.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\build\Release\AetherSettings.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Значок нужен и после установки: на него смотрит «Установка и удаление программ»
-Source: "av1importer.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "aether.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Библиотеки ffmpeg обязаны лежать рядом с плагином: Windows ищет их возле
 ; исполняемого файла (то есть возле Premiere), поэтому плагин загружает их
@@ -125,7 +140,7 @@ Source: "..\THIRD-PARTY-NOTICES.md";  DestDir: "{app}"; Flags: ignoreversion
 Source: "..\ffmpeg\LICENSE.txt";      DestDir: "{app}"; DestName: "LICENSE-ffmpeg.txt"; Flags: ignoreversion
 
 [Run]
-Filename: "{app}\AV1ImporterSettings.exe"; Description: "{cm:OpenSettings}"; Flags: postinstall nowait skipifsilent
+Filename: "{app}\AetherSettings.exe"; Description: "{cm:OpenSettings}"; Flags: postinstall nowait skipifsilent
 
 [Code]
 

@@ -35,7 +35,7 @@ function Find-MediaCore {
 }
 
 if (-not $MediaCore) { $MediaCore = Find-MediaCore }
-$target = Join-Path $MediaCore "AV1 Importer"
+$target = Join-Path $MediaCore "Aether"
 
 $admin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
          ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -59,8 +59,16 @@ if ($Uninstall) {
     return
 }
 
-if (-not (Test-Path (Join-Path $Source "AV1Importer.prm"))) {
-    Write-Error "Не найден AV1Importer.prm в $Source — сначала соберите проект (build.bat)."
+if (-not (Test-Path (Join-Path $Source "Aether.prm"))) {
+    Write-Error "Не найден Aether.prm в $Source — сначала соберите проект (build.bat)."
+}
+
+# Установка под прежним именем, если она осталась: два плагина в MediaCore
+# спорили бы за один и тот же av01, и какой победит — как повезёт
+$previous = Join-Path $MediaCore "AV1 Importer"
+if (Test-Path $previous) {
+    Remove-Item $previous -Recurse -Force
+    Write-Host "Удалена прежняя установка: $previous"
 }
 
 New-Item -ItemType Directory -Force $target | Out-Null

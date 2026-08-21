@@ -32,8 +32,8 @@
 
 #include "AV1Decoder.h"
 
-#define AV1_IMPORTER_NAME   "AV1 / VP9 Video (ffmpeg)"
-#define AV1_IMPORTER_SHORT  "AV1/VP9"
+#define AV1_IMPORTER_NAME   "Aether - AV1 / VP9 (ffmpeg)"
+#define AV1_IMPORTER_SHORT  "Aether"
 
 // Свой код формата. Premiere различает импортёры по нему, с настоящим
 // содержимым файла он никак не связан.

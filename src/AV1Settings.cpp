@@ -32,8 +32,23 @@ const wchar_t* SettingsFolder()
 
     wchar_t* base = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &base))) {
-        swprintf_s(folder, MAX_PATH, L"%s\\AV1Importer", base);
+        swprintf_s(folder, MAX_PATH, L"%s\\Aether", base);
+
+        // Переезд со старого имени. Настройка тут одна — процессор или
+        // видеокарта, — но потерять её значит без причины вернуть человека
+        // к окну настроек. Переносим один раз: если в новой папке файла ещё
+        // нет, а в старой есть.
+        wchar_t oldFile[MAX_PATH] = {};
+        wchar_t newFile[MAX_PATH] = {};
+        swprintf_s(oldFile, MAX_PATH, L"%s\\AV1Importer\\settings.ini", base);
+        swprintf_s(newFile, MAX_PATH, L"%s\\Aether\\settings.ini", base);
         CoTaskMemFree(base);
+
+        if (GetFileAttributesW(newFile) == INVALID_FILE_ATTRIBUTES &&
+            GetFileAttributesW(oldFile) != INVALID_FILE_ATTRIBUTES) {
+            CreateDirectoryW(folder, nullptr);
+            CopyFileW(oldFile, newFile, TRUE);
+        }
     }
     return folder;
 }

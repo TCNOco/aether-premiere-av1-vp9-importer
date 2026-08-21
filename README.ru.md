@@ -1,6 +1,6 @@
-# Импортёр AV1 / VP9 для Adobe Premiere Pro, After Effects и Media Encoder
+# Aether — импортёр AV1 / VP9 для Adobe Premiere Pro, After Effects и Media Encoder
 
-[![core checks](https://github.com/neoHaDe/premiere-av1-vp9-importer/actions/workflows/core-checks.yml/badge.svg)](https://github.com/neoHaDe/premiere-av1-vp9-importer/actions/workflows/core-checks.yml)
+[![core checks](https://github.com/neoHaDe/aether-premiere-av1-vp9-importer/actions/workflows/core-checks.yml/badge.svg)](https://github.com/neoHaDe/aether-premiere-av1-vp9-importer/actions/workflows/core-checks.yml)
 
 Перетащил файл AV1 или VP9 на таймлайн — и он работает: без конвертации
 и промежуточных форматов.
@@ -74,7 +74,7 @@ Premiere 2026 заработал без единой правки в коде.
 
 ## Установка
 
-1. Скачай `AV1Importer-Setup-x.y.z.exe` из [Releases](../../releases).
+1. Скачай `AetherSetup-x.y.z.exe` из [Releases](../../releases).
 2. Закрой Premiere Pro, After Effects и Media Encoder.
 3. Запусти. Нужны права администратора: плагины Adobe лежат в общей системной папке.
 
@@ -202,7 +202,7 @@ Premiere борется за те же ядра. Оба пути далеко в
 
 ## Настройки
 
-По умолчанию распаковка идёт процессором. Поменять — программой **AV1 Importer —
+По умолчанию распаковка идёт процессором. Поменять — программой **Aether —
 настройки**, она ставится вместе с плагином и лежит в меню «Пуск».
 
 | | |
@@ -211,7 +211,7 @@ Premiere борется за те же ядра. Оба пути далеко в
 | Процессором (dav1d) | на этом железе быстрее, замеры выше |
 | Видеокартой (NVIDIA / Intel / AMD) | оставляет процессор монтажу |
 
-Выбор пишется в `%LOCALAPPDATA%\AV1Importer\settings.ini` и применяется после
+Выбор пишется в `%LOCALAPPDATA%\Aether\settings.ini` и применяется после
 перезапуска Premiere. Переменная среды `AV1IMPORTER_HARDWARE=0` (или `=1`) главнее
 файла и его не меняет, так удобно быстро проверить догадку. В любом случае
 выбранный декодер попадает в журнал.
@@ -230,7 +230,7 @@ Premiere борется за те же ядра. Оба пути далеко в
 - Inno Setup 6 (`winget install JRSoftware.InnoSetup`) — только для установщика
 
 ```
-build.bat                        сам плагин -> build\Release\AV1Importer.prm
+build.bat                        сам плагин -> build\Release\Aether.prm
 build-test.bat                   проверочные программы
 installer\build-installer.bat    установщик -> dist\
 ```
@@ -239,8 +239,8 @@ installer\build-installer.bat    установщик -> dist\
 
 ```
 build\decoder_test.exe <файл.mp4>                     ядро: метаданные, кадр, скорость
-build\plugin_test.exe  <AV1Importer.prm>              загрузка плагина и его ответы
-build\host_test.exe    <AV1Importer.prm> <файл.mp4>   весь импорт от поддельного хоста
+build\plugin_test.exe  <Aether.prm>              загрузка плагина и его ответы
+build\host_test.exe    <Aether.prm> <файл.mp4>   весь импорт от поддельного хоста
 ```
 
 Интересен третий. Он притворяется Premiere и прогоняет собранный `.prm` через
@@ -303,7 +303,7 @@ src/AV1Importer.{h,cpp}  слой Premiere SDK — переводит запро
 src/AV1Runtime.cpp       подгрузка ffmpeg из папки плагина
 src/AV1Log.{h,cpp}       журнал плагина
 src/AV1Settings.{h,cpp}  выбор декодера, общий с окном настроек
-tools/settings_app.cpp   само окно настроек, AV1ImporterSettings.exe
+tools/settings_app.cpp   само окно настроек, AetherSettings.exe
 tools/decoder_test.cpp   проверка ядра без Premiere
 tools/plugin_test.cpp    проверка готового .prm без Premiere
 tools/host_test.cpp      поддельный хост: весь импорт без Premiere
@@ -493,7 +493,7 @@ OBS опорные кадры раз в секунду, поэтому кажд�
 
 ### Журнал
 
-`%LOCALAPPDATA%\AV1Importer\log.txt`, перезаписывается при каждом запуске Premiere.
+`%LOCALAPPDATA%\Aether\log.txt`, перезаписывается при каждом запуске Premiere.
 Пишет все запросы Premiere по именам, включая отвергнутые плагином. Именно среди
 них пряталась причина отказа. Это главный инструмент отладки: внутри Premiere
 любая ошибка импортёра выглядит одинаково.

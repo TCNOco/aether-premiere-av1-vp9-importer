@@ -67,9 +67,9 @@ def fit_font(path, text, target_w, start):
 
 # ---------------------------------------------------------------- иконка
 icon = play_badge(256)
-icon.save(os.path.join(OUT, 'av1importer.ico'),
+icon.save(os.path.join(OUT, 'aether.ico'),
           sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
-print('ok av1importer.ico')
+print('ok aether.ico')
 
 # ------------------------------------------------- большая картинка мастера
 # 164x314 - размер, который Inno ждёт при 100% масштабе
