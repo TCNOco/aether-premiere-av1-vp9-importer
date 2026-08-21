@@ -60,6 +60,7 @@ tried, the table says so.
 | | Mono, stereo | **yes** |
 | | 5.1 and above | **not tried** — the channel count is passed through as is |
 | **Hardware** | CPU decoding | **yes**, the default — it is faster, see the measurements |
+| | Asynchronous frame delivery | **yes**, on; worth 5–12% on the GPU path, nothing on the CPU |
 | | NVIDIA — `av1_cuvid`, `vp9_cuvid` | **yes**, tested on an RTX 5080 |
 | | Intel QSV, AMD AMF | **not tried** — the code is there, the hardware was not |
 
@@ -248,6 +249,11 @@ settings** from the Start menu; it is installed with the plug-in.
 | Automatic | CPU on machines with 8 logical processors or more, GPU below that |
 | CPU (dav1d) | the faster path on this hardware, see the measurements above |
 | GPU (NVIDIA / Intel / AMD) | leaves the CPU free for the rest of the edit |
+
+Asynchronous delivery is switched in the same place: `async = off` turns it
+off, and `AETHER_ASYNC=0` does the same from the environment. It is on by
+default — it costs nothing on the CPU path and is worth 5–12% on the GPU path,
+measurements below.
 
 The choice lands in `%LOCALAPPDATA%\Aether\settings.ini` and applies when
 Premiere restarts. The environment variable `AV1IMPORTER_HARDWARE=0` (or `=1`)
@@ -508,6 +514,54 @@ ms per 1440p frame, the same as before.
 What this does not fix is the transfer curve. HDR now arrives with the right
 matrix but still in PQ or HLG, and turning that into SDR is not something this
 plug-in attempts.
+
+### Asynchronous delivery, and who it actually helps
+
+The plain way, Premiere asks for a frame and waits. Adobe provides a second,
+asynchronous interface: the host orders frames ahead and collects them later,
+while decoding happens as it gets on with its own work — compositing, effects,
+display.
+
+Not everything can be done ahead. The SDK allows scheduling exactly the work
+that does not depend on the output size and format, and the host only names
+those when it asks for the frame. Decoding can be scheduled; colour conversion
+cannot.
+
+Which produces a result that only measurement could have found. The fake host
+was taught to keep the CPU busy between frames, the way a real one is, and the
+two paths were compared on a 2560×1440 recording:
+
+| host work between frames | CPU (`libdav1d`) | GPU (`av1_cuvid`) |
+|---|---|---|
+| 1 ms | −0.3% | **−7.8%** |
+| 3 ms | −0.5% | **−12.2%** |
+| 6 ms | −2.1% | **−9.5%** |
+| 12 ms | −0.6% | **−5.4%** |
+
+On the CPU, decoding costs half a millisecond and the dominant cost — colour
+conversion — cannot be moved anywhere, so there is nothing to win. On the GPU,
+decoding plus the copy out of video memory costs 3.5 ms, and all of that leaves
+the host's thread.
+
+Checked by reversing the order of the measurements: running the async path
+first, so that warm-up works against it, leaves the win intact. That matters —
+the first measurement in a series always flatters the last one.
+
+By the rules of the SDK a separate importer **must not** hold a link to the
+standard one: their lifetimes are decoupled and the standard one may close
+first. So it has its own decoder and its own file handle. Its frame cache is
+trimmed to a few frames ahead; the full budget would double the memory per clip
+for no gain.
+
+Turned off with `async = off` in the settings file, or `AETHER_ASYNC=0`.
+
+What the tests found: `aiGetFrame` waited for the frame to appear among the
+ready ones — and slept forever if the request was cancelled or flushed in the
+meantime, because then nobody would ever produce it. That came out of a stress
+scenario where four threads order, collect and cancel frames at once while a
+close arrives in the middle of a running call. The SDK explicitly permits that,
+and closing frees the importer's state — without a count of calls in flight it
+would be a use-after-free inside Premiere.
 
 ### The frame cache
 
