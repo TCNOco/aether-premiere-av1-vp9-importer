@@ -26,6 +26,17 @@ struct SwrContext;
 namespace av1imp {
 
 // Что удалось узнать о файле после открытия
+// В каком виде отдавать кадр наружу.
+//
+// Adobe для 16-битных форматов держит белое не на 65535, а на **32768** — так же,
+// как After Effects и Photoshop (SDK, стр. 64). Поэтому BGRA16 это не просто
+// «то же самое, но шире»: диапазон другой, и перепутать его значит получить
+// вдвое пересвеченную картинку.
+enum class FrameFormat {
+    BGRA8,    // 4 байта на пиксель, 0..255
+    BGRA16,   // 8 байт на пиксель, 0..32768
+};
+
 struct MediaInfo {
     int      width          = 0;
     int      height         = 0;
@@ -34,6 +45,7 @@ struct MediaInfo {
     int      fpsDen         = 0;     // Premiere считает время в них, и 60000/1001 округлять нельзя
     int64_t  frameCount     = 0;     // может быть оценкой, если в контейнере нет точного числа
     double   durationSec    = 0.0;
+    int      bitDepth       = 8;     // бит на канал в самом файле: 8 или 10
     bool     hardwareDecode = false; // декодирует видеокарта, а не процессор
     std::string codecName;
     std::string decoderName;
@@ -82,8 +94,13 @@ public:
     // Отрицательный dstStride переворачивает кадр по вертикали — так его ждёт
     // Premiere, у которого у 32-битных буферов начало координат внизу слева.
     // Возвращает false, если кадр получить не удалось.
+    // dstStride в байтах и может быть отрицательным: у Premiere буферы идут
+    // снизу вверх. Формат по умолчанию восьмибитный — тот путь, которым идёт
+    // подавляющее большинство файлов, и он не должен ничего платить за наличие
+    // второго.
     bool GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
-                      int dstWidth, int dstHeight);
+                      int dstWidth, int dstHeight,
+                      FrameFormat format = FrameFormat::BGRA8);
 
     // Открыть дорожку звука по её номеру среди звуковых (0 — первая).
     // Отдельно от видео: у звука свой разбор контейнера, иначе перемотка
@@ -118,7 +135,8 @@ private:
     void CloseLocked();
     void CloseAudioLocked();
     bool DecodeUntil(int64_t targetFrame);
-    bool ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW, int dstH);
+    bool ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW, int dstH,
+                       FrameFormat format);
     void StoreInCache(int64_t index, AVFrame* src);
     void ClearCache();
     void SetError(const std::string& msg, int averr = 0);
@@ -134,6 +152,7 @@ private:
     int              swsSrcFmt_  = -1;
     int              swsDstW_    = 0;
     int              swsDstH_    = 0;
+    int              swsDstFmt_  = -1;  // пересчётчик кэшируется и по формату выхода
     AVBufferRef*     hwDevice_   = nullptr;
 
     int      videoStream_ = -1;

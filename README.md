@@ -42,7 +42,8 @@ versions it actually has instead of demanding the newest — which is exactly wh
 | AV1 | yes — MP4, MKV, WebM, MOV, M4V |
 | VP9 | yes — the same containers |
 | Multi-track audio | yes, tracks stay separate |
-| 10-bit and HDR | decoded, but delivered as 8-bit |
+| 10-bit | yes — delivered as 16-bit, see below |
+| HDR | decoded, but the transfer metadata is not passed on yet |
 | Alpha channel | no |
 | Every other codec | handed straight back to Premiere's own importer |
 
@@ -136,6 +137,26 @@ a strong CPU; on a weak one dav1d would lose. And a benchmark has the machine to
 itself, whereas a real edit has Premiere competing for the same cores. Both paths
 are far above the 60 fps playback needs, so for most work the difference is not
 visible. Switch with the setting below and judge on your own footage.
+
+### What 10-bit costs
+
+A 10-bit source is offered to the host as `BGRA_4444_16u` first and 8-bit second,
+so the host can fall back if it wants to. Nothing changes for an 8-bit file: it is
+still offered one format, and the measurements above are unchanged — 205 fps before
+this was added, 205 after.
+
+The wider output is not free, though, and the price is the colour conversion rather
+than the decoding:
+
+| 2560x1440@60 | Total | Colour |
+|---|---|---|
+| 8-bit out | 4.8 ms — 208 fps | 3.9 ms |
+| 16-bit out | 16 ms — 62 fps | 15.2 ms |
+
+That is close enough to 60 fps to matter on a 1440p timeline. Of those 15.2 ms only
+0.3 belongs to the range conversion described below; the rest is FFmpeg's own
+conversion into a 16-bit-per-component layout. At 1280x720 the same comparison is
+609 fps against 219.
 
 ### Seeking
 
@@ -274,6 +295,21 @@ Two non-obvious build requirements follow:
 ```
 lib /def:ffmpeg\lib\avcodec-62.def /name:avcodec-62.dll /out:ffmpeg\lib-msvc\avcodec.lib /machine:x64
 ```
+
+### Adobe's 16-bit is not the obvious 16-bit
+
+In Premiere's `_16u` pixel formats white sits at **32768**, not at 65535 — the same
+convention After Effects and Photoshop use, stated on page 64 of the SDK guide.
+FFmpeg produces the full 0–65535 range, so every component has to be brought down
+afterwards. `(v + 1) >> 1` does it exactly at both ends: 65535 becomes 32768 and 0
+stays 0.
+
+Getting this wrong would not crash anything. It would just make every 10-bit clip
+twice as bright and clipped, which is the kind of bug that survives a long time.
+
+`decoder_test` checks both halves on a 10-bit file: that the output carries more
+than 256 distinct values per channel — otherwise it is 8-bit data in a wider buffer
+— and that nothing exceeds 32768.
 
 ### The frame cache
 

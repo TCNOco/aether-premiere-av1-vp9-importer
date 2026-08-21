@@ -79,18 +79,25 @@ struct FakeFrame
 
 std::vector<FakeFrame*> g_frames;
 
-prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat,
+prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pixelFormat,
                         const prRect* rect)
 {
     const int width  = rect->right - rect->left;
     const int height = rect->bottom - rect->top;
     if (width <= 0 || height <= 0) return suiteError_Fail;
 
+    // Размер буфера — по запрошенному формату, а не по восьми битам. Первая
+    // версия этого хоста всегда выделяла по 4 байта на пиксель, и на 10-битном
+    // файле плагин честно писал 16 бит в буфер вдвое меньше нужного: падение
+    // с нарушением доступа. Ошибка была в самом хосте, но настоящий Premiere
+    // выделяет буфер точно так же по формату, и проверка обязана это повторять.
+    const int bytesPerPixel = (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? 8 : 4;
+
     FakeFrame* f = new FakeFrame();
     f->pixPtr = &f->pix;
     memset(&f->pix, 0, sizeof(f->pix));
     f->pix.bounds       = *rect;
-    f->pix.rowbytes     = width * 4;
+    f->pix.rowbytes     = width * bytesPerPixel;
     f->pix.bitsperpixel = 32;
 
     // Заполняем узнаваемым мусором: так видно, что плагин действительно записал
@@ -266,6 +273,7 @@ struct RunResult
     int                  width      = 0;
     int                  height     = 0;
     int                  cacheVersion = 0;
+    PrPixelFormat        pixelFormat  = PrPixelFormat_BGRA_4444_8u;
     std::vector<uint8_t> firstFrame;   // для сверки между профилями
 };
 
@@ -306,8 +314,10 @@ RunResult Run(ImportEntryProc entry, const HostProfile& profile,
     if (!out.gotInfo) return out;
 
     imIndPixelFormatRec pixFmt = {};
-    pixFmt.privatedata = openRec.privatedata;
+    pixFmt.privatedata    = openRec.privatedata;
+    pixFmt.outPixelFormat = PrPixelFormat_BGRA_4444_8u;
     entry(imGetIndPixelFormat, &stdParms, reinterpret_cast<void*>(0), &pixFmt);
+    out.pixelFormat = pixFmt.outPixelFormat;
 
     // Кадры. Берём нулевой и десятый: нулевой ловит открытие, десятый —
     // последовательное чтение.
@@ -401,8 +411,9 @@ int wmain(int argc, wchar_t** argv)
 
         const RunResult r = Run(entry, profile, argv[2]);
 
-        printf("    accepted the file, %dx%d, frame cache suite %d\n",
-               r.width, r.height, r.cacheVersion);
+        printf("    accepted the file, %dx%d, frame cache suite %d, pixels %s\n",
+               r.width, r.height, r.cacheVersion,
+               r.pixelFormat == PrPixelFormat_BGRA_4444_16u ? "16u" : "8u");
 
         Check(r.opened,           "file opened");
         Check(r.gotInfo,          "file info returned");

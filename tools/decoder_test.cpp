@@ -94,6 +94,43 @@ void CheckCacheMatchesFreshDecode(av1imp::Decoder& dec, const std::string& path,
 // Premiere asks for a reduced frame at lower playback quality. Writing the full
 // resolution into that smaller buffer overruns it — this is exactly the bug the
 // guard bytes below would have caught.
+// У 10-битного файла шестнадцатибитный вывод обязан нести больше, чем восемь бит,
+// и укладываться в диапазон Adobe: белое у них на 32768, а не на 65535.
+void CheckDeepColour(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
+{
+    const char* name16 = "16-bit output carries more than 8 bits";
+    const char* nameRange = "16-bit output stays inside Adobe's 0..32768";
+
+    if (info.bitDepth <= 8) {
+        printf("  %-46s SKIP (source is 8-bit)\n", name16);
+        return;
+    }
+
+    const int stride = info.width * 4 * (int)sizeof(uint16_t);
+    std::vector<uint16_t> frame((size_t)stride / sizeof(uint16_t) * info.height, 0);
+
+    if (!dec.GetFrameBGRA(0, reinterpret_cast<uint8_t*>(frame.data()), stride,
+                          info.width, info.height, av1imp::FrameFormat::BGRA16)) {
+        Check(false, name16);
+        return;
+    }
+
+    // Считаем различные значения зелёного канала: у 8 бит их не может быть
+    // больше 256, сколько бы места ни занимал буфер
+    std::vector<bool> seen(65536, false);
+    uint16_t peak = 0;
+    int distinct = 0;
+    for (size_t i = 1; i < frame.size(); i += 4) {      // B G R A -> зелёный
+        const uint16_t v = frame[i];
+        if (!seen[v]) { seen[v] = true; ++distinct; }
+        if (v > peak) peak = v;
+    }
+
+    printf("  distinct green values: %d, peak %u (white is 32768)\n", distinct, peak);
+    Check(distinct > 256, name16);
+    Check(peak <= 32768,  nameRange);
+}
+
 void CheckReducedSizeStaysInBuffer(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 {
     const int w = info.width / 2;
@@ -162,15 +199,20 @@ void CheckAudioIsRepeatable(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
     // decoder restarted mid-stream simply needs a few frames to settle, and no
     // amount of pre-roll removes it - two seconds of pre-roll changed nothing.
     //
-    // So what is checked is the shape of the difference, which separates the
-    // two cases cleanly: settling noise stays inside the first AAC frame and
-    // everything after it matches bit for bit, whereas the bug this check was
-    // written for - a seek landing on the wrong range - moves every sample.
+    // So what is checked is the shape of the difference. The first attempt here
+    // demanded bit equality past the first AAC frame, and that was still wrong:
+    // a pure sine read twice differs in the last bits of the float everywhere,
+    // by about 6e-6. Size separates the two cases, not position - settling
+    // reaches 0.005 inside the first frame and drops to rounding noise after it,
+    // whereas the bug this check was written for, a seek landing on the wrong
+    // range, moves every sample by a fraction of the signal itself.
     const int   kSettling     = 1024;    // one AAC frame
     const float kSettlingMax  = 0.02f;   // about -34 dBFS, well above the 0.005 seen
+    const float kRoundingMax  = 1e-4f;   // -80 dBFS: what different arithmetic costs
 
-    int   settled  = 0;          // samples that differ past the settling window
-    float worst    = 0.0f;       // largest difference inside it
+    int   beyond   = 0;          // samples past the window that differ by more than noise
+    float worst    = 0.0f;       // largest difference inside the window
+    float worstFar = 0.0f;       // and outside it
     int   firstAt  = -1;
     int   lastAt   = -1;
     for (int c = 0; c < ch; ++c) {
@@ -181,17 +223,22 @@ void CheckAudioIsRepeatable(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 
             if (firstAt < 0) firstAt = i;
             lastAt = i;
-            if (i >= kSettling) ++settled;
-            else if (mag > worst) worst = mag;
+            if (i >= kSettling) {
+                if (mag > worstFar) worstFar = mag;
+                if (mag > kRoundingMax) ++beyond;
+            } else if (mag > worst) {
+                worst = mag;
+            }
         }
     }
 
-    Check(first && again && settled == 0 && worst <= kSettlingMax,
+    Check(first && again && beyond == 0 && worst <= kSettlingMax,
           "same audio range reads identically");
 
     if (firstAt >= 0) {
-        printf("      settling after the seek: positions %d..%d, up to %.6f"
-               " (%d past the first AAC frame)\n", firstAt, lastAt, worst, settled);
+        printf("      after the seek: positions %d..%d, up to %.6f inside the first"
+               " AAC frame, %.6f past it (%d above the noise floor)\n",
+               firstAt, lastAt, worst, worstFar, beyond);
     }
 }
 
@@ -209,9 +256,13 @@ int main(int argc, char** argv)
     std::string path;
     int64_t wanted = 0;
     bool preferHardware = true;
+    // --16u гоняет замер в шестнадцатибитном выводе. Нужен, чтобы цена глубины
+    // была измерена, а не оценена на глаз
+    av1imp::FrameFormat format = av1imp::FrameFormat::BGRA8;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--sw")      preferHardware = false;
+        else if (arg == "--16u") format = av1imp::FrameFormat::BGRA16;
         else if (path.empty())  path = arg;
         else                    wanted = _atoi64(arg.c_str());
     }
@@ -223,14 +274,15 @@ int main(int argc, char** argv)
     }
 
     const auto& info = dec.Info();
-    printf("resolution : %dx%d\n", info.width, info.height);
+    printf("resolution : %dx%d, %d bit\n", info.width, info.height, info.bitDepth);
     printf("fps        : %.3f (%d/%d)\n", info.fps, info.fpsNum, info.fpsDen);
     printf("duration   : %.2f s\n", info.durationSec);
     printf("frames     : %lld\n", (long long)info.frameCount);
     printf("decoder    : %s (%s)\n", info.decoderName.c_str(),
            info.hardwareDecode ? "GPU" : "CPU");
 
-    const int stride = info.width * 4;
+    // Буфер по формату: в шестнадцати битах пиксель занимает вдвое больше
+    const int stride = info.width * (format == av1imp::FrameFormat::BGRA16 ? 8 : 4);
     std::vector<uint8_t> buf((size_t)stride * info.height);
 
     auto t0 = std::chrono::steady_clock::now();
@@ -252,7 +304,7 @@ int main(int argc, char** argv)
     t0 = std::chrono::steady_clock::now();
     int ok = 0;
     for (int i = 1; i <= kSeq; ++i) {
-        if (dec.GetFrameBGRA(wanted + i, buf.data(), stride, 0, 0)) ++ok;
+        if (dec.GetFrameBGRA(wanted + i, buf.data(), stride, 0, 0, format)) ++ok;
     }
     t1 = std::chrono::steady_clock::now();
     double totalMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -341,6 +393,7 @@ int main(int argc, char** argv)
 
     // --- checks ---
     printf("\nchecks:\n");
+    CheckDeepColour(dec, info);
     CheckReducedSizeStaysInBuffer(dec, info);
     CheckCacheMatchesFreshDecode(dec, path, info, preferHardware);
     CheckAudioIsRepeatable(dec, info);

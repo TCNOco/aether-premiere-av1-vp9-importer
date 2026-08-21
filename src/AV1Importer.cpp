@@ -389,7 +389,9 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
 
     fileInfo->vidInfo.imageWidth     = mi.width;
     fileInfo->vidInfo.imageHeight    = mi.height;
-    fileInfo->vidInfo.depth          = 32;
+    // Поле справочное («image buffers are 32bpp so this is informational only»),
+    // но пусть говорит правду о самом файле
+    fileInfo->vidInfo.depth          = (mi.bitDepth > 8) ? 64 : 32;
     // Ключевой момент. Сказать здесь 'av01' — значит отправить Premiere искать
     // декодер AV1, которого у него нет: он его не находит и отказывает файлу
     // словами "unsupported compression type av01", даже не спросив у нас кадр.
@@ -423,9 +425,10 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
         ldata->ticksPerFrame = ticksPerSecond * mi.fpsDen / mi.fpsNum;
     }
 
-    av1imp::Log("imGetInfo8: %s %dx%d, %d/%d fps, %lld frames, subType RAW",
+    av1imp::Log("imGetInfo8: %s %dx%d %d-bit, %d/%d fps, %lld frames, subType RAW",
                 mi.codecName.c_str(),
-                mi.width, mi.height, fileInfo->vidScale, fileInfo->vidSampleSize,
+                mi.width, mi.height, mi.bitDepth,
+                fileInfo->vidScale, fileInfo->vidSampleSize,
                 (long long)mi.frameCount);
 
     stdParms->piSuites->memFuncs->unlockHandle(reinterpret_cast<char**>(ldataH));
@@ -471,12 +474,32 @@ static prMALError AV1ImportAudio7(imStdParms* stdParms, imFileRef fileRef,
 // В каком виде отдаём пиксели и какого размера
 // ---------------------------------------------------------------------------
 
+// Premiere опрашивает форматы по одному, пока не получит imBadFormatIndex,
+// и порядок здесь означает предпочтение. Для 10-битного файла первым идёт
+// шестнадцатибитный формат, вторым — восьмибитный: если хост шестнадцать бит
+// не потянет, ему есть на что откатиться. Для обычного 8-битного файла список
+// как был, из одного формата, — лишнего выбора там не нужно.
 static prMALError AV1GetIndPixelFormat(imStdParms* stdParms, csSDK_size_t idx,
                                        imIndPixelFormatRec* rec)
 {
-    if (idx != 0) return imBadFormatIndex;
-    rec->outPixelFormat = PrPixelFormat_BGRA_4444_8u;
-    return malNoError;
+    bool deep = false;
+    if (rec->privatedata) {
+        ImporterLocalRecH ldataH = reinterpret_cast<ImporterLocalRecH>(rec->privatedata);
+        if (*ldataH && (*ldataH)->decoder && (*ldataH)->decoder->IsOpen()) {
+            deep = (*ldataH)->decoder->Info().bitDepth > 8;
+        }
+    }
+
+    if (idx == 0) {
+        rec->outPixelFormat = deep ? PrPixelFormat_BGRA_4444_16u
+                                   : PrPixelFormat_BGRA_4444_8u;
+        return malNoError;
+    }
+    if (idx == 1 && deep) {
+        rec->outPixelFormat = PrPixelFormat_BGRA_4444_8u;
+        return malNoError;
+    }
+    return imBadFormatIndex;
 }
 
 static prMALError AV1PreferredFrameSize(imStdParms* stdParms,
@@ -535,12 +558,21 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
     if (format->inFrameWidth <= 0)  format->inFrameWidth  = mi.width;
     if (format->inFrameHeight <= 0) format->inFrameHeight = mi.height;
 
+    // Формат просит хост, а не мы: он выбирает из того списка, что мы дали
+    // в imGetIndPixelFormat. Всё, кроме явных шестнадцати бит, отдаём восемью.
+    const PrPixelFormat pixelFormat =
+        (format->inPixelFormat == PrPixelFormat_BGRA_4444_16u)
+            ? PrPixelFormat_BGRA_4444_16u : PrPixelFormat_BGRA_4444_8u;
+    const av1imp::FrameFormat frameFormat =
+        (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? av1imp::FrameFormat::BGRA16
+                                                     : av1imp::FrameFormat::BGRA8;
+
     prRect rect;
     prSetRect(&rect, 0, 0, format->inFrameWidth, format->inFrameHeight);
 
     result = ldata->PPixCreatorSuite->CreatePPix(videoRec->outFrame,
                                                  PrPPixBufferAccess_ReadWrite,
-                                                 PrPixelFormat_BGRA_4444_8u, &rect);
+                                                 pixelFormat, &rect);
     if (result != malNoError) return result;
 
     char* buffer = nullptr;
@@ -555,13 +587,15 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
                      + static_cast<size_t>(format->inFrameHeight - 1) * rowBytes;
 
     if (!ldata->decoder->GetFrameBGRA(frameIndex, lastRow, -rowBytes,
-                                      format->inFrameWidth, format->inFrameHeight)) {
+                                      format->inFrameWidth, format->inFrameHeight,
+                                      frameFormat)) {
         av1imp::Log("frame %d: FAILED - %s", frameIndex, ldata->decoder->LastError().c_str());
         return imFileReadFailed;
     }
     if (frameIndex < 3) {
-        av1imp::Log("frame %d delivered (%dx%d, stride %d)", frameIndex,
-                    format->inFrameWidth, format->inFrameHeight, rowBytes);
+        av1imp::Log("frame %d delivered (%dx%d, stride %d, %s)", frameIndex,
+                    format->inFrameWidth, format->inFrameHeight, rowBytes,
+                    frameFormat == av1imp::FrameFormat::BGRA16 ? "16u" : "8u");
     }
 
     if (ldata->PPixCacheSuite) {

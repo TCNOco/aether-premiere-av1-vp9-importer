@@ -152,6 +152,13 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
 
     info_.codecName = codec->name;
 
+    // Глубина берётся из самого потока, а не из декодера: у аппаратного пути
+    // pix_fmt это AV_PIX_FMT_CUDA, и глубины там нет
+    if (const AVPixFmtDescriptor* desc =
+            av_pix_fmt_desc_get((AVPixelFormat)st->codecpar->format)) {
+        info_.bitDepth = desc->comp[0].depth;
+    }
+
     for (unsigned i = 0; i < fmt_->nb_streams; ++i) {
         if (fmt_->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
             ++info_.audioStreamCount;
@@ -402,7 +409,8 @@ bool Decoder::DecodeUntil(int64_t targetFrame) {
     }
 }
 
-bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW, int dstH) {
+bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW, int dstH,
+                            FrameFormat format) {
     AVFrame* srcFrame = src;
 
     // Если декодировала видеокарта, кадр лежит в её памяти — забираем в обычную
@@ -426,9 +434,20 @@ bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW,
     //
     // SWS_BICUBIC, а не BILINEAR: пока масштабирования не было, флаг ни на что
     // не влиял, а при уменьшении разница видна.
+    const AVPixelFormat dstFmt = (format == FrameFormat::BGRA16)
+                               ? AV_PIX_FMT_BGRA64LE
+                               : AV_PIX_FMT_BGRA;
+
+    // Пересчётчик кэшируется по всем своим параметрам, включая формат выхода:
+    // иначе переключение между 8 и 16 битами молча продолжило бы писать в старом
+    if (swsDstFmt_ != dstFmt) {
+        sws_freeContext(sws_);
+        sws_ = nullptr;
+        swsDstFmt_ = dstFmt;
+    }
     sws_ = sws_getCachedContext(sws_,
                                 srcFrame->width, srcFrame->height, (AVPixelFormat)srcFrame->format,
-                                dstW, dstH, AV_PIX_FMT_BGRA,
+                                dstW, dstH, dstFmt,
                                 SWS_BICUBIC, nullptr, nullptr, nullptr);
     if (!sws_) {
         SetError("cannot create colour converter");
@@ -440,6 +459,19 @@ bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW,
 
     sws_scale(sws_, srcFrame->data, srcFrame->linesize, 0, srcFrame->height, dstData, dstLinesize);
 
+    if (format == FrameFormat::BGRA16) {
+        // swscale отдаёт полный шестнадцатибитный размах, а Adobe ждёт белое
+        // на 32768. (v + 1) >> 1 переводит точно по краям: 65535 -> 32768, 0 -> 0.
+        // Отдельный проход по кадру, но только для 10-битного пути.
+        const int components = dstW * 4;
+        for (int y = 0; y < dstH; ++y) {
+            uint16_t* row = reinterpret_cast<uint16_t*>(dst + (ptrdiff_t)y * dstStride);
+            for (int i = 0; i < components; ++i) {
+                row[i] = (uint16_t)((row[i] + 1) >> 1);
+            }
+        }
+    }
+
     stats_.convertMs += std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - tConv).count();
     ++stats_.frames;
@@ -447,7 +479,7 @@ bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW,
 }
 
 bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
-                           int dstWidth, int dstHeight) {
+                           int dstWidth, int dstHeight, FrameFormat format) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!IsOpen() || !dst) {
         SetError("file is not open");
@@ -466,7 +498,7 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
 
     auto cached = frameCache_.find(frameIndex);
     if (cached != frameCache_.end()) {
-        return ConvertToBGRA(cached->second, dst, dstStride, dstWidth, dstHeight);
+        return ConvertToBGRA(cached->second, dst, dstStride, dstWidth, dstHeight, format);
     }
 
     cacheFill_ = backward;
@@ -480,7 +512,7 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
     // раскодированный кадр и сообщает об успехе — на таймлайне это лучше
     // чёрного провала, а Premiere всё равно не запрашивает кадры за длиной.
     if (!ok) return false;
-    return ConvertToBGRA(frame_, dst, dstStride, dstWidth, dstHeight);
+    return ConvertToBGRA(frame_, dst, dstStride, dstWidth, dstHeight, format);
 }
 
 // ---------------------------------------------------------------------------
