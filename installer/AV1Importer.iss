@@ -16,7 +16,7 @@
 ; было пересобрать, а не хранить как двоичные файлы неизвестного происхождения.
 
 #define AppName        "AV1 / VP9 Importer for Premiere Pro"
-#define AppVersion     "1.2.0"
+#define AppVersion     "1.2.1"
 #define AppPublisher   "neoHaDe"
 #define AppURL         "https://github.com/neoHaDe/premiere-av1-vp9-importer"
 #define PluginDir      "AV1 Importer"
