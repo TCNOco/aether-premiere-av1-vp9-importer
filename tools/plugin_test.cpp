@@ -16,12 +16,70 @@
 
 #include <windows.h>
 #include <cstdio>
+#include <cstring>
+#include <string>
 
 #include "PrSDKStructs.h"
 #include "PrSDKImport.h"
 #include "PrSDKMALErrors.h"
 
 typedef prMALError (*ImportEntryProc)(csSDK_int32, imStdParms*, void*, void*);
+
+// Чем плагин собирается связаться при загрузке. Читаем таблицу импорта прямо
+// из файла, без запуска: список нужен раньше, чем LoadLibrary скажет своё слово.
+bool ImportsMsvcRuntime(const wchar_t* path, std::string* found)
+{
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+
+    HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (!mapping) { CloseHandle(file); return false; }
+
+    BYTE* base = static_cast<BYTE*>(MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0));
+    if (!base) { CloseHandle(mapping); CloseHandle(file); return false; }
+
+    bool hit = false;
+    IMAGE_DOS_HEADER* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
+        IMAGE_NT_HEADERS64* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+        if (nt->Signature == IMAGE_NT_SIGNATURE) {
+            // Адреса в таблицах виртуальные, а файл лежит как есть — переводим
+            // через таблицу секций
+            IMAGE_SECTION_HEADER* sections = IMAGE_FIRST_SECTION(nt);
+            auto toOffset = [&](DWORD rva) -> BYTE* {
+                for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+                    const DWORD start = sections[i].VirtualAddress;
+                    const DWORD size  = sections[i].Misc.VirtualSize;
+                    if (rva >= start && rva < start + size) {
+                        return base + sections[i].PointerToRawData + (rva - start);
+                    }
+                }
+                return nullptr;
+            };
+
+            const DWORD importRva =
+                nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+            IMAGE_IMPORT_DESCRIPTOR* imp =
+                reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(toOffset(importRva));
+
+            for (; imp && imp->Name; ++imp) {
+                const char* name = reinterpret_cast<const char*>(toOffset(imp->Name));
+                if (!name) break;
+                if (_strnicmp(name, "MSVCP", 5) == 0 || _strnicmp(name, "VCRUNTIME", 9) == 0) {
+                    if (!found->empty()) *found += ", ";
+                    *found += name;
+                    hit = true;
+                }
+            }
+        }
+    }
+
+    UnmapViewOfFile(base);
+    CloseHandle(mapping);
+    CloseHandle(file);
+    return hit;
+}
 
 int wmain(int argc, wchar_t** argv)
 {
@@ -86,6 +144,21 @@ int wmain(int argc, wchar_t** argv)
     r = entry(imGetIndFormat, &stdParms, reinterpret_cast<void*>(1), &fmt);
     printf("index 1    : %s\n", r == imBadFormatIndex ? "correctly rejected" : "WRONG");
 
+    // Среда выполнения C++ должна быть внутри плагина, а не снаружи.
+    // Premiere Pro CC 2019 держит рядом с собой свою msvcp140.dll от VS2015,
+    // Windows ищет библиотеки по имени среди уже загруженных в процесс — и наш
+    // плагин получал именно её. Загрузка падала с 1114, а Premiere вёл себя так,
+    // будто плагина нет вовсе: ни строчки в журнале, обычная ошибка про av01.
+    // Проверяем по таблице импорта, потому что на этой машине всё работает
+    // и без статической среды — беда видна только в чужом процессе.
+    std::string runtime;
+    const bool leaks = ImportsMsvcRuntime(argv[1], &runtime);
+    printf("C++ runtime: %s\n", leaks ? runtime.c_str() : "static, no msvcp/vcruntime imports");
+    if (leaks) {
+        printf("FAIL: build with /MT, otherwise hosts with an older runtime will not load it\n");
+    }
+
     FreeLibrary(plugin);
+    if (leaks) return 6;
     return ffmpegOk ? 0 : 5;
 }

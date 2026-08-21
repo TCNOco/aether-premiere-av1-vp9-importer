@@ -24,11 +24,14 @@ if your source footage comes from the web, where it is what you are usually give
 
 To remove it, use *Apps & features* or the uninstaller in the plug-in folder.
 
-**Requirements:** Windows x64 and Adobe Premiere Pro. Tested on 25.x only. The
-importer interface last changed in Premiere 23.2, and the plug-in asks the host for
-whichever suite versions it actually has, so 2023 and later ought to work. Ought
-to, because nothing older than 25.x has been tried. Whatever it loads into is
-written to the log, so a report can say which version was involved.
+**Requirements:** Windows x64 and Adobe Premiere Pro. Tested at both ends of the
+range: **Premiere Pro CC 2019 (13.1.5)** and **2025 (25.x)**, plus After Effects
+25.3.2. Nothing in between has been tried, and there is a reason to expect it to
+work: the importer interface was version 21 in 2019 and is 24 today, so 2020–2024
+sit between two versions that are known good, and the plug-in asks the host for
+whichever suite versions it actually has rather than demanding the newest.
+
+Whatever it loads into is written to the log, so a bug report can name the version.
 
 Nothing else is needed: with no supported GPU the plug-in decodes on the CPU, and
 on this hardware that path is the faster one anyway.
@@ -197,6 +200,24 @@ installed. There is no message and no log entry.
    decoding and hands over ready pixels; saying `av01` sends Premiere off to look
    for a decoder it does not have, and it reports exactly the error you were
    trying to fix.
+
+### Why the C++ runtime is linked statically
+
+Premiere Pro CC 2019 keeps its own `msvcp140.dll` — version 14.00.24210, built with
+Visual Studio 2015 — in its program folder. Windows resolves DLLs by name against
+what is already loaded in the process, so a plug-in built with a newer Visual Studio
+gets handed that old runtime and fails to initialise. `LoadLibrary` returns 1114,
+and Premiere reacts exactly as if the plug-in were not installed: no message, no log
+entry, and the same "unsupported compression type av01" you were trying to fix.
+
+Linking the runtime statically (`/MT`) removes the dependency instead of fighting
+over it. It is safe here because no runtime object ever crosses the plug-in
+boundary: Premiere is spoken to through its own structures, FFmpeg through a C API,
+and the FFmpeg DLLs carry their own runtime anyway.
+
+`plugin_test` reads the import table out of the built `.prm` and fails if
+`MSVCP*` or `VCRUNTIME*` reappear there — the machine that builds the plug-in is
+the one machine where this bug cannot be observed.
 
 ### Why FFmpeg is delay-loaded
 

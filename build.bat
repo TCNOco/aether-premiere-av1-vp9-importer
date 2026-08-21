@@ -12,7 +12,9 @@ msbuild src\AV1Importer.vcxproj /p:Configuration=Release /p:Platform=x64 /v:mini
 if errorlevel 1 exit /b 1
 
 REM AV1ImporterSettings.exe - the decoder switch window
-cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD /DUNICODE /D_UNICODE ^
+REM /MT, not /MD: the plug-in must not depend on msvcp140.dll, and the settings
+REM app is kept consistent with it so a user without the redistributable can run it
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MT /DUNICODE /D_UNICODE ^
    tools\settings_app.cpp src\AV1Settings.cpp ^
    /Fe:build\Release\AV1ImporterSettings.exe "/Fo:build\obj\\" ^
    /link /SUBSYSTEM:WINDOWS shell32.lib ole32.lib user32.lib gdi32.lib

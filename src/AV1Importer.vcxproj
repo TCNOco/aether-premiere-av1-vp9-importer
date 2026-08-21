@@ -83,7 +83,13 @@
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <!-- Статическая среда выполнения C++, и это не вкусовщина. Premiere Pro CC 2019
+           кладёт свою msvcp140.dll (14.00.24210, от VS2015) рядом с собой, а Windows
+           ищет библиотеки по имени среди уже загруженных в процесс. Плагину, собранному
+           VS2022, доставалась та самая старая — и он не загружался вовсе: LoadLibrary
+           отвечал 1114 (DLL initialization routine failed), а Premiere вёл себя так,
+           будто плагина нет. Со статической средой зависимости от msvcp140 нет вовсе. -->
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
