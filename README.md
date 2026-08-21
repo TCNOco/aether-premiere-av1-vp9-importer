@@ -1,4 +1,4 @@
-# AV1 / VP9 Importer for Adobe Premiere Pro
+# AV1 / VP9 Importer for Adobe Premiere Pro, After Effects and Media Encoder
 
 Drag an AV1 or VP9 file onto the timeline and it just works: no transcoding,
 no proxies.

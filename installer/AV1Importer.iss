@@ -12,7 +12,7 @@
 #define AppName        "AV1 / VP9 Importer for Premiere Pro"
 #define AppVersion     "1.1.0"
 #define AppPublisher   "neoHaDe"
-#define AppURL         "https://github.com/neoHaDe/premiere-av1-importer"
+#define AppURL         "https://github.com/neoHaDe/premiere-av1-vp9-importer"
 #define PluginDir      "AV1 Importer"
 
 [Setup]

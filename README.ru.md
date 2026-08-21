@@ -1,4 +1,4 @@
-# Импортёр AV1 / VP9 для Adobe Premiere Pro
+# Импортёр AV1 / VP9 для Adobe Premiere Pro, After Effects и Media Encoder
 
 Перетащил файл AV1 или VP9 на таймлайн — и он работает: без конвертации
 и промежуточных форматов.
