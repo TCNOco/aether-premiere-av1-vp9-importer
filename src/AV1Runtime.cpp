@@ -22,6 +22,7 @@
 #include <mutex>
 
 #include "AV1Log.h"
+#include "AV1Version.h"
 #include "AV1Settings.h"
 
 namespace {
@@ -89,7 +90,7 @@ void EnsureRuntime()
     static std::once_flag once;
     std::call_once(once, []() {
         LogReset();
-        Log("plug-in ready in process");
+        Log("Aether %s, plug-in ready in process", AETHER_VERSION_STR);
         PreloadFFmpeg();
     });
 }

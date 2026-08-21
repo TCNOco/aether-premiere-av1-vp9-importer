@@ -1,10 +1,54 @@
 // Ресурс IMPT: по нему Premiere и After Effects узнают, что эта DLL — импортёр.
 // Четырёхбуквенный код здесь опознаёт сам плагин и с форматом файлов не связан.
 
+#include "AV1Version.h"
+#include <winver.h>
+
 #define AV01_FCC 0x41563031L    // 'AV01'
 
 1000 IMPT DISCARDABLE
 BEGIN
     0x0000
     AV01_FCC
+END
+
+// Ресурс версии. Не украшение: без него правый клик по Aether.prm показывает
+// пустоту, и понять, какая сборка лежит в папке Adobe, можно разве что по
+// размеру файла. Проверено на себе.
+//
+// Число берётся из AV1Version.h, руками здесь ничего править не нужно.
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION    AETHER_VERSION_COMMA
+    PRODUCTVERSION AETHER_VERSION_COMMA
+    FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+    FILEFLAGS      VS_FF_DEBUG
+#else
+    FILEFLAGS      0x0L
+#endif
+    FILEOS         VOS_NT_WINDOWS32
+    FILETYPE       VFT_DLL
+    FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 040904B0 — английский (США) в кодировке Unicode. Свойства файла
+        // читает вся Windows, а не только наш язык, поэтому строки здесь
+        // английские.
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "neoHaDe"
+            VALUE "FileDescription",  "Aether - AV1 and VP9 importer for Adobe applications"
+            VALUE "FileVersion",      AETHER_VERSION_STR
+            VALUE "InternalName",     "Aether"
+            VALUE "LegalCopyright",   "Apache License 2.0"
+            VALUE "OriginalFilename", "Aether.prm"
+            VALUE "ProductName",      "Aether"
+            VALUE "ProductVersion",   AETHER_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
 END

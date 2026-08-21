@@ -1,4 +1,4 @@
-; Установщик Aether — импортёра AV1 и VP9 для приложений Adobe.
+﻿; Установщик Aether — импортёра AV1 и VP9 для приложений Adobe.
 ;
 ; Собирается компилятором Inno Setup:
 ;   ISCC.exe installer\Aether.iss
@@ -16,7 +16,16 @@
 ; было пересобрать, а не хранить как двоичные файлы неизвестного происхождения.
 
 #define AppName        "Aether - AV1 / VP9 Importer for Adobe"
-#define AppVersion     "1.2.1"
+
+; Версия НЕ пишется здесь, а читается из собранного плагина.
+;
+; Своя копия номера рано или поздно разошлась бы с настоящей, и разошлась бы
+; молча: установщик уверял бы одно, свойства файла показывали другое. Плагин
+; несёт свою версию в ресурсе (см. src\AV1Version.h) — оттуда и берём, так
+; расходиться нечему. Нет собранного плагина — нет и установщика, и это
+; правильно: собирать установщик вокруг пустого места незачем.
+#define SourcePlugin   "..\build\Release\Aether.prm"
+#define AppVersion     GetStringFileInfo(SourcePlugin, PRODUCT_VERSION)
 #define AppPublisher   "neoHaDe"
 #define AppURL         "https://github.com/neoHaDe/aether-premiere-av1-vp9-importer"
 #define PluginDir      "Aether"
@@ -114,7 +123,7 @@ Type: filesandordirs; Name: "{code:GetMediaCore}\{#OldPluginDir}"
 Name: "{autoprograms}\{cm:SettingsShortcut}"; Filename: "{app}\AetherSettings.exe"; Comment: "{cm:SettingsComment}"
 
 [Files]
-Source: "..\build\Release\Aether.prm"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourcePlugin}"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Окно переключения декодера. Отдельная программа, а не окно внутри Premiere:
 ; настройка нужна тогда, когда Premiere из-за драйвера не запускается

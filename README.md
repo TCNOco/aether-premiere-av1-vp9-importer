@@ -17,54 +17,21 @@ That matters if you record with OBS: AV1 gives the same picture quality at a
 noticeably lower bitrate, but the recordings were unusable in Premiere. VP9 matters
 if your source footage comes from the web, where it is what you are usually given.
 
-## Will it work for you
+## What you need
 
-One table for all of it: where the plug-in goes, what it opens, and what it does
-not do. "Yes" means tested — live or by an automated check; where nothing was
-tried, the table says so.
+The short answer: Windows, and an Adobe application. Nothing else.
 
-| | | |
-|---|---|---|
-| **Applications** | Premiere Pro CC 2019 — 13.1.5 | **yes**, the oldest version verified |
-| | Premiere Pro 2020 – 2024 | **not tried**, see the note below the table |
-| | Premiere Pro 2025 — 25.x | **yes**, the main target |
-| | Premiere Pro 2026 — 26.0.0.72 | **yes**, the newest version verified |
-| | After Effects 25.3.2 | **yes** — import, audio tracks, preview, render |
-| | Media Encoder 25.6.4 | **yes** — a whole export, 1265 frames, no errors |
-| **System** | Windows x64 | **yes**, the only one |
-| | macOS | **no** — the decoding core is portable, the rest is Win32 |
-| **Video codecs** | AV1 | **yes** |
-| | VP9 | **yes** |
-| | everything else | **handed back** — Premiere opens it itself |
-| **Containers** | MP4, MOV, M4V | **yes** — with AV1 or VP9 inside |
-| | MKV, WebM | **yes** — Premiere cannot open them at all |
-| | Audio-only MKA, MKV, WebM | **yes** — for the same reason |
-| | Audio-only MP4 and M4A | **no, deliberately** — Premiere opens those itself |
-| | OGV, FLV, TS, VOB | **no** — those carry other codecs, not these two |
-| **Picture** | 8-bit | **yes** |
-| | 10-bit | **yes** — delivered as 16-bit in Adobe's range, see below |
-| | 12-bit | **not tried** — the same path as 10-bit |
-| | Alpha, VP9 in WebM | **yes** — CPU decoding only, see below |
-| | Alpha in AV1 | **no** — stored differently, not done |
-| | Colour matrix BT.601 / 709 / 2020 | **yes** — taken from the file, not guessed |
-| | Full and limited range | **yes** — also taken from the file |
-| | Colour space reported to Premiere | **yes** — primaries and transfer as ITU codes |
-| | HDR: PQ and HLG | **yes** — passed through as they are; Premiere does the tone mapping |
-| | Log curves (S-Log, V-Log, C-Log) | **expected** — same path, no real footage to try |
-| | Interlaced | **no** |
-| **Timing** | Constant frame rate | **yes** |
-| | Variable frame rate | **yes** — the frame is found by time, see below |
-| | Files that do not start at zero | **yes** — picture and sound share one clip zero |
-| | Timecode from the file | **no** |
-| **Audio** | AAC, Opus, FLAC | **yes**, tested |
-| | anything else FFmpeg decodes | **expected** — only video has a codec list |
-| | Multiple tracks | **yes**, they stay separate |
-| | Mono, stereo | **yes** |
-| | 5.1 and above | **not tried** — the channel count is passed through as is |
-| **Hardware** | CPU decoding | **yes**, the default — it is faster, see the measurements |
-| | Asynchronous frame delivery | **yes**, on; worth 5–12% on the GPU path, nothing on the CPU |
-| | NVIDIA — `av1_cuvid`, `vp9_cuvid` | **yes**, tested on an RTX 5080 |
-| | Intel QSV, AMD AMF | **not tried** — the code is there, the hardware was not |
+| Requirement | Answer |
+|---|---|
+| **System** | Windows x64. No macOS: the decoding core is portable, everything else is Win32 |
+| **Applications** | Premiere Pro, After Effects, Media Encoder. One installer covers all three |
+| **Verified on** | Premiere Pro **2019** (13.1.5), **2025** (25.x), **2026** (26.0.0.72), After Effects **25.3.2**, Media Encoder **25.6.4** |
+| **Not tried** | Premiere Pro 2020 – 2024. They sit between two verified points, see the note below |
+| **Graphics card** | **not required.** The CPU decodes by default, and it is faster — measurements below |
+| **NVIDIA** | optional: `av1_cuvid`, `vp9_cuvid`, tested on an RTX 5080 |
+| **Intel QSV, AMD AMF** | not tried — the code is there, the hardware was not |
+| **Async delivery** | on. Worth 5–12% on the GPU path, nothing on the CPU; can be switched off |
+| **Privileges** | administrator, to install only |
 
 The plug-in installs into the folder Adobe applications share, so all of them pick
 it up at once — there is nothing to install per application.
@@ -76,9 +43,68 @@ whichever suite versions it actually has instead of demanding the newest — whi
 is exactly what 2019 exercised, taking version 7 of the frame-cache suite where
 2025 gives 8. For the same reason Premiere 2026 worked without a single change.
 
+## What it opens
+
+What the plug-in claims, and what it does with it. **"Yes" means tested** — live
+or by an automated check. Where nothing was tried, the table says so.
+
+### Codecs and containers
+
+| Format | Support |
+|---|---|
+| AV1 | **yes** |
+| VP9 | **yes** |
+| everything else | **handed back** — Premiere opens it itself |
+| MP4, MOV, M4V | **yes** — with AV1 or VP9 inside |
+| MKV, WebM | **yes** — Premiere cannot open them at all |
+| Audio-only MKA, MKV, WebM | **yes** — for the same reason |
+| Audio-only MP4 and M4A | **no, deliberately** — Premiere opens those itself |
+| OGV, FLV, TS, VOB | **no** — those carry other codecs, not these two |
+
 The list of extensions is deliberately wider than the list of codecs: an MP4 can
 hold anything, so the file is opened first and handed back if what is inside is
 neither AV1 nor VP9. Taking someone else's file is worse than not taking your own.
+
+### Picture
+
+| Property | Support |
+|---|---|
+| 8-bit | **yes** |
+| 10-bit | **yes** — delivered as 16-bit in Adobe's range, see below |
+| 12-bit | **not tried** — the same path as 10-bit |
+| Alpha, VP9 in WebM | **yes** — CPU decoding only, see below |
+| Alpha in AV1 | **no** — stored differently, not done |
+| Interlaced | **no** |
+
+### Colour
+
+| Property | Support |
+|---|---|
+| Matrix BT.601 / 709 / 2020 | **yes** — taken from the file, not guessed |
+| Full and limited range | **yes** — also taken from the file |
+| Colour space reported to the host | **yes** — primaries and transfer as ITU codes |
+| HDR: PQ and HLG | **yes** — passed through as they are, Premiere does the tone mapping |
+| Log curves (S-Log, V-Log, C-Log) | **expected** — same path, no real footage to try |
+
+### Timing
+
+| Property | Support |
+|---|---|
+| Constant frame rate | **yes** |
+| Variable frame rate | **yes** — the frame is found by time, see below |
+| Files that do not start at zero | **yes** — picture and sound share one clip zero |
+| Timecode from the file | **no** |
+
+### Audio
+
+| Property | Support |
+|---|---|
+| AAC, Opus, FLAC | **yes**, tested |
+| anything else FFmpeg decodes | **expected** — only video has a codec list |
+| Multiple tracks | **yes**, they stay separate |
+| Mono, stereo | **yes** |
+| 5.1 and above | **not tried** — the channel count is passed through as is |
+
 
 ## Install
 
@@ -598,7 +624,56 @@ C-Log, and if a file carries them they are passed on. That could not be tested
 
 **What this does not promise.** That the declaration is correct has been
 checked; that Premiere then does the right thing with it is something only
-Premiere can show.
+Premiere can show. Judging that takes a pair of eyes, so the material to judge
+by is built by a script of its own:
+
+```
+tools\make-hdr-check.ps1      four files carrying the same picture
+```
+
+Only the encoding differs: ordinary SDR, the same frame in BT.2020 PQ, the same
+in HLG, and the same again as a brightness ladder.
+
+The ladder is the important one. PQ carries brightness in **absolute nits**, so
+"convert SDR to PQ" is not one operation but a family of them: one has to decide
+how many nits white is worth. A hundred, as on an SDR studio monitor? Or 203, as
+BT.2408 prescribes for diffuse white in HDR? The host holds that answer, not us,
+and guessing is pointless. So one file carries four segments of the same picture
+converted differently; whichever segment matches the reference is the assumption
+the host makes.
+
+The script takes nothing on trust here — and measures two separate things.
+
+First, whether the brightness asked for actually landed. What is expected is not
+"looks about right" but the specific codes from the SMPTE 2084 formula.
+
+```
+  100 nit   want ~ 509   got  529   ok
+  203 nit   want ~ 573   got  593   ok
+  400 nit   want ~ 639   got  656   ok
+ 1000 nit   want ~ 720   got  744   ok
+```
+
+That check is not decoration. The first version of this set used the `npl`
+option, which does nothing for PQ at all — zimg applies it only to HLG. Every
+file came out identical, with correct tags and a plausible look: "1000 nit" did
+not differ from "100 nit" in any way. Neither the eye nor ffprobe showed it;
+only measuring the code did. A plain gain in linear light works instead.
+
+Second, whether a converted file really must match the reference. Here the
+conversion is run backwards.
+
+```
+02-pq-100nit.mkv   understood  37.9   ignored  15.6
+04-hlg.mkv         understood  39.1   ignored  17.4
+```
+
+Around 38 dB is "the eye sees no difference"; around 16 dB is the washed out
+picture. Twenty decibels apart — hard to miss. Two frames are written alongside
+for comparison: `expected.png` and `if-ignored.png`.
+
+No HDR display is needed: on a Rec.709 sequence the host flattens HDR to SDR
+itself, and it is that result one should be looking at.
 
 ### The frame cache
 

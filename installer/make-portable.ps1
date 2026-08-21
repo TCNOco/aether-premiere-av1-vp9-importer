@@ -8,7 +8,9 @@
 # и правильно делает. Здесь та же папка, которую можно посмотреть, проверить
 # и скопировать руками.
 #
-# Версия берётся из Aether.iss, чтобы архив и установщик не разъехались.
+# Версия берётся из самого собранного плагина — оттуда же, откуда её берёт и
+# установщик. Раньше она вычитывалась из Aether.iss, но там её больше нет:
+# держать номер в трёх местах значит однажды выпустить архив с чужим именем.
 
 param(
     [string]$Root = (Split-Path $PSScriptRoot -Parent)
@@ -16,15 +18,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$iss = Join-Path $PSScriptRoot "Aether.iss"
-if (-not (Test-Path $iss)) { throw "не найден $iss" }
-
-$version = (Select-String -Path $iss -Pattern '#define AppVersion\s+"([^"]+)"').Matches[0].Groups[1].Value
-if (-not $version) { throw "не удалось прочитать версию из Aether.iss" }
-
 $release = Join-Path $Root "build\Release"
 $prm     = Join-Path $release "Aether.prm"
 if (-not (Test-Path $prm)) { throw "сначала соберите плагин: build.bat" }
+
+$version = (Get-Item $prm).VersionInfo.ProductVersion
+if (-not $version) { throw "в $prm нет ресурса версии — пересоберите плагин" }
 
 $staging = Join-Path $Root "build\portable"
 $folder  = Join-Path $staging "Aether"

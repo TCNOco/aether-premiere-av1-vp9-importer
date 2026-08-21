@@ -95,18 +95,26 @@ int wmain(int argc, wchar_t** argv)
     }
     printf("load       : ok\n");
 
-    // Если DllMain отработал, библиотеки ffmpeg уже в процессе.
-    // Проверяем именно так: обращения к самим функциям здесь ещё не было.
+    // ffmpeg НЕ должен подгрузиться сам по себе, пока модуль загружается.
+    //
+    // Это не придирка к порядку, а суть: пока идёт загрузка, поток держит замок
+    // загрузчика Windows, и звать оттуда LoadLibrary Microsoft прямо запрещает.
+    // Ровно поэтому подгрузка вынесена из DllMain в первый настоящий запрос.
+    // Проверять надо обе половины этого обещания, иначе оно тихо развалится:
+    // сначала что рано ничего не загрузилось, потом что вовремя загрузилось.
+    //
+    // Раньше здесь стояла проверка наоборот — ждала ffmpeg сразу после загрузки.
+    // После переноса она перестала соответствовать замыслу и просто врала.
     const wchar_t* modules[] = { L"avutil-60.dll", L"avcodec-62.dll",
                                  L"avformat-62.dll", L"swscale-9.dll" };
-    bool ffmpegOk = true;
+    bool tooEarly = false;
     for (const wchar_t* m : modules) {
-        if (!GetModuleHandleW(m)) {
-            wprintf(L"FAIL: %s was not preloaded\n", m);
-            ffmpegOk = false;
+        if (GetModuleHandleW(m)) {
+            wprintf(L"FAIL: %s loaded during DllMain, that is the loader lock\n", m);
+            tooEarly = true;
         }
     }
-    printf("ffmpeg     : %s\n", ffmpegOk ? "preloaded from the plug-in folder" : "NOT FOUND");
+    printf("loader lock: %s\n", tooEarly ? "VIOLATED" : "clean, ffmpeg untouched so far");
 
     ImportEntryProc entry = (ImportEntryProc)GetProcAddress(plugin, "xImportEntry");
     if (!entry) {
@@ -123,6 +131,17 @@ int wmain(int argc, wchar_t** argv)
     imImportInfoRec info = {};
     prMALError r = entry(imInit, &stdParms, &info, nullptr);
     printf("imInit     : result=%d, priority=%d\n", r, info.priority);
+
+    // А вот теперь ffmpeg обязан быть в процессе: первый запрос уже прошёл.
+    bool ffmpegOk = true;
+    for (const wchar_t* m : modules) {
+        if (!GetModuleHandleW(m)) {
+            wprintf(L"FAIL: %s did not load on the first request\n", m);
+            ffmpegOk = false;
+        }
+    }
+    printf("ffmpeg     : %s\n", ffmpegOk ? "loaded from the plug-in folder on demand"
+                                          : "NOT FOUND");
 
     // imGetIndFormat: какие файлы плагин берёт на себя
     imIndFormatRec fmt = {};
@@ -160,5 +179,6 @@ int wmain(int argc, wchar_t** argv)
 
     FreeLibrary(plugin);
     if (leaks) return 6;
+    if (tooEarly) return 7;      // ffmpeg под замком загрузчика - это зависание в чужом процессе
     return ffmpegOk ? 0 : 5;
 }
