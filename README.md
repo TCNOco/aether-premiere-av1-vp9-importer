@@ -50,6 +50,26 @@ at all, so the plug-in demuxes them itself. That works, but only for the codecs
 above. An MKV holding H.264 is refused by the plug-in and Premiere cannot open it
 either.
 
+### After Effects gets it too
+
+Adobe plug-ins of this kind live in a folder shared by the whole suite, so the
+installer puts the importer in front of After Effects as well. That was a guess
+until it was checked; now it is in the log:
+
+```
+host: FXTC 25.3.2
+imOpenFile8: accepted, AV1 2560x1440, decoder libdav1d
+audio: track 0 ... track 3
+frame 0 delivered (2560x1440, stride 10240)
+```
+
+`FXTC` is After Effects. It imported the same OBS recording, kept all four audio
+tracks apart, and pulled 93 frames during a preview — about 42 per second at 1440p,
+which is After Effects setting the pace, not the decoder.
+
+Tested on 25.3.2 with one recording. Rendering out of After Effects has not been
+tried, and Media Encoder has not been tried at all.
+
 ## Performance
 
 Measured on an RTX 5080 with a 16-thread CPU; VP9 lands within a few per cent of AV1.
