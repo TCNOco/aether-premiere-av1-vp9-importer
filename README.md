@@ -25,7 +25,7 @@ The short answer: Windows, and an Adobe application. Nothing else.
 |---|---|
 | **System** | Windows x64. No macOS: the decoding core is portable, everything else is Win32 |
 | **Applications** | Premiere Pro, After Effects, Media Encoder. One installer covers all three |
-| **Verified on** | Premiere Pro **2019** (13.1.5), **2025** (25.x), **2026** (26.0.0.72), After Effects **25.3.2**, Media Encoder **25.6.4** |
+| **Verified on** | Premiere Pro **2019** (13.1.5), **2025** (25.x), **2026** (26.x), After Effects **25.3.2**, Media Encoder **25.6.4** |
 | **Not tried** | Premiere Pro 2020 – 2024. They sit between two verified points, see the note below |
 | **Graphics card** | **not required.** The CPU decodes by default, and it is faster — measurements below |
 | **NVIDIA** | optional: `av1_cuvid`, `vp9_cuvid`, tested on an RTX 5080 |
