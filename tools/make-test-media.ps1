@@ -127,6 +127,27 @@ Make "colour_bt709.mp4" @(
     "-color_range","tv",
     "-c:v","libsvtav1","-preset","6","-crf","8")
 
+# HDR: BT.2020 primaries with the PQ transfer curve, 10-bit.
+#
+# In Matroska rather than MP4, and that is not a preference. Written straight
+# to MP4, FFmpeg here keeps the matrix tag and drops the primaries and the
+# transfer, which leaves a file that cannot test what it was made to test.
+# Matroska carries all three, so the file is built and then remuxed.
+Make "hdr_pq_temp.mp4" @(
+    "-f","lavfi","-i","gradients=size=640x360:rate=30:duration=4:c0=black:c1=white:type=linear",
+    "-f","lavfi","-i","sine=frequency=440:duration=4",
+    "-map","0:v","-map","1:a","-pix_fmt","yuv420p10le",
+    "-colorspace","bt2020nc","-color_primaries","bt2020","-color_trc","smpte2084",
+    "-color_range","tv",
+    "-c:v","libsvtav1","-preset","8","-crf","25","-g","30","-c:a","aac")
+
+Make "hdr_pq.mkv" @(
+    "-i",(Join-Path $OutDir "hdr_pq_temp.mp4"),"-c","copy",
+    "-colorspace","bt2020nc","-color_primaries","bt2020","-color_trc","smpte2084",
+    "-color_range","tv")
+
+Remove-Item (Join-Path $OutDir "hdr_pq_temp.mp4") -ErrorAction SilentlyContinue
+
 # H.264, the most ordinary file there is - must be handed back untouched.
 # libopenh264 rather than libx264: the LGPL FFmpeg build has no x264 in it.
 Make "h264.mp4" @(

@@ -36,6 +36,8 @@
 #include "PrSDKTimeSuite.h"
 #include "PrSDKAppInfoSuite.h"
 #include "PrSDKAsyncImporter.h"
+#include "PrSDKColorProfile.h"
+#include "PrSDKColorSEICodes.h"
 
 typedef prMALError (*ImportEntryProc)(csSDK_int32, imStdParms*, void*, void*);
 
@@ -352,6 +354,15 @@ struct RunResult
     PrPixelFormat        pixelFormat  = PrPixelFormat_BGRA_4444_8u;
     std::vector<uint8_t> firstFrame;   // для сверки между профилями
     AsyncResult          async;
+
+    // Что импортёр объявил про цвет отданных пикселей
+    bool colourAsked      = false;
+    bool colourIsRGB      = false;
+    bool colourIdentity   = false;   // матрица единичная — мы же отдаём RGB
+    bool colourEnumEnds   = false;   // перебор пространств завершается
+    int  colourPrimaries  = 0;
+    int  colourTransfer   = 0;
+    int  colourBitDepth   = 0;
 };
 
 // Гоняем асинхронный путь по уже открытому файлу.
@@ -861,6 +872,32 @@ RunResult Run(ImportEntryProc entry, const HostProfile& profile,
     audioRec.privateData = openRec.privatedata;
     out.audioGot = entry(imImportAudio7, &stdParms, fileRef, &audioRec) == malNoError;
 
+    // Цветовое пространство: что именно мы обещаем хосту про свои пиксели.
+    //
+    // Проверять сами коды по файлу здесь нельзя — поддельный хост про файл
+    // ничего не знает. Зато можно проверить то, что обязано быть верным
+    // ВСЕГДА: мы отдаём RGB, матрица после пересчёта единичная, а перебор
+    // пространств заканчивается, иначе хост будет спрашивать вечно.
+    if (out.hasVideo) {
+        imIndColorSpaceRec colour = {};
+        colour.inPrivateData = openRec.privatedata;
+        if (entry(imGetIndColorSpace, &stdParms, reinterpret_cast<void*>(0),
+                  &colour) == malNoError) {
+            out.colourAsked     = true;
+            out.colourIsRGB     = (colour.outSEICodesRec.isRGB != 0);
+            out.colourIdentity  = (colour.outSEICodesRec.matrixEquationsCode ==
+                                   static_cast<csSDK_int32>(PrMatrixEquations::kIdentity));
+            out.colourPrimaries = colour.outSEICodesRec.colorPrimariesCode;
+            out.colourTransfer  = colour.outSEICodesRec.transferCharacteristicCode;
+            out.colourBitDepth  = colour.outSEICodesRec.bitDepth;
+        }
+
+        imIndColorSpaceRec second = {};
+        second.inPrivateData = openRec.privatedata;
+        out.colourEnumEnds = entry(imGetIndColorSpace, &stdParms,
+                                   reinterpret_cast<void*>(1), &second) != malNoError;
+    }
+
     // Асинхронный путь гоняем на том же открытом файле и сравниваем нулевой
     // кадр с тем, что дал обычный путь чуть выше
     if (out.hasVideo && out.width > 0 && out.height > 0) {
@@ -981,6 +1018,18 @@ int wmain(int argc, wchar_t** argv)
                   "frame cache taken at a version the host has");
         } else {
             Check(r.cacheVersion == 0, "no frame cache, and the plug-in went on anyway");
+        }
+
+        // Цвет отданных пикселей
+        if (!r.hasVideo) {
+            printf("    %-44s SKIP (no video track)\n", "colour space declared");
+        } else {
+            printf("    colour: primaries %d, transfer %d, %d-bit\n",
+                   r.colourPrimaries, r.colourTransfer, r.colourBitDepth);
+            Check(r.colourAsked,    "colour space declared to the host");
+            Check(r.colourIsRGB,    "declared as RGB, which is what we deliver");
+            Check(r.colourIdentity, "matrix declared identity after the conversion");
+            Check(r.colourEnumEnds, "the list of colour spaces ends");
         }
 
         // Асинхронная выдача. Хост вправе ею не пользоваться, поэтому

@@ -421,6 +421,11 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     fileInfo->vidInfo.noDuration     = imNoDurationFalse;
     fileInfo->vidInfo.hasPulldown    = kPrFalse;
 
+    // Цветовое пространство мы хосту сообщаем — см. AV1GetIndColorSpace.
+    // Без этого Premiere подставляет своё рабочее пространство, и материал
+    // BT.2020 PQ приезжает вылинявшим, а лог-кривые плоскими.
+    fileInfo->vidInfo.colorSpaceSupport = imColorSpaceSupport_Fixed;
+
     // Оба пути сразу: обычный остаётся, асинхронный хост использует, если
     // захочет. Заявляем асинхронный только когда он включён в настройках —
     // иначе Premiere спросит imCreateAsyncImporter, получит отказ и будет
@@ -532,6 +537,56 @@ static prMALError AV1PreferredFrameSize(imStdParms* stdParms,
     const av1imp::MediaInfo& mi = (*ldataH)->decoder->Info();
     rec->outWidth  = mi.width;
     rec->outHeight = mi.height;
+    return malNoError;
+}
+
+// ---------------------------------------------------------------------------
+// imGetIndColorSpace — какого цвета то, что мы отдаём
+// ---------------------------------------------------------------------------
+//
+// Тон-маппинг сюда не входит и входить не должен. Свести HDR к SDR — решение
+// творческое, и принимать его за монтажёра импортёру не по чину: Premiere умеет
+// это сам и делает по настройкам секвенции. Наше дело — честно сказать, что
+// именно лежит в отданных пикселях.
+//
+// А лежит там вот что: RGB полного размаха, с ИСХОДНОЙ кривой переноса и
+// исходными первичными цветами. Мы применяем только матрицу яркость-цветность,
+// больше ничего не трогаем. Поэтому кривую и первичные цвета передаём как есть,
+// а матрицу указываем единичной — после пересчёта в RGB её уже нет.
+//
+// Коды те же, что в потоке: SEI из H.265, они же у AV1 и VP9, они же в ffmpeg.
+static prMALError AV1GetIndColorSpace(imStdParms* stdParms, csSDK_size_t index,
+                                      imIndColorSpaceRec* rec)
+{
+    if (!rec) return imOtherErr;
+
+    // Хост перебирает пространства, пока не получит отказ. У нас оно одно.
+    if (index > 0) return imBadFormatIndex;
+
+    ImporterLocalRecH ldataH = reinterpret_cast<ImporterLocalRecH>(rec->inPrivateData);
+    if (!ldataH) return imOtherErr;
+    ImporterLocalRecPtr ldata = *ldataH;
+
+    if (!EnsureDecoder(ldata)) return imOtherErr;
+    const av1imp::MediaInfo& mi = ldata->decoder->Info();
+    if (!mi.hasVideo) return imOtherErr;
+
+    rec->outColorSpaceType = kPrSDKColorSpaceType_SEITags;
+
+    prSEIColorCodesRec& sei = rec->outSEICodesRec;
+    sei.colorPrimariesCode        = mi.colourPrimaries;
+    sei.transferCharacteristicCode = mi.colourTransfer;
+
+    // Единичная: мы отдаём RGB, и переводить его обратно хосту не нужно
+    sei.matrixEquationsCode = static_cast<csSDK_int32>(PrMatrixEquations::kIdentity);
+
+    sei.bitDepth        = (mi.bitDepth > 8) ? 16 : 8;
+    sei.isFullRange     = kPrTrue;    // RGB у нас всегда полного размаха
+    sei.isRGB           = kPrTrue;
+    sei.isSceneReferred = kPrFalse;   // PQ, HLG и BT.709 — все про показ
+
+    av1imp::Log("imGetIndColorSpace: primaries %d, transfer %d, %d-bit RGB",
+                sei.colorPrimariesCode, sei.transferCharacteristicCode, sei.bitDepth);
     return malNoError;
 }
 
@@ -693,6 +748,12 @@ PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
         case imGetPreferredFrameSize:
             result = AV1PreferredFrameSize(stdParms,
                         reinterpret_cast<imPreferredFrameSizeRec*>(param1));
+            break;
+
+        case imGetIndColorSpace:
+            result = AV1GetIndColorSpace(stdParms,
+                                         reinterpret_cast<csSDK_size_t>(param1),
+                                         reinterpret_cast<imIndColorSpaceRec*>(param2));
             break;
 
         case imCreateAsyncImporter: {

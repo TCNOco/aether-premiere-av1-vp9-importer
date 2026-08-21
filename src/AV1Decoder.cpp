@@ -164,6 +164,42 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
     streamColourspace_ = st->codecpar->color_space;
     streamColourRange_ = st->codecpar->color_range;
 
+    // То же описание, но наружу — импортёру, чтобы он передал его хосту.
+    //
+    // Матрица: что сказано в файле, иначе догадка по высоте кадра. Ровно та
+    // же лестница, что и у пересчёта в RGB, — иначе объявили бы одно, а
+    // сделали другое.
+    info_.colourMatrix = (st->codecpar->color_space != AVCOL_SPC_UNSPECIFIED)
+                         ? st->codecpar->color_space
+                         : (st->codecpar->height > 576 ? AVCOL_SPC_BT709
+                                                       : AVCOL_SPC_BT470BG);
+
+    // Первичные цвета: если их не записали, выводим ИЗ МАТРИЦЫ, а не гадаем
+    // по высоте отдельно. Иначе выходила несуразица — у файла с матрицей
+    // BT.709 объявлялись первичные цвета BT.601 просто потому, что кадр
+    // невысокий. Матрица и первичные цвета в стандартах ходят парой.
+    if (st->codecpar->color_primaries != AVCOL_PRI_UNSPECIFIED) {
+        info_.colourPrimaries = st->codecpar->color_primaries;
+    } else {
+        switch (info_.colourMatrix) {
+            case AVCOL_SPC_BT709:      info_.colourPrimaries = AVCOL_PRI_BT709;      break;
+            case AVCOL_SPC_BT2020_NCL:
+            case AVCOL_SPC_BT2020_CL:  info_.colourPrimaries = AVCOL_PRI_BT2020;     break;
+            case AVCOL_SPC_SMPTE170M:  info_.colourPrimaries = AVCOL_PRI_SMPTE170M;  break;
+            case AVCOL_SPC_SMPTE240M:  info_.colourPrimaries = AVCOL_PRI_SMPTE240M;  break;
+            default:                   info_.colourPrimaries = AVCOL_PRI_BT470BG;    break;
+        }
+    }
+
+    // Кривая переноса: только то, что записано. Угадать её нельзя — разница
+    // между обычной гаммой и PQ это разница между нормальной картинкой и
+    // выцветшей, а по разрешению или матрице такое не выводится.
+    info_.colourTransfer = (st->codecpar->color_trc != AVCOL_TRC_UNSPECIFIED)
+                           ? st->codecpar->color_trc
+                           : AVCOL_TRC_BT709;
+
+    info_.fullRange = (st->codecpar->color_range == AVCOL_RANGE_JPEG);
+
     // Глубину и прозрачность выясняем ДО открытия декодера: от них зависит,
     // какой декодер вообще годится.
     //

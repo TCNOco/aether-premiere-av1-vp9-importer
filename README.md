@@ -48,7 +48,9 @@ tried, the table says so.
 | | Alpha in AV1 | **no** — stored differently, not done |
 | | Colour matrix BT.601 / 709 / 2020 | **yes** — taken from the file, not guessed |
 | | Full and limited range | **yes** — also taken from the file |
-| | HDR | **partly** — the BT.2020 matrix is honoured, PQ/HLG transfer is not converted |
+| | Colour space reported to Premiere | **yes** — primaries and transfer as ITU codes |
+| | HDR: PQ and HLG | **yes** — passed through as they are; Premiere does the tone mapping |
+| | Log curves (S-Log, V-Log, C-Log) | **expected** — same path, no real footage to try |
 | | Interlaced | **no** |
 | **Timing** | Constant frame rate | **yes** |
 | | Variable frame rate | **yes** — the frame is found by time, see below |
@@ -562,6 +564,41 @@ scenario where four threads order, collect and cancel frames at once while a
 close arrives in the middle of a running call. The SDK explicitly permits that,
 and closing frees the importer's state — without a count of calls in flight it
 would be a use-after-free inside Premiere.
+
+### HDR is declared, not flattened
+
+Turning HDR into SDR is a creative decision, and an importer has no business
+making it for the editor. Premiere does that itself, according to the sequence
+settings; our job is to say honestly what is in the pixels we hand over.
+
+What is in them is full-range RGB with the **original** transfer curve and the
+**original** primaries: the only thing applied is the luma-chroma matrix. That
+is what gets declared through `imGetIndColorSpace`, as the same ITU codes the
+stream itself carries:
+
+| file | primaries | transfer |
+|---|---|---|
+| ordinary HD | 1 (BT.709) | 1 (BT.709) |
+| BT.2020 PQ | 9 (BT.2020) | 16 (PQ) |
+| BT.2020 HLG | 9 (BT.2020) | 18 (HLG) |
+
+The matrix is declared **identity**: after the conversion to RGB there is no
+matrix left, and nothing for the host to undo.
+
+Where the file carries no primaries, they are derived from the matrix rather
+than guessed separately from the frame height — declaring BT.601 primaries for
+a file with a BT.709 matrix is nonsense, and that is exactly what the first
+version did. The transfer curve is never guessed: the difference between
+ordinary gamma and PQ is the difference between a normal picture and a washed
+out one, and there is nothing to infer it from.
+
+Log curves travel the same way: Premiere knows the codes for S-Log, V-Log and
+C-Log, and if a file carries them they are passed on. That could not be tested
+— no such footage was at hand.
+
+**What this does not promise.** That the declaration is correct has been
+checked; that Premiere then does the right thing with it is something only
+Premiere can show.
 
 ### The frame cache
 
