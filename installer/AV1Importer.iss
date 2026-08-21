@@ -1,16 +1,22 @@
-; Установщик плагина AV1 Importer для Adobe Premiere Pro.
+; Установщик плагина AV1 / VP9 Importer для приложений Adobe.
 ;
 ; Собирается компилятором Inno Setup:
 ;   ISCC.exe installer\AV1Importer.iss
 ; (или через installer\build-installer.bat, который сам найдёт компилятор)
 ;
-; Путь установки не даётся на выбор намеренно: Premiere ищет плагины только
-; в MediaCore, и папка рядом с .prm обязана содержать библиотеки ffmpeg —
+; Путь установки не даётся на выбор намеренно: приложения Adobe ищут плагины
+; только в своей общей папке, а рядом с .prm обязаны лежать библиотеки ffmpeg —
 ; плагин ищет их именно там. Свободный выбор папки означал бы неработающую
 ; установку у половины пользователей.
+;
+; Зато сама папка не прибита гвоздями: её адрес Adobe пишет в реестр, и мы его
+; оттуда читаем. Жёсткий путь остаётся запасным вариантом.
+;
+; Картинки и значок рисуются кодом — installer\make-art.py, — чтобы их можно
+; было пересобрать, а не хранить как двоичные файлы неизвестного происхождения.
 
 #define AppName        "AV1 / VP9 Importer for Premiere Pro"
-#define AppVersion     "1.1.0"
+#define AppVersion     "1.2.0"
 #define AppPublisher   "neoHaDe"
 #define AppURL         "https://github.com/neoHaDe/premiere-av1-vp9-importer"
 #define PluginDir      "AV1 Importer"
@@ -30,13 +36,23 @@ PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
-DefaultDirName={commonpf}\Adobe\Common\Plug-ins\7.0\MediaCore\{#PluginDir}
+; Папку берём из реестра Adobe, см. GetMediaCore ниже
+DefaultDirName={code:GetMediaCore}\{#PluginDir}
 DisableDirPage=yes
 DefaultGroupName={#AppName}
 UninstallDisplayName={#AppName}
-UninstallDisplayIcon={app}\AV1Importer.prm
+UninstallDisplayIcon={app}\av1importer.ico
 
-; Restart Manager сам обнаружит, что Premiere держит файлы плагина,
+; Выбор языка первым окном, всегда — а не только когда система не совпала
+; ни с одним из них. Русский и английский тут равноправны, и угадывать за
+; человека, на каком ему читать, не надо
+ShowLanguageDialog=yes
+
+; Экран приветствия включён намеренно: на нём видно, что это за плагин и для
+; чего он, а без него установщик начинался сразу с текста лицензии
+DisableWelcomePage=no
+
+; Restart Manager сам обнаружит, что приложение Adobe держит файлы плагина,
 ; и предложит закрыть его — вместо невнятной ошибки «файл занят»
 CloseApplications=yes
 RestartApplications=no
@@ -46,22 +62,41 @@ OutputBaseFilename=AV1Importer-Setup-{#AppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=av1importer.ico
+WizardImageFile=wizard-large.bmp
+WizardSmallImageFile=wizard-small.bmp
 LicenseFile=..\LICENSE
-
-[Icons]
-Name: "{autoprograms}\AV1 Importer — настройки"; Filename: "{app}\AV1ImporterSettings.exe"; Comment: "Переключить декодирование между процессором и видеокартой"
 
 [Languages]
 Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
-ru.NoPremiere=Не найдена папка плагинов Adobe:%n%n%1%n%nПохоже, Adobe Premiere Pro не установлен. Продолжить всё равно?
-en.NoPremiere=Adobe plug-in folder not found:%n%n%1%n%nAdobe Premiere Pro does not appear to be installed. Continue anyway?
-ru.CloseFirst=Перед установкой закройте Adobe Premiere Pro и Media Encoder.
+ru.SettingsShortcut=AV1 Importer — настройки
+en.SettingsShortcut=AV1 Importer settings
+ru.SettingsComment=Переключить декодирование между процессором и видеокартой
+en.SettingsComment=Switch decoding between the CPU and the graphics card
 ru.OpenSettings=Открыть настройки плагина
 en.OpenSettings=Open plug-in settings
-en.CloseFirst=Please close Adobe Premiere Pro and Media Encoder before installing.
+
+ru.FoundCaption=Приложения Adobe
+ru.FoundDesc=Куда попадёт плагин и кто его увидит
+ru.FoundIntro=Плагин ставится в общую папку Adobe, поэтому его подхватывают все приложения сразу — отдельная установка в каждое не нужна.
+ru.FoundList=На этом компьютере найдены:
+ru.FoundNone=Приложений Adobe на этом компьютере не найдено.%n%nПлагин всё равно можно установить: он подхватится сам, когда вы поставите Premiere Pro, After Effects или Media Encoder.
+ru.FoundClose=Эти приложения нужно закрыть. Если они открыты, установщик предложит закрыть их сам.
+ru.FoundWhere=Папка установки:
+
+en.FoundCaption=Adobe applications
+en.FoundDesc=Where the plug-in goes and which applications will see it
+en.FoundIntro=The plug-in is installed into the folder Adobe applications share, so all of them pick it up at once — there is nothing to install per application.
+en.FoundList=Found on this computer:
+en.FoundNone=No Adobe applications were found on this computer.%n%nYou can still install the plug-in: it will be picked up as soon as you install Premiere Pro, After Effects or Media Encoder.
+en.FoundClose=These applications have to be closed. If any of them is open, the installer will offer to close it.
+en.FoundWhere=Installing into:
+
+[Icons]
+Name: "{autoprograms}\{cm:SettingsShortcut}"; Filename: "{app}\AV1ImporterSettings.exe"; Comment: "{cm:SettingsComment}"
 
 [Files]
 Source: "..\build\Release\AV1Importer.prm"; DestDir: "{app}"; Flags: ignoreversion
@@ -69,6 +104,9 @@ Source: "..\build\Release\AV1Importer.prm"; DestDir: "{app}"; Flags: ignoreversi
 ; Окно переключения декодера. Отдельная программа, а не окно внутри Premiere:
 ; настройка нужна тогда, когда Premiere из-за драйвера не запускается
 Source: "..\build\Release\AV1ImporterSettings.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+; Значок нужен и после установки: на него смотрит «Установка и удаление программ»
+Source: "av1importer.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Библиотеки ffmpeg обязаны лежать рядом с плагином: Windows ищет их возле
 ; исполняемого файла (то есть возле Premiere), поэтому плагин загружает их
@@ -91,21 +129,184 @@ Filename: "{app}\AV1ImporterSettings.exe"; Description: "{cm:OpenSettings}"; Fla
 
 [Code]
 
-function InitializeSetup(): Boolean;
+const
+  FallbackMediaCore = '\Adobe\Common\Plug-ins\7.0\MediaCore';
+
 var
-  MediaCore: String;
+  CachedMediaCore: String;
+  FoundPage: TWizardPage;
+  FoundMemo: TNewMemo;
+
+// Убрать завершающую наклонную черту: After Effects пишет путь с ней,
+// Premiere без неё, а склеивать потом одинаково
+function TrimSlash(const S: String): String;
 begin
-  Result := True;
+  Result := S;
+  while (Length(Result) > 3) and (Result[Length(Result)] = '\') do
+    Result := Copy(Result, 1, Length(Result) - 1);
+end;
 
-  // В тихом режиме окна не показываем: установщик должен отработать без
-  // единого клика, иначе автоматическая установка встанет насмерть
-  if not WizardSilent() then
-    MsgBox(ExpandConstant('{cm:CloseFirst}'), mbInformation, MB_OK);
+// Спросить у Adobe, где лежат общие плагины, вместо того чтобы угадывать.
+// Все приложения пишут этот адрес себе в реестр при установке, и он один
+// и тот же для всех — потому плагин и подхватывается всеми сразу.
+function DetectMediaCore(): String;
+var
+  Versions: TArrayOfString;
+  Apps: TArrayOfString;
+  Path: String;
+  i, a: Integer;
+begin
+  Result := '';
 
-  MediaCore := ExpandConstant('{commonpf}\Adobe\Common\Plug-ins\7.0\MediaCore');
-  if not DirExists(MediaCore) and not WizardSilent() then
+  if RegQueryStringValue(HKLM64, 'SOFTWARE\Adobe\Premiere Pro\CurrentVersion',
+                         'Plug-InsDir', Path) then
   begin
-    Result := MsgBox(FmtMessage(ExpandConstant('{cm:NoPremiere}'), [MediaCore]),
-                     mbConfirmation, MB_YESNO) = IDYES;
+    Path := TrimSlash(Path);
+    if DirExists(Path) then
+    begin
+      Result := Path;
+      Exit;
+    end;
   end;
+
+  // Иначе перебираем версии всех приложений: любая из них знает нужный адрес
+  SetArrayLength(Apps, 2);
+  Apps[0] := 'Premiere Pro';
+  Apps[1] := 'After Effects';
+  for a := 0 to GetArrayLength(Apps) - 1 do
+  begin
+    if not RegGetSubkeyNames(HKLM64, 'SOFTWARE\Adobe\' + Apps[a], Versions) then
+      Continue;
+    for i := 0 to GetArrayLength(Versions) - 1 do
+    begin
+      if RegQueryStringValue(HKLM64, 'SOFTWARE\Adobe\' + Apps[a] + '\' + Versions[i],
+                             'CommonPluginInstallPath', Path) then
+      begin
+        Path := TrimSlash(Path);
+        if DirExists(Path) then
+        begin
+          Result := Path;
+          Exit;
+        end;
+      end;
+    end;
+  end;
+end;
+
+function GetMediaCore(Param: String): String;
+begin
+  if CachedMediaCore = '' then
+  begin
+    CachedMediaCore := DetectMediaCore();
+    if CachedMediaCore = '' then
+      CachedMediaCore := ExpandConstant('{commonpf}') + FallbackMediaCore;
+  end;
+  Result := CachedMediaCore;
+end;
+
+// Корень Adobe — четыре уровня вверх от MediaCore. Считаем от найденной папки,
+// а не от {commonpf}: если Adobe стоит не на системном диске, жёсткий путь
+// смотрел бы не туда, а этот — туда же, куда и сам плагин.
+function AdobeRoot(): String;
+var
+  P: String;
+  i: Integer;
+begin
+  P := GetMediaCore('');
+  for i := 1 to 4 do
+    P := ExtractFileDir(P);
+  Result := P;
+end;
+
+// Список приложений Adobe по папкам, а не по реестру. Реестр знает только про
+// Premiere Pro и After Effects — Media Encoder не заводит там ключа вовсе,
+// а по папкам видно всё, включая версии, которых ещё не существует.
+procedure CollectApps(var Names: TArrayOfString);
+var
+  Root: String;
+  Rec: TFindRec;
+  Masks: TArrayOfString;
+  m, n: Integer;
+begin
+  SetArrayLength(Names, 0);
+  Root := AdobeRoot();
+  if not DirExists(Root) then
+    Exit;
+
+  SetArrayLength(Masks, 3);
+  Masks[0] := 'Adobe Premiere Pro*';
+  Masks[1] := 'Adobe After Effects*';
+  Masks[2] := 'Adobe Media Encoder*';
+  for m := 0 to GetArrayLength(Masks) - 1 do
+  begin
+    if FindFirst(Root + '\' + Masks[m], Rec) then
+    begin
+      try
+        repeat
+          if (Rec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+          begin
+            n := GetArrayLength(Names);
+            SetArrayLength(Names, n + 1);
+            Names[n] := Rec.Name;
+          end;
+        until not FindNext(Rec);
+      finally
+        FindClose(Rec);
+      end;
+    end;
+  end;
+end;
+
+procedure InitializeWizard();
+var
+  Names: TArrayOfString;
+  Text: String;
+  i: Integer;
+begin
+  CollectApps(Names);
+
+  Text := ExpandConstant('{cm:FoundIntro}') + #13#10#13#10;
+
+  if GetArrayLength(Names) > 0 then
+  begin
+    Text := Text + ExpandConstant('{cm:FoundList}') + #13#10;
+    for i := 0 to GetArrayLength(Names) - 1 do
+      Text := Text + '    ' + Names[i] + #13#10;
+    Text := Text + #13#10 + ExpandConstant('{cm:FoundClose}') + #13#10;
+  end
+  else
+    Text := Text + ExpandConstant('{cm:FoundNone}') + #13#10;
+
+  // Путь собираем сами, а не через {app}: на этом этапе мастер его ещё
+  // не обязан знать, а показать его надо именно здесь
+  Text := Text + #13#10 + ExpandConstant('{cm:FoundWhere}') + #13#10
+               + '    ' + GetMediaCore('') + '\{#PluginDir}';
+
+  // В журнал установки: по нему видно, что именно нашлось на чужой машине,
+  // а это первый вопрос в любом отчёте «плагин не появился»
+  Log('MediaCore: ' + GetMediaCore(''));
+  if GetArrayLength(Names) = 0 then
+    Log('found: nothing')
+  else
+    for i := 0 to GetArrayLength(Names) - 1 do
+      Log('found: ' + Names[i]);
+
+  // Своя страница с обычным полем, а не CreateOutputMsgMemoPage: тот кладёт
+  // текст в RichEdit через разбор RTF, и кириллица приезжает вопросительными
+  // знаками, а случайные символы разбираются как команды разметки и красят
+  // строки в разные цвета. Проверено на русской версии этой самой страницы.
+  FoundPage := CreateCustomPage(wpLicense,
+    ExpandConstant('{cm:FoundCaption}'),
+    ExpandConstant('{cm:FoundDesc}'));
+
+  FoundMemo := TNewMemo.Create(FoundPage);
+  FoundMemo.Parent     := FoundPage.Surface;
+  FoundMemo.Left       := 0;
+  FoundMemo.Top        := 0;
+  FoundMemo.Width      := FoundPage.SurfaceWidth;
+  FoundMemo.Height     := FoundPage.SurfaceHeight;
+  FoundMemo.ScrollBars := ssVertical;
+  FoundMemo.ReadOnly   := True;
+  FoundMemo.TabStop    := False;
+  FoundMemo.Text       := Text;
 end;

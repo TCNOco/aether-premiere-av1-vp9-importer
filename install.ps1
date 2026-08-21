@@ -8,11 +8,33 @@
 
 param(
     [string]$Source = (Join-Path $PSScriptRoot "build\plugin"),
-    [string]$MediaCore = "C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore",
+    [string]$MediaCore = "",
     [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
+
+# Адрес общей папки плагинов Adobe записывает в реестр сама, и он один и тот же
+# для всех приложений — потому плагин и подхватывается всеми сразу. Спросить
+# надёжнее, чем предполагать: Adobe может стоять и не на системном диске.
+function Find-MediaCore {
+    $v = (Get-ItemProperty 'HKLM:\SOFTWARE\Adobe\Premiere Pro\CurrentVersion' `
+          -Name 'Plug-InsDir' -ErrorAction SilentlyContinue).'Plug-InsDir'
+    if ($v -and (Test-Path $v)) { return $v.TrimEnd('\') }
+
+    foreach ($app in 'Premiere Pro', 'After Effects') {
+        $key = "HKLM:\SOFTWARE\Adobe\$app"
+        if (-not (Test-Path $key)) { continue }
+        foreach ($ver in Get-ChildItem $key -ErrorAction SilentlyContinue) {
+            $v = (Get-ItemProperty $ver.PSPath -Name 'CommonPluginInstallPath' `
+                  -ErrorAction SilentlyContinue).CommonPluginInstallPath
+            if ($v -and (Test-Path $v)) { return $v.TrimEnd('\') }
+        }
+    }
+    return "C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore"
+}
+
+if (-not $MediaCore) { $MediaCore = Find-MediaCore }
 $target = Join-Path $MediaCore "AV1 Importer"
 
 $admin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()

@@ -59,9 +59,16 @@ on the CPU, and on this hardware that path is the faster one anyway.
 ## Install
 
 1. Download `AV1Importer-Setup-x.y.z.exe` from [Releases](../../releases).
-2. Close Premiere Pro and Media Encoder.
+2. Close Premiere Pro, After Effects and Media Encoder.
 3. Run it. Administrator rights are required: Adobe plug-ins live in a shared
    system folder.
+
+There is nothing to choose. The installer asks Adobe where the shared plug-in
+folder is — the applications write that address into the registry themselves —
+and lists the applications it found, so it is clear before installing anything
+which of them will pick the plug-in up. Nothing found is not an error either:
+the plug-in can be installed first and will be picked up when an application
+appears.
 
 To remove it, use *Apps & features* or the uninstaller in the plug-in folder.
 
