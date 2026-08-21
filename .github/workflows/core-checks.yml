@@ -1,0 +1,57 @@
+# Builds the decoding core and runs it against generated media.
+#
+# What this cannot do, and why: the plug-in itself needs the Adobe Premiere Pro
+# C++ SDK, which may not be redistributed, so no build server can have it. What
+# is checked here is the layer that was deliberately kept free of any Adobe
+# dependency - which is most of the code and nearly all of the risk.
+#
+# The media is generated on the spot by FFmpeg from synthetic sources. No sample
+# files are committed, and none are downloaded from anywhere.
+
+name: core checks
+
+on:
+  push:
+    paths-ignore: ["**/*.md", "docs/**", "LICENSE", "NOTICE"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  core:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The n8.1 line, the same one the plug-in links against: the DLL names it
+      # loads (avcodec-62 and friends) belong to that major version, so a jump
+      # to 9.0 would not be a newer build but a different one.
+      - name: Fetch FFmpeg
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-lgpl-shared-8.1.zip"
+          Invoke-WebRequest $url -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
+          $inner = (Get-ChildItem ffmpeg-tmp -Directory | Select-Object -First 1).FullName
+          Move-Item $inner ffmpeg
+          Get-ChildItem ffmpeg | Select-Object Name
+
+      - name: Build the core
+        run: .\build-test.bat
+
+      - name: Make the test media
+        run: powershell -File tools\make-test-media.ps1 -OutDir build\media
+
+      # The DLLs sit next to the plug-in when it is installed, but decoder_test
+      # is an ordinary program and finds them the ordinary way.
+      - name: Run the checks
+        run: |
+          $env:PATH = "$pwd\ffmpeg\bin;$env:PATH"
+          powershell -File tools\run-core-checks.ps1
+
+      - name: Keep the log if something went wrong
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: media
+          path: build/media
+          retention-days: 3

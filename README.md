@@ -1,5 +1,7 @@
 # AV1 / VP9 Importer for Adobe Premiere Pro, After Effects and Media Encoder
 
+[![core checks](https://github.com/neoHaDe/premiere-av1-vp9-importer/actions/workflows/core-checks.yml/badge.svg)](https://github.com/neoHaDe/premiere-av1-vp9-importer/actions/workflows/core-checks.yml)
+
 Drag an AV1 or VP9 file onto the timeline and it just works: no transcoding,
 no proxies.
 
@@ -237,6 +239,23 @@ it reads the `IMPT` resource. Only a real installation answers those.
 cached frame against a freshly decoded one, buffer bounds when Premiere asks for a
 reduced size, and whether the same audio range reads identically twice. The last
 one found a real bug the first time it ran.
+
+Two scripts turn that into something a build server can run:
+
+```
+tools\make-test-media.ps1     generates the media with FFmpeg - nothing is downloaded
+tools\run-core-checks.ps1     runs the core against it and judges the result
+```
+
+The judging matters as much as the decoding. Five files must be accepted and pass
+every check; two must be **refused** — an audio-only MP4 and an H.264 file, both of
+which Premiere opens perfectly well on its own. A plug-in that grabs more than it
+should is worse than one that grabs less.
+
+That pair runs on every push, on GitHub's Windows runners. The plug-in itself
+cannot be built there: it needs the Adobe SDK, which may not be redistributed, so
+no build server can have a copy. What is checked is the layer deliberately kept
+free of any Adobe dependency — most of the code, and nearly all of the risk.
 
 ## How it works
 
