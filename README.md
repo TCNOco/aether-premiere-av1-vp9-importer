@@ -5,8 +5,8 @@ no proxies.
 
 [Русская версия](README.ru.md)
 
-Premiere Pro 25.x **cannot decode AV1 or VP9**. For AV1 its demuxer parses the
-container and recognises the stream as `av01`, but there is no decoder, so the
+Premiere Pro **cannot decode AV1 or VP9** — not in 2019, not in 2025. For AV1 its
+demuxer parses the container and recognises the stream as `av01`, but there is no decoder, so the
 import fails with *"File uses unsupported video compression type av01"*. VP9
 usually arrives in WebM, which Premiere cannot even open. This plug-in adds the
 missing decoders, using FFmpeg and, where the hardware allows, the GPU.
@@ -14,6 +14,40 @@ missing decoders, using FFmpeg and, where the hardware allows, the GPU.
 That matters if you record with OBS: AV1 gives the same picture quality at a
 noticeably lower bitrate, but the recordings were unusable in Premiere. VP9 matters
 if your source footage comes from the web, where it is what you are usually given.
+
+## Will it work for you
+
+**Applications.** The plug-in installs into the folder Adobe applications share, so
+every one of them picks it up. Which of them were actually tried:
+
+| | |
+|---|---|
+| Premiere Pro CC 2019 — 13.1.5 | tested, the oldest version verified |
+| Premiere Pro 2020 – 2024 | not tried, expected to work — see the note below |
+| Premiere Pro 2025 — 25.x | tested, the main target |
+| After Effects 25.3.2 | tested: import, audio tracks, preview |
+| Media Encoder | not tried |
+| macOS | no. The decoding core is portable, the rest is Win32 |
+
+The gap in the middle is a deliberate decision rather than an oversight. The
+importer interface was version 21 in 2019 and is 24 today, so 2020–2024 sit between
+two versions that are known good, and the plug-in asks the host for whichever suite
+versions it actually has instead of demanding the newest — which is exactly what
+2019 exercised, taking version 7 of the frame-cache suite where 2025 gives 8.
+
+**Formats.**
+
+| | |
+|---|---|
+| AV1 | yes — MP4, MKV, WebM, MOV, M4V |
+| VP9 | yes — the same containers |
+| Multi-track audio | yes, tracks stay separate |
+| 10-bit and HDR | decoded, but delivered as 8-bit |
+| Alpha channel | no |
+| Every other codec | handed straight back to Premiere's own importer |
+
+**Hardware.** Windows x64, nothing else. Without a supported GPU the plug-in decodes
+on the CPU, and on this hardware that path is the faster one anyway.
 
 ## Install
 
@@ -24,17 +58,13 @@ if your source footage comes from the web, where it is what you are usually give
 
 To remove it, use *Apps & features* or the uninstaller in the plug-in folder.
 
-**Requirements:** Windows x64 and Adobe Premiere Pro. Tested at both ends of the
-range: **Premiere Pro CC 2019 (13.1.5)** and **2025 (25.x)**, plus After Effects
-25.3.2. Nothing in between has been tried, and there is a reason to expect it to
-work: the importer interface was version 21 in 2019 and is 24 today, so 2020–2024
-sit between two versions that are known good, and the plug-in asks the host for
-whichever suite versions it actually has rather than demanding the newest.
+Whatever application it loads into is named in the first lines of the log, so a bug
+report can say which version was involved:
 
-Whatever it loads into is written to the log, so a bug report can name the version.
-
-Nothing else is needed: with no supported GPU the plug-in decodes on the CPU, and
-on this hardware that path is the faster one anyway.
+```
+host: import interface version 21 (SDK headers know 24)
+host: PPro 13.1.5
+```
 
 ## What works
 
