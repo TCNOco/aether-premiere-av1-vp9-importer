@@ -191,6 +191,21 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
     info_.fpsNum = fr.num;
     info_.fpsDen = fr.den;
 
+    // Общий ноль клипа. Не всякий файл начинается с нуля: запись из
+    // транспортного потока или мультиплексирование с -copyts оставляют начало
+    // где угодно. Считать от нуля контейнера, а не каждый поток от своего
+    // начала, важно вдвойне: между видео и звуком бывает настоящий сдвиг
+    // (у AAC, например, свой разгон), и он обязан сохраниться.
+    //
+    // Без этого файл со сдвинутым началом разваливался целиком: любой запрос
+    // возвращал первый кадр, а звук — тишину.
+    startTimeSec_ = 0.0;
+    if (fmt_->start_time != AV_NOPTS_VALUE) {
+        startTimeSec_ = fmt_->start_time / (double)AV_TIME_BASE;
+    } else if (st->start_time != AV_NOPTS_VALUE) {
+        startTimeSec_ = st->start_time * av_q2d(st->time_base);
+    }
+
     if (info_.fps > 0) {
         toleranceTicks_ = (int64_t)(0.25 / info_.fps / av_q2d(st->time_base));
     }
@@ -388,6 +403,7 @@ void Decoder::CloseLocked() {
     lastDecodedFrame_ = -1;
     eofReached_       = false;
     lastFrameTimeSec_ = 0.0;
+    startTimeSec_     = 0.0;
     curValid_         = false;
     aheadValid_       = false;
     toleranceTicks_   = 0;
@@ -398,7 +414,7 @@ void Decoder::CloseLocked() {
 int64_t Decoder::TargetTicks(int64_t timelineFrame) const {
     if (!fmt_ || videoStream_ < 0 || info_.fps <= 0) return timelineFrame;
     const double tb = av_q2d(fmt_->streams[videoStream_]->time_base);
-    return (int64_t)llround(timelineFrame / info_.fps / tb);
+    return (int64_t)llround((timelineFrame / info_.fps + startTimeSec_) / tb);
 }
 
 // Номер кадра таймлайна, с которого начинает показываться кадр с этой меткой.
@@ -407,7 +423,7 @@ int64_t Decoder::TimelineIndexOf(int64_t ts) const {
     // Без частоты кадров метка и есть номер, см. DecodeUntil
     if (info_.fps <= 0) return ts > 0 ? ts : 0;
     const double tb  = av_q2d(fmt_->streams[videoStream_]->time_base);
-    const double sec = ts * tb;
+    const double sec = ts * tb - startTimeSec_;
     // Вверх, а не вниз: кадр становится нужным начиная с ПЕРВОГО момента
     // таймлайна, который не раньше него. Округление вниз давало кадр вперёд
     // на файле, где видео начинается позже общего нуля клипа, — и кэш отдавал
@@ -422,7 +438,7 @@ double Decoder::FrameTimeSec(const AVFrame* f) const {
     const int64_t pts = f->best_effort_timestamp != AV_NOPTS_VALUE
                         ? f->best_effort_timestamp : f->pts;
     if (pts == AV_NOPTS_VALUE) return 0.0;
-    return pts * av_q2d(fmt_->streams[videoStream_]->time_base);
+    return pts * av_q2d(fmt_->streams[videoStream_]->time_base) - startTimeSec_;
 }
 
 // Найти кадр источника, который виден в момент, когда Premiere показывает
@@ -830,11 +846,16 @@ bool Decoder::DecodeMoreAudio() {
             }
 
             // Позицию берём из метки времени: так не накапливается ошибка
-            // после перемотки и не важен порядок пакетов
+            // после перемотки и не важен порядок пакетов.
+            //
+            // Отсчёт номер ноль — это общий ноль клипа, тот же, от которого
+            // считаются кадры. Без вычитания startTimeSec_ файл, начинающийся
+            // не с нуля, отдавал одну тишину: запрошенный отсчёт 0 оказывался
+            // за сотни тысяч отсчётов до всего, что есть в файле.
             if (audioFrame_->pts != AV_NOPTS_VALUE) {
                 AVStream* st = audioFmt_->streams[audioStreamIndex_];
-                audioCursor_ = (int64_t)(audioFrame_->pts * av_q2d(st->time_base)
-                                         * info_.audioSampleRate + 0.5);
+                const double sec = audioFrame_->pts * av_q2d(st->time_base) - startTimeSec_;
+                audioCursor_ = (int64_t)llround(sec * info_.audioSampleRate);
             } else if (audioCursor_ < 0) {
                 audioCursor_ = 0;
             }
@@ -903,7 +924,8 @@ bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* d
         const int64_t preroll = info_.audioSampleRate / 5;
         const int64_t seekSample = startSample > preroll ? startSample - preroll : 0;
 
-        int64_t ts = (int64_t)((double)seekSample / info_.audioSampleRate / av_q2d(st->time_base));
+        const double seekSec = (double)seekSample / info_.audioSampleRate + startTimeSec_;
+        int64_t ts = (int64_t)llround(seekSec / av_q2d(st->time_base));
         if (av_seek_frame(audioFmt_, audioStreamIndex_, ts, AVSEEK_FLAG_BACKWARD) < 0) {
             SetError("audio seek failed");
             return false;

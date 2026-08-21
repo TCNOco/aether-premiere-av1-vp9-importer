@@ -235,10 +235,14 @@ void CheckTimelinePicksFrameByTime(av1imp::Decoder& dec, const av1imp::MediaInfo
         const double want = n * frameSec;
         const double got  = dec.LastFrameTimeSec();
 
-        if (got - want > worstAhead) worstAhead = got - want;
-        if (want - got > worstLag)   worstLag   = want - got;
-
         if (!haveFirst) { firstSeen = got; firstIdx = n; haveFirst = true; }
+
+        // Пока не начался сам поток видео, показывать нечего, кроме первого
+        // кадра, и «убежал вперёд» тут не про ошибку: в файле со сдвинутым
+        // началом видео может стартовать на десятки миллисекунд позже общего
+        // нуля клипа, и это правда о файле, а не о нас.
+        if (got > firstSeen + 1e-6 && got - want > worstAhead) worstAhead = got - want;
+        if (want - got > worstLag) worstLag = want - got;
         lastSeen = got; lastIdx = n;
     }
 
@@ -254,6 +258,95 @@ void CheckTimelinePicksFrameByTime(av1imp::Decoder& dec, const av1imp::MediaInfo
     const double expected  = (double)(lastIdx - firstIdx) * frameSec;
     printf("      timeline moved %.2f s, picture moved %.2f s\n", expected, travelled);
     Check(decoded && expected > 0 && travelled > expected * 0.9, nameMoves);
+}
+
+// Совпадают ли звук и картинка. В файле вспышка в кадре и щелчок в звуке
+// поставлены в один и тот же момент; расстояние между ними на выходе и есть
+// расхождение. Иначе синхронность приходится проверять глазами и ушами, а это
+// не проверка.
+//
+// Запускается по флагу --sync, а не по догадке: на сломанном файле не найдётся
+// ни вспышки, ни щелчка, и молчаливый пропуск спрятал бы ровно ту поломку,
+// ради которой проверка написана.
+void CheckSoundMatchesPicture(av1imp::Decoder& dec, const av1imp::MediaInfo& info,
+                              bool required)
+{
+    const char* name = "the click in the sound and the flash in the picture meet";
+    if (!required) return;
+
+    if (!info.hasVideo || info.audioStreamCount == 0 || info.fps <= 0) {
+        Check(false, name);
+        return;
+    }
+
+    // Вспышка: самый светлый кадр таймлайна
+    const int stride = info.width * 4;
+    std::vector<uint8_t> buf((size_t)stride * info.height, 0);
+
+    int64_t flashFrame = -1;
+    double  brightest  = 0.0;
+    for (int64_t n = 0; n < info.frameCount; ++n) {
+        if (!dec.GetFrameBGRA(n, buf.data(), stride, info.width, info.height)) break;
+
+        // Средняя яркость по зелёному каналу, по каждому сороковому пикселю:
+        // вспышка занимает весь кадр, разглядывать его целиком незачем
+        double sum = 0.0; int taken = 0;
+        for (size_t i = 1; i < buf.size(); i += 4 * 40) { sum += buf[i]; ++taken; }
+        const double avg = taken ? sum / taken : 0.0;
+        if (avg > brightest) { brightest = avg; flashFrame = n; }
+    }
+
+    // Щелчок: первый отсчёт громче трети шкалы
+    if (!dec.OpenAudio(0)) { Check(false, name); return; }
+
+    const int    channels = info.audioChannels > 0 ? info.audioChannels : 1;
+    const int32_t block   = 4096;
+    std::vector<std::vector<float>> chans(channels, std::vector<float>(block));
+    std::vector<float*> ptrs(channels);
+    for (int c = 0; c < channels; ++c) ptrs[c] = chans[c].data();
+
+    // Сначала пик всей дорожки, потом первый отсчёт громче его половины.
+    // Порог от самой записи, а не заданный числом: у генератора синуса в
+    // ffmpeg полная шкала это -18 дБ, и любое выбранное заранее число
+    // оказалось бы либо слишком строгим, либо бессмысленным.
+    double peak = 0.0;
+    for (int64_t at = 0; at < info.audioSampleCount; at += block) {
+        if (!dec.GetAudio(at, block, ptrs.data())) break;
+        for (int32_t i = 0; i < block; ++i) {
+            const double v = std::fabs(chans[0][i]);
+            if (v > peak) peak = v;
+        }
+    }
+
+    int64_t clickSample = -1;
+    if (peak > 0.02) {
+        for (int64_t at = 0; at < info.audioSampleCount && clickSample < 0; at += block) {
+            if (!dec.GetAudio(at, block, ptrs.data())) break;
+            for (int32_t i = 0; i < block; ++i) {
+                if (std::fabs(chans[0][i]) > peak * 0.5) { clickSample = at + i; break; }
+            }
+        }
+    }
+
+    if (flashFrame < 0 || clickSample < 0 || brightest < 100.0) {
+        printf("      nothing to compare: flash %s, click %s (peak %.3f)\n",
+               brightest >= 100.0 ? "found" : "MISSING",
+               clickSample >= 0 ? "found" : "MISSING", peak);
+        Check(false, name);
+        return;
+    }
+
+    const double flashSec = flashFrame / info.fps;
+    const double clickSec = (double)clickSample / info.audioSampleRate;
+    const double apart    = std::fabs(flashSec - clickSec);
+
+    // Два кадра. Не строже: кодер звука размазывает начало щелчка на своё окно,
+    // и требовать точности до отсчёта значило бы проверять AAC, а не нас
+    const double allowed = 2.0 / info.fps;
+
+    printf("      flash at %.3f s, click at %.3f s, %.0f ms apart (allowed %.0f)\n",
+           flashSec, clickSec, apart * 1000.0, allowed * 1000.0);
+    Check(apart <= allowed, name);
 }
 
 void CheckReducedSizeStaysInBuffer(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
@@ -381,8 +474,10 @@ int main(int argc, char** argv)
 
     if (argc < 2) {
         printf("Usage: decoder_test <file> [frame] [--sw]\n");
-        printf("  --sw  force the software decoder, as the plug-in does when\n");
-        printf("        hardware decoding is switched off in its settings\n");
+        printf("  --sw    force the software decoder, as the plug-in does when\n");
+        printf("          hardware decoding is switched off in its settings\n");
+        printf("  --sync  the file carries a flash and a click at the same\n");
+        printf("          instant; fail unless they come out together\n");
         return 1;
     }
 
@@ -392,10 +487,14 @@ int main(int argc, char** argv)
     // --16u гоняет замер в шестнадцатибитном выводе. Нужен, чтобы цена глубины
     // была измерена, а не оценена на глаз
     av1imp::FrameFormat format = av1imp::FrameFormat::BGRA8;
+    // --sync: в файле есть вспышка и щелчок в один и тот же момент, и они
+    // обязаны сойтись. Без флага проверять нечего, и она молчит
+    bool requireSync = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--sw")      preferHardware = false;
         else if (arg == "--16u") format = av1imp::FrameFormat::BGRA16;
+        else if (arg == "--sync") requireSync = true;
         else if (path.empty())  path = arg;
         else                    wanted = _atoi64(arg.c_str());
     }
@@ -539,6 +638,7 @@ int main(int argc, char** argv)
     CheckCacheMatchesFreshDecode(dec, path, info, preferHardware);
     CheckAudioIsRepeatable(dec, info);
     CheckTimelinePicksFrameByTime(dec, info);
+    CheckSoundMatchesPicture(dec, info, requireSync);
 
     printf("\n%s\n", g_failures == 0 ? "ALL CHECKS PASSED"
                                      : "SOME CHECKS FAILED");

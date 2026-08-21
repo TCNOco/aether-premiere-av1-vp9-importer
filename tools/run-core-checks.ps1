@@ -36,8 +36,18 @@ $expect = [ordered]@{
     "vp9_alpha.webm"  = "accept"
     "audio_only.mka"  = "accept"
     "vfr.mkv"         = "accept"
+    "sync.mp4"        = "accept"
+    "sync_offset.mp4" = "accept"
     "audio_only.mp4"  = "refuse"
     "h264.mp4"        = "refuse"
+}
+
+# У файлов со вспышкой и щелчком проверка синхронности обязана отработать,
+# а не пропуститься: на сломанном файле ни вспышки, ни щелчка не находится,
+# и молчаливый пропуск спрятал бы ровно ту поломку, ради которой она есть.
+$extraArgs = @{
+    "sync.mp4"        = @("--sync")
+    "sync_offset.mp4" = @("--sync")
 }
 
 $failed = 0
@@ -49,7 +59,8 @@ foreach ($name in $expect.Keys) {
     # Без 2>&1: PowerShell 5.1 заворачивает stderr родной программы
     # в ошибку и при ErrorActionPreference=Stop роняет весь скрипт.
     # Всё нужное decoder_test пишет в stdout, а ffmpeg шумит в stderr.
-    $output = & $Exe $path 2>$null | Out-String
+    $more   = if ($extraArgs.ContainsKey($name)) { $extraArgs[$name] } else { @() }
+    $output = & $Exe $path @more 2>$null | Out-String
     $code   = $LASTEXITCODE
 
     if ($expect[$name] -eq "accept") {

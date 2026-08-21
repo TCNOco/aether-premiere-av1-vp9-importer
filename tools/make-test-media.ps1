@@ -92,6 +92,24 @@ Make "vfr.mkv" @(
     "-map","[v]","-map","1:a","-fps_mode:v","vfr",
     "-c:v","libsvtav1","-preset","12","-crf","50","-g","60","-c:a","aac")
 
+# A flash in the picture and a click in the sound at exactly the same instant,
+# two seconds in. Anything that shifts one against the other shows up as a
+# distance between them - which is the only way to measure sync without eyes.
+$syncArgs = @(
+    "-f","lavfi","-i","color=c=black:s=320x180:r=30:d=6",
+    "-f","lavfi","-i","sine=frequency=1000:duration=6",
+    "-vf","drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='eq(n,60)'",
+    "-af","volume=volume=0:enable='not(between(t,2,2.05))'",
+    "-map","0:v","-map","1:a",
+    "-c:v","libsvtav1","-preset","8","-crf","25","-g","30","-c:a","aac")
+
+Make "sync.mp4" $syncArgs
+
+# The same file, except both streams begin five seconds into the timeline
+# instead of at zero. Recordings off a TS stream and anything muxed with
+# -copyts look like this. The picture and the sound must still meet.
+Make "sync_offset.mp4" ($syncArgs + @("-output_ts_offset","5.0"))
+
 # H.264, the most ordinary file there is - must be handed back untouched.
 # libopenh264 rather than libx264: the LGPL FFmpeg build has no x264 in it.
 Make "h264.mp4" @(

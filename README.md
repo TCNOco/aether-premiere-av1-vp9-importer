@@ -45,6 +45,7 @@ versions it actually has instead of demanding the newest — which is exactly wh
 | VP9 | yes — the same containers |
 | Multi-track audio | yes, tracks stay separate |
 | Variable frame rate | yes — the picture is found by time, not by frame number |
+| Files that do not start at zero | yes — picture and sound share one clip zero |
 | 10-bit | yes — delivered as 16-bit, see below |
 | HDR | decoded, but the transfer metadata is not passed on yet |
 | Alpha channel | yes, for VP9 in WebM — decoded on the CPU, see below |
@@ -375,6 +376,19 @@ frames one at a time. The way out is that most files do not need the lookahead a
 all: when a frame lands exactly on the requested instant, nothing later can be a
 better answer, and it is delivered immediately. Constant frame rate therefore
 pays nothing, and variable frame rate pays one frame.
+
+The same section fixed the other half of the problem. Not every file begins at
+zero: a recording off a transport stream, or anything muxed with `-copyts`,
+starts wherever it starts. Frames and audio samples are now both counted from one
+common clip zero — the container's own start — so a genuine offset between
+picture and sound is preserved rather than flattened. Before that, such a file
+came apart completely: every request returned the very first frame, and the sound
+was silence.
+
+Both are checked by measurement rather than by eye. Two of the generated test
+files carry a flash in the picture and a click in the sound placed at the same
+instant; the distance between them on the way out is the desync, and a run fails
+if they end up more than two frames apart.
 
 ### The frame cache
 
