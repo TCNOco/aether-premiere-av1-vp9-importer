@@ -21,3 +21,9 @@ if not exist "%~dp0..\build\Release\Aether.prm" (
 )
 
 "%ISCC%" "%~dp0Aether.iss"
+if errorlevel 1 exit /b 1
+
+REM The portable archive, for people who would rather copy a folder than run
+REM an unsigned installer - a reasonable position when the file comes from a
+REM stranger on the internet
+powershell -ExecutionPolicy Bypass -File "%~dp0make-portable.ps1"

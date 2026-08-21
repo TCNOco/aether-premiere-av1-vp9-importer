@@ -84,6 +84,11 @@ neither AV1 nor VP9. Taking someone else's file is worse than not taking your ow
 3. Run it. Administrator rights are required: Adobe plug-ins live in a shared
    system folder.
 
+Or take `Aether-x.y.z-portable.zip` from the same page and copy the `Aether`
+folder into `…\Adobe\Common\Plug-ins\7.0\MediaCore\` yourself. Same files, no
+installer, nothing written to the registry. `INSTALL.txt` inside the archive
+has the steps.
+
 There is nothing to choose. The installer asks Adobe where the shared plug-in
 folder is — the applications write that address into the registry themselves —
 and lists the applications it found, so it is clear before installing anything
@@ -92,6 +97,39 @@ the plug-in can be installed first and will be picked up when an application
 appears.
 
 To remove it, use *Apps & features* or the uninstaller in the plug-in folder.
+If you installed from the archive, delete the folder.
+
+### Why you would trust this download
+
+You should not simply trust it, and this section is not asking you to. It is a
+plug-in that goes into Adobe's own folder, from a stranger on the internet, and
+the installer is not code-signed — Windows will say "unknown publisher" and it
+is right to.
+
+What is on offer instead:
+
+- **The source is all here**, including the part that does the decoding. Nothing
+  is fetched at runtime, and nothing phones anywhere.
+- **Every release lists its SHA256**, and the number is checked against the file
+  that is actually attached before the release goes out. If they disagree, do
+  not install it and open an issue.
+- **The checks run in public** on every push, on GitHub's own Windows runners —
+  the badge at the top of this page links to them. Test media is generated on
+  the spot rather than downloaded.
+- **FFmpeg is the stock LGPL build**, unmodified, from
+  [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds). Right-click any
+  of the shipped DLLs → *Properties* → *Details* and the product version names
+  the exact build — `n8.1.2-44-g7c533d0f86-20260818` at the time of writing —
+  which is the one to look for on that project's releases page.
+- **The portable archive is reproducible**: the same build produces a
+  byte-identical zip, so the checksum is verifiable rather than a promise.
+- **You can build it yourself.** `build.bat` needs Visual Studio and the Adobe
+  SDK, and the SDK is the only piece not in this repository, because Adobe's
+  terms do not allow redistributing it.
+
+The one thing that would remove the Windows warning is a code-signing
+certificate, which costs a few hundred dollars a year. When this project is
+worth that to enough people, it will get one.
 
 Whatever application it loads into is named in the first lines of the log, so a bug
 report can say which version was involved:

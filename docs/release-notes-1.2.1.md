@@ -144,9 +144,19 @@ Download `AetherSetup-1.2.1.exe`, close Premiere Pro, After Effects and Media
 Encoder, run it. Administrator rights are required. Installs over any earlier
 version, including one under the old name; no need to uninstall first.
 
+There is also **`Aether-1.2.1-portable.zip`** for anyone who would rather copy a
+folder than run an unsigned installer from a stranger — a reasonable position.
+Same files, no installer, nothing written to the registry; drop the `Aether`
+folder into `…\Adobe\Common\Plug-ins\7.0\MediaCore\` and read `INSTALL.txt`
+in the archive. It is reproducible: the same build produces a byte-identical
+zip, so the checksum below is something you can verify rather than trust.
+
 The installer is not code-signed, so Windows will warn about an unknown
 publisher. Verify the download instead:
 
 ```
-SHA256  bb16f94a3a66d47e3837c64115f83e658e31f5b944b509794e6204071f36cf8b
+AetherSetup-1.2.1.exe        SHA256  bb16f94a3a66d47e3837c64115f83e658e31f5b944b509794e6204071f36cf8b
+Aether-1.2.1-portable.zip    SHA256  030392302d946e8be67990252259683d7c0c192a8b892dd28e277b9086475250
 ```
+
+The README has a section on what else there is to go on besides these numbers.
