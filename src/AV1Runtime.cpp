@@ -19,6 +19,8 @@
 
 #include <windows.h>
 
+#include <mutex>
+
 #include "AV1Log.h"
 #include "AV1Settings.h"
 
@@ -66,6 +68,32 @@ namespace av1imp {
 
 const wchar_t* PluginDirectory() { return g_pluginDir; }
 
+// Подготовка вынесена из DllMain, и это не вкусовщина.
+//
+// Пока модуль загружается, поток держит замок загрузчика Windows. Вызывать
+// оттуда LoadLibrary Microsoft прямо запрещает: загружаемая библиотека тоже
+// хочет этот замок для собственного DllMain, и в неудачном порядке два потока
+// встают друг напротив друга навсегда. Что это работало во всех пяти
+// приложениях Adobe — везение, а не гарантия: у ffmpeg свои зависимости и своя
+// инициализация, а замок один на процесс.
+//
+// SHGetKnownFolderPath для пути к журналу оттуда же вызывать не стоит по той
+// же причине — shell32 к этому моменту может быть ещё не готова.
+//
+// Взамен всё делается при первом настоящем запросе от Premiere. Плата за это
+// одна: строчка «плагин загружен» появляется не в момент загрузки, а в момент
+// первого вопроса. На практике одно следует за другим сразу же, а пустой
+// журнал по-прежнему означает, что плагин не спросили вовсе.
+void EnsureRuntime()
+{
+    static std::once_flag once;
+    std::call_once(once, []() {
+        LogReset();
+        Log("plug-in ready in process");
+        PreloadFFmpeg();
+    });
+}
+
 } // namespace av1imp
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
@@ -74,17 +102,16 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         g_selfModule = module;
         DisableThreadLibraryCalls(module);
 
-        // Путь считаем первым делом: от него зависит и загрузка ffmpeg,
-        // и чтение настроек
+        // Единственное, что здесь осталось: собственный путь. GetModuleFileNameW
+        // замка загрузчика не трогает, а знать папку нужно и журналу, и ffmpeg.
         if (GetModuleFileNameW(module, g_pluginDir, MAX_PATH) != 0) {
             wchar_t* lastSlash = wcsrchr(g_pluginDir, L'\\');
             if (lastSlash) *(lastSlash + 1) = 0;
             else g_pluginDir[0] = 0;
         }
-
-        av1imp::LogReset();
-        av1imp::Log("plug-in loaded into process");
-        PreloadFFmpeg();
+    }
+    else if (reason == DLL_PROCESS_DETACH) {
+        av1imp::LogClose();
     }
     return TRUE;
 }

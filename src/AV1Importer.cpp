@@ -621,6 +621,10 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
 PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
                                      void* param1, void* param2)
 {
+    // Журнал и библиотеки ffmpeg готовятся здесь, а не при загрузке DLL:
+    // из DllMain грузить библиотеки нельзя, там держится замок загрузчика.
+    av1imp::EnsureRuntime();
+
     prMALError result = imUnsupported;
 
     switch (selector)
