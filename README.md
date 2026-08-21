@@ -26,7 +26,7 @@ every one of them picks it up. Which of them were actually tried:
 | Premiere Pro 2020 – 2024 | not tried, expected to work — see the note below |
 | Premiere Pro 2025 — 25.x | tested, the main target |
 | After Effects 25.3.2 | tested: import, audio tracks, preview |
-| Media Encoder | not tried |
+| Media Encoder 25.6.4 | tested: a whole export, 1265 frames, no errors |
 | macOS | no. The decoding core is portable, the rest is Win32 |
 
 The gap in the middle is a deliberate decision rather than an oversight. The
@@ -100,8 +100,13 @@ frame 0 delivered (2560x1440, stride 10240)
 tracks apart, and pulled 93 frames during a preview — about 42 per second at 1440p,
 which is After Effects setting the pace, not the decoder.
 
-Tested on 25.3.2 with one recording. Rendering out of After Effects has not been
-tried, and Media Encoder has not been tried at all.
+Media Encoder answers the same way. A full export of that recording pulled all
+**1265 frames with no errors**, at 71 frames per second — the clip is 21 seconds
+long and took 17.8 seconds to render, so the plug-in is not what the export waits
+for. Exporting out of Premiere Pro CC 2019 works as well.
+
+Tested on one recording per application. Rendering out of After Effects itself has
+not been tried.
 
 ## Performance
 
