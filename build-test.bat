@@ -19,7 +19,11 @@ if not exist "%VCVARS%" (
 call "%VCVARS%" >nul
 if errorlevel 1 exit /b 1
 
+REM cl does not create the intermediate directory itself: on a fresh checkout
+REM /Fo:build\obj\ fails with C1083 and the build stops. Found by the build
+REM server, which is the only machine that ever starts from an empty tree.
 if not exist build mkdir build
+if not exist build\obj mkdir build\obj
 
 REM decoder_test - the decoding core, works on a file directly
 cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^

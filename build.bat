@@ -11,6 +11,9 @@ cd /d "%~dp0"
 msbuild src\AV1Importer.vcxproj /p:Configuration=Release /p:Platform=x64 /v:minimal /nologo
 if errorlevel 1 exit /b 1
 
+REM cl does not create the intermediate directory itself - see build-test.bat
+if not exist build\obj mkdir build\obj
+
 REM AV1ImporterSettings.exe - the decoder switch window
 REM /MT, not /MD: the plug-in must not depend on msvcp140.dll, and the settings
 REM app is kept consistent with it so a user without the redistributable can run it
