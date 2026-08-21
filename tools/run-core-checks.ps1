@@ -38,6 +38,7 @@ $expect = [ordered]@{
     "vfr.mkv"         = "accept"
     "sync.mp4"        = "accept"
     "sync_offset.mp4" = "accept"
+    "colour_bt709.mp4" = "accept"
     "audio_only.mp4"  = "refuse"
     "h264.mp4"        = "refuse"
 }
@@ -48,6 +49,7 @@ $expect = [ordered]@{
 $extraArgs = @{
     "sync.mp4"        = @("--sync")
     "sync_offset.mp4" = @("--sync")
+    "colour_bt709.mp4" = @("--colour")
 }
 
 $failed = 0
@@ -86,4 +88,5 @@ if ($failed -gt 0) {
     exit 1
 }
 Write-Host "all $($expect.Count) files behaved as promised"
+
 exit 0

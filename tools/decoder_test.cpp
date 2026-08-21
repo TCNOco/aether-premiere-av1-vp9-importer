@@ -349,6 +349,50 @@ void CheckSoundMatchesPicture(av1imp::Decoder& dec, const av1imp::MediaInfo& inf
     Check(apart <= allowed, name);
 }
 
+// Правильной ли матрицей переводится цвет.
+//
+// Проверка появилась потому, что матрицы не было вовсе: swscale по умолчанию
+// берёт BT.601, и всё снятое в BT.709 — то есть почти всё HD — приезжало
+// мимо. На этом самом файле было D02F30 вместо DC3E2C: пятнадцать единиц по
+// зелёному, видно глазом на насыщенных цветах и на коже.
+//
+// Ждём не тот цвет, который просили у кодировщика (E04030): круговой путь
+// через урезанный размах YUV его слегка меняет, и это нормально. Ждём то,
+// что даёт сам ffmpeg, когда ему указать матрицу явно.
+void CheckColourMatrix(av1imp::Decoder& dec, const av1imp::MediaInfo& info, bool required)
+{
+    const char* name = "colour comes out of the right matrix";
+    if (!required) return;
+
+    if (!info.hasVideo) { Check(false, name); return; }
+
+    const int stride = info.width * 4;
+    std::vector<uint8_t> buf((size_t)stride * info.height, 0);
+    if (!dec.GetFrameBGRA(0, buf.data(), stride, info.width, info.height)) {
+        Check(false, name);
+        return;
+    }
+
+    // Середина кадра: он одноцветный, но края кодек трогает сильнее
+    const size_t at = (size_t)(info.height / 2) * stride + (size_t)(info.width / 2) * 4;
+    const int b = buf[at], g = buf[at + 1], r = buf[at + 2];
+
+    // Что даёт ffmpeg с явной матрицей BT.709
+    const int wantR = 220, wantG = 62, wantB = 44;
+    // Что дала бы ошибочная BT.601 — печатаем рядом, чтобы по отчёту сразу
+    // было видно, промах это или совсем другая беда
+    const int badR = 206, badG = 47, badB = 46;
+
+    const int off = std::max(std::abs(r - wantR),
+                             std::max(std::abs(g - wantG), std::abs(b - wantB)));
+
+    // Шесть единиц: круговой путь через кодек шевелит последние биты, а
+    // ошибка матрицы стоит пятнадцати — между ними места достаточно
+    printf("      centre %02X%02X%02X, want %02X%02X%02X (wrong matrix gives %02X%02X%02X), off by %d\n",
+           r, g, b, wantR, wantG, wantB, badR, badG, badB, off);
+    Check(off <= 6, name);
+}
+
 void CheckReducedSizeStaysInBuffer(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 {
     if (!info.hasVideo) {
@@ -478,6 +522,8 @@ int main(int argc, char** argv)
         printf("          hardware decoding is switched off in its settings\n");
         printf("  --sync  the file carries a flash and a click at the same\n");
         printf("          instant; fail unless they come out together\n");
+        printf("  --colour  the file is a flat colour tagged BT.709; fail\n");
+        printf("            unless it decodes to the colour it should\n");
         return 1;
     }
 
@@ -490,11 +536,14 @@ int main(int argc, char** argv)
     // --sync: в файле есть вспышка и щелчок в один и тот же момент, и они
     // обязаны сойтись. Без флага проверять нечего, и она молчит
     bool requireSync = false;
+    // --colour: файл залит известным цветом с явной меткой BT.709
+    bool requireColour = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--sw")      preferHardware = false;
         else if (arg == "--16u") format = av1imp::FrameFormat::BGRA16;
         else if (arg == "--sync") requireSync = true;
+        else if (arg == "--colour") requireColour = true;
         else if (path.empty())  path = arg;
         else                    wanted = _atoi64(arg.c_str());
     }
@@ -639,6 +688,7 @@ int main(int argc, char** argv)
     CheckAudioIsRepeatable(dec, info);
     CheckTimelinePicksFrameByTime(dec, info);
     CheckSoundMatchesPicture(dec, info, requireSync);
+    CheckColourMatrix(dec, info, requireColour);
 
     printf("\n%s\n", g_failures == 0 ? "ALL CHECKS PASSED"
                                      : "SOME CHECKS FAILED");

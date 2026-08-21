@@ -110,6 +110,23 @@ Make "sync.mp4" $syncArgs
 # -copyts look like this. The picture and the sound must still meet.
 Make "sync_offset.mp4" ($syncArgs + @("-output_ts_offset","5.0"))
 
+# A flat colour tagged BT.709, deliberately at a small frame size.
+#
+# The size is the point. Where a file says nothing about its colour, the frame
+# height decides — under 576 lines means standard definition and BT.601. This
+# file says BT.709 while being 180 lines tall, so anything that guesses instead
+# of reading the tag gets it wrong, and the check below notices.
+#
+# SVT-AV1 does not write the colour description into the stream itself, only
+# the container carries it — which is exactly the case that made the first
+# attempt at this fix change nothing at all.
+Make "colour_bt709.mp4" @(
+    "-f","lavfi","-i","color=c=0xE04030:s=320x180:r=30:d=1",
+    "-vf","format=yuv420p",
+    "-colorspace","bt709","-color_primaries","bt709","-color_trc","bt709",
+    "-color_range","tv",
+    "-c:v","libsvtav1","-preset","6","-crf","8")
+
 # H.264, the most ordinary file there is - must be handed back untouched.
 # libopenh264 rather than libx264: the LGPL FFmpeg build has no x264 in it.
 Make "h264.mp4" @(

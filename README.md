@@ -46,7 +46,9 @@ tried, the table says so.
 | | 12-bit | **not tried** — the same path as 10-bit |
 | | Alpha, VP9 in WebM | **yes** — CPU decoding only, see below |
 | | Alpha in AV1 | **no** — stored differently, not done |
-| | HDR | **partly** — decoded, transfer metadata is not passed on |
+| | Colour matrix BT.601 / 709 / 2020 | **yes** — taken from the file, not guessed |
+| | Full and limited range | **yes** — also taken from the file |
+| | HDR | **partly** — the BT.2020 matrix is honoured, PQ/HLG transfer is not converted |
 | | Interlaced | **no** |
 | **Timing** | Constant frame rate | **yes** |
 | | Variable frame rate | **yes** — the frame is found by time, see below |
@@ -414,6 +416,43 @@ Both are checked by measurement rather than by eye. Two of the generated test
 files carry a flash in the picture and a click in the sound placed at the same
 instant; the distance between them on the way out is the desync, and a run fails
 if they end up more than two frames apart.
+
+### Colour uses the matrix the file names, not a guess
+
+Luma and chroma become RGB through a matrix, and there is more than one: BT.601
+for standard definition, BT.709 for HD, BT.2020 for wide gamut. Picking the
+wrong one misses the colour on all of the footage at once.
+
+Which is exactly what happened here. Left to itself `swscale` takes BT.601, so
+everything shot in BT.709 — which is nearly all HD — came out wrong. On a flat
+`E04030` frame:
+
+| | |
+|---|---|
+| ffmpeg told to use BT.709 | `DC3E2C` |
+| ffmpeg told to use BT.601 on purpose | `CE2F2E` |
+| the plug-in, before | `D02F30` |
+| the plug-in, after | `DD3F2D` |
+
+Landing on the deliberately wrong answer was the diagnosis. The single unit of
+difference afterwards is the round trip through the codec, not the matrix.
+
+Then the other half turned up. A frame does not always know its own colour:
+SVT-AV1 does not write the description into the stream, so the frame says
+"unspecified" — and on such a file the first attempt at this fix changed
+nothing at all. The description is therefore taken in order: what the frame
+says, what the container says, and only then a guess from the frame height
+(576 lines or fewer means standard definition and BT.601).
+
+The matrix is handed to the scaler on every frame rather than once. That is
+deliberate: `sws_getCachedContext` is free to rebuild the context without
+telling us, and any saving here would mean a frame quietly converted with the
+wrong one. It costs nothing measurable — colour conversion stayed at 0.62–0.65
+ms per 1440p frame, the same as before.
+
+What this does not fix is the transfer curve. HDR now arrives with the right
+matrix but still in PQ or HLG, and turning that into SDR is not something this
+plug-in attempts.
 
 ### The frame cache
 

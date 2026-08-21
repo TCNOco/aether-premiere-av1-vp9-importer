@@ -159,6 +159,11 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
     }
     codecId_ = st->codecpar->codec_id;
 
+    // Цветовое описание берём из потока: в самом сжатом видео его может не
+    // быть вовсе, и тогда кадр приедет с «не указано».
+    streamColourspace_ = st->codecpar->color_space;
+    streamColourRange_ = st->codecpar->color_range;
+
     // Глубину и прозрачность выясняем ДО открытия декодера: от них зависит,
     // какой декодер вообще годится.
     //
@@ -404,6 +409,8 @@ void Decoder::CloseLocked() {
     eofReached_       = false;
     lastFrameTimeSec_ = 0.0;
     startTimeSec_     = 0.0;
+    streamColourspace_ = AVCOL_SPC_UNSPECIFIED;
+    streamColourRange_ = AVCOL_RANGE_UNSPECIFIED;
     curValid_         = false;
     aheadValid_       = false;
     toleranceTicks_   = 0;
@@ -597,6 +604,62 @@ bool Decoder::DecodeUntil(int64_t targetFrame) {
         }
     }
 }
+// Какой матрицей переводить яркость и цветность в RGB.
+//
+// Без этого swscale молча берёт BT.601 — ту, что верна для стандартного
+// разрешения прошлого века. Почти всё HD снято в BT.709, и разница видна на
+// глаз: однотонный кадр E04030 приезжал как D02F30 вместо DC3E2C, то есть
+// на полтора десятка единиц мимо по красному и зелёному.
+//
+// Когда в файле не сказано ничего, решаем по высоте кадра — так же поступают
+// проигрыватели: до 576 строк это материал стандартного разрешения и BT.601,
+// выше — BT.709.
+namespace {
+int SwsColourspaceFor(int colourspace, int height) {
+    switch (colourspace) {
+        case AVCOL_SPC_BT709:       return SWS_CS_ITU709;
+        case AVCOL_SPC_FCC:         return SWS_CS_FCC;
+        case AVCOL_SPC_BT470BG:     return SWS_CS_ITU624;
+        case AVCOL_SPC_SMPTE170M:   return SWS_CS_SMPTE170M;
+        case AVCOL_SPC_SMPTE240M:   return SWS_CS_SMPTE240M;
+        case AVCOL_SPC_BT2020_NCL:
+        case AVCOL_SPC_BT2020_CL:   return SWS_CS_BT2020;
+        default: break;
+    }
+    return height > 576 ? SWS_CS_ITU709 : SWS_CS_ITU601;
+}
+} // namespace
+
+// Задаётся на каждый кадр, а не при создании пересчётчика, и это осознанно:
+// sws_getCachedContext умеет пересоздать контекст незаметно для нас, и любая
+// попытка сэкономить здесь означала бы кадр, тихо посчитанный не той матрицей.
+// Замер цены — в README.
+void Decoder::ApplyColourspace(const AVFrame* src) {
+    // По очереди: что сказал кадр, что сказал контейнер, догадка по высоте.
+    // Средняя ступень нужна не для красоты: SVT-AV1 не пишет цветовое
+    // описание в поток, и на его файлах кадр всегда говорит «не указано» —
+    // именно на таком файле первая попытка этой починки ничего не изменила.
+    int colourspace = src->colorspace;
+    if (colourspace == AVCOL_SPC_UNSPECIFIED) colourspace = streamColourspace_;
+
+    int range = src->color_range;
+    if (range == AVCOL_RANGE_UNSPECIFIED) range = streamColourRange_;
+
+    const int csp = SwsColourspaceFor(colourspace, src->height);
+
+    // Полный размах бывает у записей с экрана и у всего, что пришло из
+    // JPEG-мира; принять его за урезанный — значит задрать контраст.
+    const int srcRange = (range == AVCOL_RANGE_JPEG) ? 1 : 0;
+
+    const int* inv = sws_getCoefficients(csp);
+    const int* fwd = sws_getCoefficients(SWS_CS_DEFAULT);
+
+    // Выход у нас RGB, а он всегда полного размаха. Отказ не беда: так
+    // отвечают преобразования, которым матрица не нужна вовсе — например
+    // когда источник уже в RGB.
+    sws_setColorspaceDetails(sws_, inv, srcRange, fwd, 1, 0, 1 << 16, 1 << 16);
+}
+
 bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW, int dstH,
                             FrameFormat format) {
     AVFrame* srcFrame = src;
@@ -655,6 +718,8 @@ bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW,
         SetError("cannot create colour converter");
         return false;
     }
+
+    ApplyColourspace(srcFrame);
 
     uint8_t* dstData[4] = { dst, nullptr, nullptr, nullptr };
     int dstLinesize[4]  = { dstStride, 0, 0, 0 };

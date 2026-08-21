@@ -152,6 +152,7 @@ private:
     int64_t TimelineIndexOf(int64_t ts) const;
     bool ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW, int dstH,
                        FrameFormat format);
+    void ApplyColourspace(const AVFrame* src);
     void StoreInCache(int64_t index, AVFrame* src);
     void ClearCache();
     void SetError(const std::string& msg, int averr = 0);
@@ -189,6 +190,12 @@ private:
     int              swsDstW_    = 0;
     int              swsDstH_    = 0;
     int              swsDstFmt_  = -1;  // пересчётчик кэшируется и по формату выхода
+
+    // Цветовое описание из контейнера. Нужно потому, что в самом потоке его
+    // может не быть: SVT-AV1, например, не пишет его в заголовок
+    // последовательности, и кадр приезжает с «не указано».
+    int              streamColourspace_ = 2;   // AVCOL_SPC_UNSPECIFIED
+    int              streamColourRange_ = 0;   // AVCOL_RANGE_UNSPECIFIED
     AVBufferRef*     hwDevice_   = nullptr;
 
     int      videoStream_ = -1;
