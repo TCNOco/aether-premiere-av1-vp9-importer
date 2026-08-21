@@ -92,6 +92,22 @@ std::vector<FakeFrame*> g_frames;
 // проверка полезла в многопоточность.
 std::mutex g_framesMutex;
 
+// В режиме замера буферы переиспользуются и не заливаются мусором.
+//
+// Проверкам заливка нужна: по ней видно, что плагин действительно записал
+// кадр. Замеру она вредит — на кадре 2560x1440 это 14.7 МБ выделения и
+// записи, то есть больше, чем стоит вся наша распаковка. Первый прогон замера
+// мерил именно это, а не плагин. Настоящий Premiere буферы переиспользует.
+bool g_benchMode = false;
+
+// Один буфер на весь замер.
+//
+// Даже resize() у пустого вектора обнуляет память, а это 14.7 МБ на каждый
+// кадр 1440p — больше, чем стоит вся работа плагина. Настоящий Premiere
+// держит пул буферов и не платит за это на каждом кадре, поэтому и здесь
+// буфер переиспользуется. В замере кадры берёт один поток, так что общий
+// буфер безопасен.
+FakeFrame* g_benchFrame = nullptr;
 
 prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pixelFormat,
                         const prRect* rect)
@@ -107,6 +123,24 @@ prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pix
     // выделяет буфер точно так же по формату, и проверка обязана это повторять.
     const int bytesPerPixel = (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? 8 : 4;
 
+    if (g_benchMode) {
+        const size_t bytes = static_cast<size_t>(width) * bytesPerPixel * height;
+        if (!g_benchFrame) {
+            g_benchFrame = new FakeFrame();
+            g_benchFrame->pixPtr = &g_benchFrame->pix;
+        }
+        if (g_benchFrame->data.size() < bytes) g_benchFrame->data.resize(bytes);
+
+        memset(&g_benchFrame->pix, 0, sizeof(g_benchFrame->pix));
+        g_benchFrame->pix.bounds       = *rect;
+        g_benchFrame->pix.rowbytes     = width * bytesPerPixel;
+        g_benchFrame->pix.bitsperpixel = 32;
+        g_benchFrame->pix.pix          = g_benchFrame->data.data();
+
+        *outHand = reinterpret_cast<PPixHand>(g_benchFrame);
+        return suiteError_NoError;
+    }
+
     FakeFrame* f = new FakeFrame();
     f->pixPtr = &f->pix;
     memset(&f->pix, 0, sizeof(f->pix));
@@ -115,12 +149,21 @@ prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pix
     f->pix.bitsperpixel = 32;
 
     // Заполняем узнаваемым мусором: так видно, что плагин действительно записал
-    // кадр, а не оставил буфер как был
-    f->data.assign(static_cast<size_t>(f->pix.rowbytes) * height, 0xCD);
+    // кадр, а не оставил буфер как был. В замере это лишняя работа — см. выше.
+    const size_t bytes = static_cast<size_t>(f->pix.rowbytes) * height;
+    if (g_benchMode) f->data.resize(bytes);
+    else             f->data.assign(bytes, 0xCD);
     f->pix.pix = f->data.data();
 
     {
         std::lock_guard<std::mutex> lock(g_framesMutex);
+
+        // В замере держим только последние: копить по 14 МБ на кадр значит
+        // мерить работу распределителя памяти
+        if (g_benchMode && g_frames.size() > 16) {
+            delete g_frames.front();
+            g_frames.erase(g_frames.begin());
+        }
         g_frames.push_back(f);
     }
     *outHand = reinterpret_cast<PPixHand>(f);
@@ -508,6 +551,223 @@ bool RunAsyncStress(ImportEntryProc entry, imStdParms* stdParms,
     return true;
 }
 
+// --- замер пользы от асинхронной выдачи -----------------------------------
+//
+// Обычные проверки показать выигрыш не могут: между кадрами поддельный хост
+// ничего не делает, а перекрывать распаковку нечем. Настоящий Premiere между
+// кадрами занят своим — сводит слои, показывает, считает эффекты, — и вот
+// в это время распаковка следующего кадра и должна идти.
+//
+// Поэтому здесь хост, который после каждого кадра честно занимает процессор
+// на заданное время. Это ИМИТАЦИЯ, а не Premiere: она показывает, работает ли
+// перекрытие, а не сколько выйдет на настоящем монтаже.
+
+// Занять ровно столько времени, сколько просили. Активное ожидание, а не сон:
+// у сна на Windows шаг в единицы миллисекунд, и на малых значениях он мерил
+// бы точность таймера, а не нас.
+void BurnMilliseconds(double ms)
+{
+    if (ms <= 0) return;
+    LARGE_INTEGER freq, start, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&start);
+    const double ticks = ms * 0.001 * static_cast<double>(freq.QuadPart);
+    do {
+        QueryPerformanceCounter(&now);
+    } while (static_cast<double>(now.QuadPart - start.QuadPart) < ticks);
+}
+
+double NowMs()
+{
+    LARGE_INTEGER freq, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    return 1000.0 * static_cast<double>(now.QuadPart) / static_cast<double>(freq.QuadPart);
+}
+
+double BenchSync(ImportEntryProc entry, imStdParms* stdParms, imFileRef fileRef,
+                 void* privateData, PrTime ticksPerFrame, int frames, double workMs,
+                 int width, int height, PrPixelFormat pixelFormat)
+{
+    const double t0 = NowMs();
+    for (int frame = 0; frame < frames; ++frame) {
+        PPixHand hand = nullptr;
+        imFrameFormat format = {};
+        format.inPixelFormat = pixelFormat;
+        format.inFrameWidth  = width;
+        format.inFrameHeight = height;
+
+        imSourceVideoRec videoRec = {};
+        videoRec.inPrivateData     = privateData;
+        videoRec.inFrameFormats    = &format;
+        videoRec.inNumFrameFormats = 1;
+        videoRec.outFrame          = &hand;
+        videoRec.inFrameTime       = static_cast<PrTime>(frame) * ticksPerFrame;
+
+        entry(imGetSourceVideo, stdParms, fileRef, &videoRec);
+        BurnMilliseconds(workMs);          // хост занят своим
+    }
+    return NowMs() - t0;
+}
+
+double BenchAsync(ImportEntryProc entry, imStdParms* stdParms, void* privateData,
+                  PrTime ticksPerFrame, int frames, double workMs,
+                  int width, int height, PrPixelFormat pixelFormat, int lookahead)
+{
+    imAsyncImporterCreationRec creation = {};
+    creation.inPrivateData = privateData;
+    if (entry(imCreateAsyncImporter, stdParms, &creation, nullptr) != malNoError ||
+        !creation.outAsyncEntry || !creation.outAsyncPrivateData) {
+        return -1.0;
+    }
+    AsyncImporterEntry async = creation.outAsyncEntry;
+    void* asyncData = creation.outAsyncPrivateData;
+
+    auto order = [&](int frame) {
+        if (frame >= frames) return;
+        aiAsyncRequest req = {};
+        req.inPrivateData = asyncData;
+        req.inSourceRec.inFrameTime = static_cast<PrTime>(frame) * ticksPerFrame;
+        async(aiInitiateAsyncRead, &req);
+    };
+
+    // Заказ вперёд — то, ради чего всё и затевалось
+    for (int i = 0; i < lookahead; ++i) order(i);
+
+    const double t0 = NowMs();
+    for (int frame = 0; frame < frames; ++frame) {
+        order(frame + lookahead);          // держим запас заказанных
+
+        PPixHand hand = nullptr;
+        imFrameFormat format = {};
+        format.inPixelFormat = pixelFormat;
+        format.inFrameWidth  = width;
+        format.inFrameHeight = height;
+
+        imSourceVideoRec videoRec = {};
+        videoRec.inPrivateData     = asyncData;
+        videoRec.inFrameFormats    = &format;
+        videoRec.inNumFrameFormats = 1;
+        videoRec.outFrame          = &hand;
+        videoRec.inFrameTime       = static_cast<PrTime>(frame) * ticksPerFrame;
+
+        async(aiGetFrame, &videoRec);
+        BurnMilliseconds(workMs);
+    }
+    const double spent = NowMs() - t0;
+
+    async(aiFlush, asyncData);
+    async(aiClose, asyncData);
+    return spent;
+}
+
+// Прогон замера целиком: открыть файл, взять сведения, сравнить пути.
+int RunBench(ImportEntryProc entry, const wchar_t* mediaPath, int frames, bool reversed)
+{
+    static const HostProfile modern = { "bench", 24, 99, true };
+    g_host = &modern;
+    g_benchMode = true;
+
+    imStdParms stdParms = {};
+    stdParms.imInterfaceVer = modern.interfaceVer;
+    stdParms.piSuites       = &g_piSuites;
+
+    imImportInfoRec info = {};
+    entry(imInit, &stdParms, &info, nullptr);
+
+    imFileOpenRec8 openRec = {};
+    openRec.fileinfo.filepath = reinterpret_cast<const prUTF16Char*>(mediaPath);
+    openRec.inStreamIdx       = 0;
+    openRec.inImporterID      = 1;
+    imFileRef fileRef = imInvalidHandleValue;
+
+    if (entry(imOpenFile8, &stdParms, &fileRef, &openRec) != malNoError) {
+        printf("the file was not accepted\n");
+        return 2;
+    }
+
+    imFileInfoRec8 fileInfo = {};
+    fileInfo.privatedata = openRec.privatedata;
+    fileInfo.streamIdx   = 0;
+
+    // imIterateStreams значит «есть ещё потоки» и тоже успех — у записи
+    // с несколькими дорожками звука первый ответ именно такой
+    const prMALError infoResult =
+        entry(imGetInfo8, &stdParms, &openRec.fileinfo, &fileInfo);
+    if ((infoResult != malNoError && infoResult != imIterateStreams) ||
+        !fileInfo.hasVideo) {
+        printf("no video in the file\n");
+        return 3;
+    }
+
+    imIndPixelFormatRec pixFmt = {};
+    pixFmt.privatedata    = openRec.privatedata;
+    pixFmt.outPixelFormat = PrPixelFormat_BGRA_4444_8u;
+    entry(imGetIndPixelFormat, &stdParms, reinterpret_cast<void*>(0), &pixFmt);
+
+    PrTime ticksPerSecond = 0;
+    g_timeSuite.GetTicksPerSecond(&ticksPerSecond);
+    const PrTime ticksPerFrame =
+        (fileInfo.vidScale > 0)
+            ? ticksPerSecond * fileInfo.vidSampleSize / fileInfo.vidScale
+            : ticksPerSecond / 30;
+
+    const int width  = fileInfo.vidInfo.imageWidth;
+    const int height = fileInfo.vidInfo.imageHeight;
+
+    printf("%dx%d, %d frames per run, pixels %s\n\n", width, height, frames,
+           pixFmt.outPixelFormat == PrPixelFormat_BGRA_4444_16u ? "16u" : "8u");
+
+    printf("  host work   plain path   async path   difference\n");
+    printf("  ---------   ----------   ----------   ----------\n");
+
+    const double workValues[] = { 0.0, 1.0, 3.0, 6.0, 12.0 };
+
+    for (double work : workValues) {
+        // Прогрев: первый проход по файлу всегда быстрее последующих из-за
+        // кэша операционной системы, и без него сравнивались бы не пути
+        BenchSync(entry, &stdParms, fileRef, openRec.privatedata,
+                  ticksPerFrame, 8, 0.0, width, height, pixFmt.outPixelFormat);
+
+        // Порядок можно перевернуть, и это не прихоть: в серии замеров
+        // первый всегда медленнее из-за прогрева, и без такой проверки
+        // «выигрыш» второго пути легко принять за настоящий
+        double plain = 0.0, async = 0.0;
+        if (reversed) {
+            async = BenchAsync(entry, &stdParms, openRec.privatedata,
+                               ticksPerFrame, frames, work,
+                               width, height, pixFmt.outPixelFormat, 6);
+            plain = BenchSync(entry, &stdParms, fileRef, openRec.privatedata,
+                              ticksPerFrame, frames, work,
+                              width, height, pixFmt.outPixelFormat);
+        } else {
+            plain = BenchSync(entry, &stdParms, fileRef, openRec.privatedata,
+                              ticksPerFrame, frames, work,
+                              width, height, pixFmt.outPixelFormat);
+            async = BenchAsync(entry, &stdParms, openRec.privatedata,
+                               ticksPerFrame, frames, work,
+                               width, height, pixFmt.outPixelFormat, 6);
+        }
+
+        if (async < 0) {
+            printf("  %6.0f ms   %8.1f ms   not offered\n", work, plain);
+            continue;
+        }
+
+        printf("  %6.0f ms   %8.1f ms   %8.1f ms   %+6.1f%%\n",
+               work, plain, async, 100.0 * (async - plain) / plain);
+    }
+
+    entry(imCloseFile, &stdParms, &fileRef, openRec.privatedata);
+
+    {
+        std::lock_guard<std::mutex> lock(g_framesMutex);
+        for (FakeFrame* f : g_frames) delete f;
+        g_frames.clear();
+    }
+    return 0;
+}
+
 RunResult Run(ImportEntryProc entry, const HostProfile& profile,
               const wchar_t* mediaPath)
 {
@@ -641,10 +901,25 @@ RunResult Run(ImportEntryProc entry, const HostProfile& profile,
 int wmain(int argc, wchar_t** argv)
 {
     if (argc < 3) {
-        printf("Usage: host_test <path to Aether.prm> <media file>\n");
+        printf("Usage: host_test <path to Aether.prm> <media file> [--bench [frames]]\n");
+        printf("  --bench  compare the plain and the async path under a host\n");
+        printf("           that is busy between frames, as a real one is\n");
         return 1;
     }
 
+    bool bench = false;
+    int  benchFrames = 120;
+    bool benchReversed = false;
+    for (int i = 3; i < argc; ++i) {
+        if (wcscmp(argv[i], L"--reverse") == 0) benchReversed = true;
+        if (wcscmp(argv[i], L"--bench") == 0) {
+            bench = true;
+            if (i + 1 < argc) {
+                const int n = _wtoi(argv[i + 1]);
+                if (n > 0) benchFrames = n;
+            }
+        }
+    }
 
     HMODULE plugin = LoadLibraryExW(argv[1], nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!plugin) {
@@ -659,6 +934,7 @@ int wmain(int argc, wchar_t** argv)
 
     BuildHostTables();
 
+    if (bench) return RunBench(entry, argv[2], benchFrames, benchReversed);
 
     // Версии интерфейса импортёра из PrSDKImport.h: 24 = Premiere 23.2 и новее
     // (с тех пор не менялась), 21 = 13.0, то есть 2019 год.
