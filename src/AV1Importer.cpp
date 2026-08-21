@@ -37,6 +37,11 @@ std::string Utf8FromUtf16(const prUTF16Char* path)
 
 void CopyUtf16(prUTF16Char* dst, size_t dstCount, const prUTF16Char* src)
 {
+    // Нулевой размер: писать некуда, даже завершающий нуль. Без этой строки
+    // dstCount - 1 уходит в переполнение беззнакового и превращается в
+    // «почти бесконечность», а dst[0] = 0 пишет мимо буфера.
+    if (!dst || dstCount == 0) return;
+
     size_t i = 0;
     if (src) {
         for (; src[i] && i < dstCount - 1; ++i) dst[i] = src[i];
@@ -560,6 +565,14 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
         if (result == suiteError_NoError) return result;
     }
 
+    // Сколько форматов прислали, столько и читаем. Обращение к нулевому без
+    // этой проверки — чтение чужой памяти, если хост однажды пришлёт пустой
+    // список. Сейчас так не делает ни один, но полагаться на это незачем.
+    if (!videoRec->inFrameFormats || videoRec->inNumFrameFormats < 1) {
+        av1imp::Log("imGetSourceVideo: host asked without a frame format");
+        return imOtherErr;
+    }
+
     // Ноль означает «любой размер» — тогда отдаём как в файле. Ненулевой размер
     // Premiere просит при пониженном качестве воспроизведения, и кадр надо
     // масштабировать под него: буфер создаётся именно такой.
@@ -589,6 +602,17 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
     ldata->PPixSuite->GetPixels(*videoRec->outFrame, PrPPixBufferAccess_ReadWrite, &buffer);
     ldata->PPixSuite->GetRowBytes(*videoRec->outFrame, &rowBytes);
     if (!buffer || rowBytes <= 0) return imOtherErr;
+
+    // Строка обязана вмещать кадр целиком. Буфер создаём мы сами и тем же
+    // прямоугольником, так что это про случай «хост отдал не то, что просили»:
+    // цена проверки — одно умножение, цена ошибки — запись за пределы буфера
+    // внутри чужого процесса.
+    const int bytesPerPixel = (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? 8 : 4;
+    if (rowBytes < format->inFrameWidth * bytesPerPixel) {
+        av1imp::Log("imGetSourceVideo: row of %d bytes is too small for %d pixels",
+                    rowBytes, format->inFrameWidth);
+        return imOtherErr;
+    }
 
     // У Premiere 32-битные буферы идут снизу вверх: пишем с последней строки
     // отрицательным шагом, и переворот делает сам масштабатор ffmpeg

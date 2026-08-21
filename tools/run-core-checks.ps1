@@ -17,7 +17,9 @@
 
 param(
     [string]$MediaDir = "build\media",
-    [string]$Exe      = "build\decoder_test.exe"
+    [string]$Exe      = "build\decoder_test.exe",
+    [string]$Fuzz     = "build\fuzz_test.exe",
+    [switch]$NoFuzz
 )
 
 # Continue, а не Stop, и это вынужденно: PowerShell 5.1 заворачивает вывод
@@ -89,4 +91,59 @@ if ($failed -gt 0) {
 }
 Write-Host "all $($expect.Count) files behaved as promised"
 
+# --- порченые файлы -------------------------------------------------------
+#
+# Всё выше кормит ядро правильными файлами. Здесь наоборот: обрывки, шум,
+# перевёрнутые биты. Проверяется единственное — что процесс доживает до конца;
+# отказаться открыть такой файл совершенно законно.
+#
+# Это не блажь: кадр без размеров однажды уже доходил до swscale, а тот на
+# такое не отвечает ошибкой, а вызывает av_assert0 и заканчивает процесс —
+# внутри Premiere это выглядело как «Premiere сам закрылся».
+if ($NoFuzz) { exit 0 }
+
+if (-not (Test-Path $Fuzz)) {
+    Write-Host "no $Fuzz - skipping the damaged-file pass"
+    exit 0
+}
+
+Write-Host ""
+Write-Host "damaged files:"
+
+# По одному файлу на каждый разбор контейнера, по два зерна на каждый.
+# Больше — дольше, а на сборочном сервере это каждый пуш.
+$fuzzTargets = @("av1_8bit.mp4", "vp9_alpha.webm", "vfr.mkv")
+$seeds = @(1, 20260821)
+$fuzzFailed = 0
+
+foreach ($name in $fuzzTargets) {
+    $path = Join-Path $MediaDir $name
+    if (-not (Test-Path $path)) { continue }
+
+    foreach ($seed in $seeds) {
+        $out = & $Fuzz $path --seed $seed 2>$null | Out-String
+        $code = $LASTEXITCODE
+
+        # Падение видно по обрыву: последняя строка не дописана
+        $ok = ($code -eq 0) -and ($out -match "all survived")
+        $tail = ($out -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)
+
+        Write-Host ("  {0,-18} seed {1,-9} {2,-5} {3}" -f $name, $seed,
+                    $(if ($ok) {"OK"} else {"FAIL"}), $tail.Trim())
+        if (-not $ok) {
+            $fuzzFailed++
+            Write-Host ($out.Trim())
+        }
+    }
+}
+
+# Порченые копии рядом с исходниками не нужны
+Get-ChildItem $MediaDir -Filter "*-damaged.*" -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
+if ($fuzzFailed -gt 0) {
+    Write-Host ""
+    Write-Host "$fuzzFailed damaged-file runs did not survive"
+    exit 1
+}
 exit 0

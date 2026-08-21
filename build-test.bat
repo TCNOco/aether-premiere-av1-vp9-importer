@@ -34,6 +34,15 @@ cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
    /link /LIBPATH:"ffmpeg\lib" avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib
 if errorlevel 1 exit /b 1
 
+REM fuzz_test - the same core, fed deliberately broken files
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
+   /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
+   /I"ffmpeg\include" ^
+   src\AV1Decoder.cpp tools\fuzz_test.cpp ^
+   /Fe:build\fuzz_test.exe /Fo:build\obj\ ^
+   /link /LIBPATH:"ffmpeg\lib" avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib
+if errorlevel 1 exit /b 1
+
 set SDK=sdk\Premiere Pro 26.0 C++ SDK\Examples\Headers
 if not exist "%SDK%" (
     echo.

@@ -281,6 +281,23 @@ every check; two must be **refused** — an audio-only MP4 and an H.264 file, bo
 which Premiere opens perfectly well on its own. A plug-in that grabs more than it
 should is worse than one that grabs less.
 
+A third tool feeds the same core **damaged** files:
+
+```
+tools\fuzz_test.cpp           truncations, noise, flipped bits, holes
+```
+
+One thing is checked: that the process reaches the end. Refusing to open such a
+file is perfectly legitimate; taking the host down is not, and that is not
+hypothetical — a frame with no dimensions once reached swscale, which answers
+that not with an error but with `av_assert0` and the end of the process. Inside
+Premiere it looked like "Premiere just closed itself", with nothing anywhere.
+
+The damage follows fixed rules from a given seed, so "died on case 11"
+reproduces word for word. The very first run did find a crash — in the tool
+itself, which had sized a buffer for 8-bit and then asked for 16. That counts
+as a result too: it proves the thing can catch what it is looking for.
+
 That pair runs on every push, on GitHub's Windows runners. The plug-in itself
 cannot be built there: it needs the Adobe SDK, which may not be redistributed, so
 no build server can have a copy. What is checked is the layer deliberately kept
