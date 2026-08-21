@@ -125,13 +125,30 @@ build-test.bat                   the test programs
 installer\build-installer.bat    the installer -> dist\
 ```
 
-Two console programs let you test almost everything without launching Premiere,
+Three console programs let you test almost everything without launching Premiere,
 which is what makes this project practical to work on:
 
 ```
-build\decoder_test.exe <file.mp4>                    metadata, timings, audio levels, checks
-build\plugin_test.exe  build\plugin\AV1Importer.prm  plug-in loading and its answers
+build\decoder_test.exe <file.mp4>                          metadata, timings, audio levels, checks
+build\plugin_test.exe  <AV1Importer.prm>                   plug-in loading and its answers
+build\host_test.exe    <AV1Importer.prm> <file.mp4>        the whole import, from a fake host
 ```
+
+`host_test` is the interesting one. It impersonates Premiere and drives the built
+`.prm` through open, info, frames and audio, then does it again pretending to be
+an older host: one that only knows version 7 of the frame-cache suite, one from the
+Premiere 13.0 era, one that refuses the cache suite altogether. Each run must
+deliver the same pixels.
+
+That covers the failure this project actually had. A host does not hand out a suite
+version it has never heard of, so asking for the newest one and nothing else leaves
+the pointer null on every older Premiere — which looks exactly like the feature not
+existing. Reverting the fix makes two of the five profiles fail, so the check is
+not decorative.
+
+What it cannot show: whether an older Premiere sends different selectors in a
+different order, whether older SDK headers laid the structs out differently, or how
+it reads the `IMPT` resource. Only a real installation answers those.
 
 `decoder_test` ends with correctness checks and exits non-zero if any fails: a
 cached frame against a freshly decoded one, buffer bounds when Premiere asks for a
