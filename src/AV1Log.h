@@ -15,6 +15,7 @@
 namespace av1imp {
 
 void LogReset();                          // вызывается один раз при загрузке плагина
+void LogClose();                          // при выгрузке плагина
 void Log(const char* format, ...);        // строка в журнал
 
 // Имя запроса Premiere по его номеру — читать журнал по цифрам невыносимо

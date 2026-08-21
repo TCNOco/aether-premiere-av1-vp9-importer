@@ -474,6 +474,22 @@ records every selector Premiere sends, by name, **including the ones the plug-in
 rejects**. The cause of failure hid among exactly those. Inside Premiere every
 importer failure looks the same, so this log is the main debugging tool.
 
+The file is held open and flushed after every line. It used to be opened and
+closed again for each line — for the same crash-safety — and that turned out to
+cost far more than expected:
+
+| | per line |
+|---|---|
+| open, write, close | 117 µs |
+| held open, flushed | 5 µs |
+| held open, not flushed | 0.4 µs |
+
+Lines are not rare: at least two for every frame delivered, against 650 µs of
+actual decoding for a 1440p frame. The log was adding roughly a third to the
+decoder's own work. Flushing stayed: it is what gives the crash-safety the
+whole arrangement was for, and it costs twenty-four times less than reopening
+the file.
+
 ## Licensing, Adobe's terms, and AV1 patents
 
 Short version: Apache 2.0 covers this repository's own code and nothing else. Full
