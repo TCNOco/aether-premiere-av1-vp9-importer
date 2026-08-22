@@ -29,7 +29,8 @@ The short answer: Windows, and an Adobe application. Nothing else.
 | **Not tried** | Premiere Pro 2020 – 2024. They sit between two verified points, see the note below |
 | **Graphics card** | **not required.** The CPU decodes by default, and it is faster — measurements below |
 | **NVIDIA** | optional: `av1_cuvid`, `vp9_cuvid`, tested on an RTX 5080 |
-| **Intel QSV, AMD AMF** | not tried — the code is there, the hardware was not |
+| **AMD** | optional: through D3D11VA, tested on the integrated Radeon of a 9800X3D |
+| **Intel** | not tried — same path as AMD, the hardware was not here |
 | **Async delivery** | on. Worth 5–12% on the GPU path, nothing on the CPU; can be switched off |
 | **Panel in Premiere** | optional: Window → Extensions → Aether |
 | **Privileges** | administrator, to install only |
@@ -675,6 +676,59 @@ for comparison: `expected.png` and `if-ignored.png`.
 
 No HDR display is needed: on a Rec.709 sequence the host flattens HDR to SDR
 itself, and it is that result one should be looking at.
+
+### Hardware decoding on AMD does not go the way it looks like it should
+
+AMD has a decoder of its own, `av1_amf`. It cannot be used: in this FFmpeg
+build it **takes the process down**. Not "fails to start" — it initialises,
+decodes frames correctly, and then dies with an access violation
+(`0xC0000005`). Checked on 2026-08-22 on the integrated Radeon of a 9800X3D,
+driver 32.0.21045.1000: five runs in a row, identical for `av1_amf` and
+`vp9_amf`, on thirty frames and on one. Inside Premiere that would look like
+"Premiere just closed itself", with nothing anywhere.
+
+What does work is **D3D11VA**, the general Windows path for hardware decoding.
+It is built differently: an ordinary FFmpeg decoder parses the stream and the
+graphics card does the heavy lifting through the driver. Browsers and players
+use the same mechanism, and it is one path for everybody — AMD, Intel,
+NVIDIA — where vendor decoders need one each, every one with its own ailments.
+
+Order of preference: vendor decoders first (`av1_cuvid`, `av1_qsv`), then
+D3D11VA. Nothing changes on NVIDIA, and AMD and Intel get picked up by the
+thing that ought to pick them up.
+
+Speed remains an argument against the GPU rather than for it. 2560×1440, AV1,
+per frame:
+
+| path | fps | decode | transfer from GPU memory | colour |
+|---|---:|---:|---:|---:|
+| CPU, dav1d | **585** | 1.02 ms | — | 0.69 ms |
+| NVIDIA, av1_cuvid | 125 | 0.20 ms | 3.58 ms | 4.22 ms |
+| NVIDIA, D3D11VA | 106 | 0.18 ms | 5.00 ms | 4.26 ms |
+| integrated AMD, D3D11VA | 73 | 0.21 ms | **9.12 ms** | 4.29 ms |
+
+The decode itself is no slower on the integrated chip than on the discrete
+NVIDIA card: 0.21 ms against 0.20. What eats everything is moving the frame
+into system memory — nine milliseconds. The integrated GPU sits on the same
+memory as the CPU and it helps not at all: the trip through D3D11 still costs
+twice what it does on the discrete card.
+
+So the point of the hardware path is not speed but leaving the CPU alone: when
+it is busy with a render or an export, 73 frames a second at almost no CPU cost
+can be worth more than 585 at full.
+
+Any path can be tried without rebuilding anything:
+
+```
+set AETHER_DECODER=d3d11va         which way to decode
+set AETHER_D3D11_ADAPTER=1         which graphics adapter to use
+```
+
+The second matters more than it looks: on a machine with two cards only one is
+considered primary, and there is no other way to reach the other one. The
+search does NOT continue afterwards — the chosen path either works or the file
+does not open: falling back quietly would mean the test shows something other
+than what was tested.
 
 ### Diagnostics: one tool, two doors
 

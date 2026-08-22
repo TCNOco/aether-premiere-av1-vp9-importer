@@ -42,6 +42,27 @@ New-Item -ItemType Directory -Force $out | Out-Null
 Remove-Item $zxp -Force -ErrorAction SilentlyContinue
 if (Test-Path $folder) { Remove-Item $folder -Recurse -Force }
 
+# ----------------------------------------------------- номер версии в панель
+#
+# В самом манифесте стоит 0.0.0: номер один на весь проект и живёт в
+# собранном плагине. Подставляем его в КОПИЮ, а не в исходник — иначе после
+# каждой сборки в репозитории оказывалась бы правка, которую никто не делал.
+$prm = Join-Path $Root "build\Release\Aether.prm"
+if (-not (Test-Path $prm)) { throw "сначала соберите плагин: build.bat" }
+$version = (Get-Item $prm).VersionInfo.ProductVersion
+if (-not $version) { throw "в $prm нет ресурса версии" }
+
+$staged = Join-Path $out "src"
+if (Test-Path $staged) { Remove-Item $staged -Recurse -Force }
+Copy-Item $src $staged -Recurse
+
+$manifest = Join-Path $staged "CSXS\manifest.xml"
+(Get-Content $manifest -Raw -Encoding UTF8).Replace('"0.0.0"', '"' + $version + '"') |
+    Set-Content $manifest -Encoding UTF8 -NoNewline
+
+Write-Host "версия панели: $version"
+$src = $staged
+
 # ------------------------------------------------------------------ подпись
 #
 # Метка времени обязательна. Без неё подпись умирает вместе с сертификатом,

@@ -11,14 +11,23 @@
   тогда, когда Premiere не запускается, — а панель внутри Premiere в этот
   момент бесполезна. Здесь удобство, там опора.
 -->
+<!--
+  Номер версии здесь стоит 0.0.0 НАРОЧНО. Настоящий подставляет
+  installer\make-panel.ps1, беря его из собранного Aether.prm — там он один
+  на весь проект. Написанный тут руками рано или поздно разошёлся бы с
+  остальными, и разошёлся бы молча.
+
+  Если панель ставится напрямую из этой папки (для разработки), 0.0.0 так
+  и останется — и это правильно: сразу видно, что сборка не релизная.
+-->
 <ExtensionManifest Version="7.0"
     ExtensionBundleId="com.nehade.aether"
-    ExtensionBundleVersion="1.2.3"
+    ExtensionBundleVersion="0.0.0"
     ExtensionBundleName="Aether"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 
   <ExtensionList>
-    <Extension Id="com.nehade.aether.panel" Version="1.2.3"/>
+    <Extension Id="com.nehade.aether.panel" Version="0.0.0"/>
   </ExtensionList>
 
   <ExecutionEnvironment>

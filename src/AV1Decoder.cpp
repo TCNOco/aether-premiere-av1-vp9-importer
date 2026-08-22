@@ -16,6 +16,7 @@ extern "C" {
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace av1imp {
@@ -42,6 +43,14 @@ std::string AvErr(int err) {
 struct HardwareDecoder {
     const char*        name;
     AVHWDeviceType     device;
+
+    // false — отдельный фирменный декодер (av1_cuvid и подобные).
+    // true  — ОБЫЧНЫЙ декодер плюс аппаратный ускоритель: сам разбор потока
+    //         делает ffmpeg, а тяжёлую работу берёт видеокарта через
+    //         драйвер. Так устроен D3D11VA, и этим он ценен: он один на
+    //         всех — AMD, Intel, NVIDIA, — тогда как фирменных декодеров
+    //         нужно по одному на вендора, и у каждого свои болезни.
+    bool               hwaccel;
 };
 
 struct SupportedCodec {
@@ -51,19 +60,40 @@ struct SupportedCodec {
     const char* const*     software;      // список, конец — nullptr
 };
 
+// AMD (av1_amf, vp9_amf) в этом списке НЕТ, и это решение по замеру.
+//
+// Декодеры AMF в этой сборке ffmpeg падают: не «не заводятся», а роняют
+// процесс нарушением доступа (0xC0000005) — сразу после того, как успешно
+// распакуют кадры. Проверено 2026-08-22 на Radeon встроенного 9800X3D,
+// драйвер 32.0.21045.1000, пять прогонов подряд, одинаково на av1_amf и
+// vp9_amf, хоть на тридцати кадрах, хоть на одном.
+//
+// Пока рядом стоит NVIDIA, ветка недостижима: устройство D3D11 достаётся ей,
+// а на чужом устройстве AMF не заводится вовсе. Но на машине ТОЛЬКО с AMD
+// она была бы достижима — и падение случилось бы внутри Premiere, где оно
+// выглядит как «Premiere сам закрылся», без единой строчки где-либо.
+//
+// Терять при этом нечего: по нашим же замерам процессор быстрее видеокарты
+// вшестеро, так что аппаратный путь AMD не дал бы даже выигрыша, ради
+// которого стоило бы рисковать. Обменять возможное падение хоста на
+// программную распаковку — обмен в одну сторону.
+//
+// Совсем убирать поддержку не стали: имя декодера по-прежнему принимается
+// через AETHER_DECODER, так что проверить его на исправной сборке ffmpeg
+// можно в любой момент, не трогая код.
 const HardwareDecoder kAV1Hardware[] = {
-    { "av1_cuvid", AV_HWDEVICE_TYPE_CUDA    },
-    { "av1_qsv",   AV_HWDEVICE_TYPE_QSV     },
-    { "av1_amf",   AV_HWDEVICE_TYPE_D3D11VA },
-    { nullptr,     AV_HWDEVICE_TYPE_NONE    },
+    { "av1_cuvid", AV_HWDEVICE_TYPE_CUDA,    false },
+    { "av1_qsv",   AV_HWDEVICE_TYPE_QSV,     false },
+    { "av1",       AV_HWDEVICE_TYPE_D3D11VA, true  },   // AMD, Intel, NVIDIA
+    { nullptr,     AV_HWDEVICE_TYPE_NONE,    false },
 };
 const char* const kAV1Software[] = { "libdav1d", "av1", nullptr };
 
 const HardwareDecoder kVP9Hardware[] = {
-    { "vp9_cuvid", AV_HWDEVICE_TYPE_CUDA    },
-    { "vp9_qsv",   AV_HWDEVICE_TYPE_QSV     },
-    { "vp9_amf",   AV_HWDEVICE_TYPE_D3D11VA },
-    { nullptr,     AV_HWDEVICE_TYPE_NONE    },
+    { "vp9_cuvid", AV_HWDEVICE_TYPE_CUDA,    false },
+    { "vp9_qsv",   AV_HWDEVICE_TYPE_QSV,     false },
+    { "vp9",       AV_HWDEVICE_TYPE_D3D11VA, true  },   // AMD, Intel, NVIDIA
+    { nullptr,     AV_HWDEVICE_TYPE_NONE,    false },
 };
 const char* const kVP9Software[] = { "libvpx-vp9", "vp9", nullptr };
 
@@ -71,6 +101,86 @@ const SupportedCodec kSupportedCodecs[] = {
     { AV_CODEC_ID_AV1, "AV1", kAV1Hardware, kAV1Software },
     { AV_CODEC_ID_VP9, "VP9", kVP9Hardware, kVP9Software },
 };
+
+// Какой формат кадра выбрать, когда декодер спрашивает.
+//
+// Обычный декодер с аппаратным ускорителем задаёт этот вопрос при первом
+// кадре и предлагает список: сначала аппаратные поверхности, потом обычную
+// память. Не ответить — значит согласиться на обычную, то есть получить
+// распаковку процессором, продолжая считать её аппаратной.
+//
+// Нужный формат кладём в opaque при открытии: он известен заранее из
+// avcodec_get_hw_config, и гадать в обратном вызове не о чем.
+AVPixelFormat PickHardwareFormat(AVCodecContext* ctx, const AVPixelFormat* offered) {
+    const AVPixelFormat wanted = (AVPixelFormat)(intptr_t)ctx->opaque;
+    for (const AVPixelFormat* p = offered; *p != AV_PIX_FMT_NONE; ++p) {
+        if (*p == wanted) return *p;
+    }
+
+    // Предложили не то, что обещали при открытии. Соглашаться на обычную
+    // память нельзя: получилась бы «аппаратная» распаковка процессором, и
+    // мы бы её так и назвали. Пусть лучше кадр не выйдет вовсе.
+    return AV_PIX_FMT_NONE;
+}
+
+// Умеет ли этот декодер работать с таким устройством, и в каком формате
+// он тогда отдаёт кадры. Спрашиваем ДО создания устройства: незачем заводить
+// D3D11, чтобы через строчку выяснить, что декодер о нём не слышал.
+bool HardwareFormatFor(const AVCodec* dec, AVHWDeviceType device,
+                       AVPixelFormat* out) {
+    for (int i = 0; ; ++i) {
+        const AVCodecHWConfig* cfg = avcodec_get_hw_config(dec, i);
+        if (!cfg) return false;
+        if (cfg->device_type == device &&
+            (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
+            *out = cfg->pix_fmt;
+            return true;
+        }
+    }
+}
+
+// Какой видеоадаптер брать под D3D11VA.
+//
+// По умолчанию — тот, что система считает основным, и в подавляющем
+// большинстве случаев это правильно. Но на машине с двумя картами основной
+// оказывается одна, а проверить надо другую: у нас встроенная AMD и дискретная
+// NVIDIA, и без этого номера встройка недостижима вовсе.
+//
+// Пригодится и не только для проверок: у ноутбуков с переключаемой графикой
+// «основной» бывает не тот, на котором хочется распаковывать.
+const char* ForcedAdapter() {
+    static const char* value = nullptr;
+    static bool asked = false;
+    if (!asked) {
+        asked = true;
+        const char* v = std::getenv("AETHER_D3D11_ADAPTER");
+        value = (v && *v) ? v : nullptr;
+    }
+    return value;
+}
+
+// Принудительный выбор декодера через AETHER_DECODER.
+//
+// Нужен для двух вещей, и обе настоящие. Во-первых, проверить путь Intel или
+// AMD на машине, где стоит ещё и NVIDIA, иначе никак: перебор доходит до
+// cuvid и на нём останавливается. Во-вторых, поддержка — «запустите с
+// AETHER_DECODER=libdav1d» короче любых объяснений.
+//
+// Перебор при этом НЕ продолжается: заданный декодер либо работает, либо
+// файл не открывается. Тихий откат на другой означал бы, что проверка
+// показывает не то, что проверяли.
+// getenv, а не GetEnvironmentVariable: ядро намеренно не знает про Windows,
+// и заводить эту зависимость ради одной переменной незачем.
+const char* ForcedDecoder() {
+    static const char* value = nullptr;
+    static bool asked = false;
+    if (!asked) {
+        asked = true;
+        const char* v = std::getenv("AETHER_DECODER");
+        value = (v && *v) ? v : nullptr;
+    }
+    return value;
+}
 
 const SupportedCodec* FindCodec(int codecId) {
     for (const SupportedCodec& c : kSupportedCodecs) {
@@ -302,10 +412,16 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
 bool Decoder::OpenCodec(bool preferHardware) {
     AVStream* st = fmt_->streams[videoStream_];
 
-    auto tryDecoder = [&](const char* name, AVHWDeviceType device) -> bool {
+    auto tryDecoder = [&](const char* name, AVHWDeviceType device,
+                          bool hwaccel) -> bool {
         const bool hardware = (device != AV_HWDEVICE_TYPE_NONE);
         const AVCodec* dec = avcodec_find_decoder_by_name(name);
         if (!dec) return false;
+
+        // Для пути «обычный декодер плюс ускоритель» сначала выясняем, умеет
+        // ли он такое устройство вовсе. У av1 умеет, у libdav1d нет.
+        AVPixelFormat hwFormat = AV_PIX_FMT_NONE;
+        if (hwaccel && !HardwareFormatFor(dec, device, &hwFormat)) return false;
 
         AVCodecContext* ctx = avcodec_alloc_context3(dec);
         if (!ctx) return false;
@@ -320,7 +436,11 @@ bool Decoder::OpenCodec(bool preferHardware) {
 
         if (hardware) {
             AVBufferRef* hw = nullptr;
-            if (av_hwdevice_ctx_create(&hw, device, nullptr, nullptr, 0) < 0) {
+            // Номер адаптера имеет смысл только у D3D11VA: у CUDA и QSV
+            // строка устройства значит совсем другое.
+            const char* adapter = (device == AV_HWDEVICE_TYPE_D3D11VA)
+                                  ? ForcedAdapter() : nullptr;
+            if (av_hwdevice_ctx_create(&hw, device, adapter, nullptr, 0) < 0) {
                 // Нет такого устройства на этой машине — этот декодер не наш,
                 // пробуем следующий, а не открываем его без контекста
                 avcodec_free_context(&ctx);
@@ -328,6 +448,15 @@ bool Decoder::OpenCodec(bool preferHardware) {
             }
             ctx->hw_device_ctx = av_buffer_ref(hw);
             av_buffer_unref(&hw);
+
+            if (hwaccel) {
+                ctx->opaque     = (void*)(intptr_t)hwFormat;
+                ctx->get_format = PickHardwareFormat;
+
+                // Многопоточность тут ни к чему: разбор идёт на видеокарте,
+                // а лишние потоки некоторым ускорителям только мешают.
+                ctx->thread_count = 1;
+            }
         }
 
         if (avcodec_open2(ctx, dec, nullptr) < 0) {
@@ -336,7 +465,12 @@ bool Decoder::OpenCodec(bool preferHardware) {
         }
 
         codec_ = ctx;
-        info_.decoderName    = name;
+        // Имя с добавкой, иначе в отчёте и в журнале «av1 (видеокарта)»
+        // читалось бы как программный декодер, которому почему-то приписали
+        // видеокарту.
+        info_.decoderName = (hwaccel && device == AV_HWDEVICE_TYPE_D3D11VA)
+                            ? std::string(name) + " + d3d11va"
+                            : name;
         info_.hardwareDecode = hardware;
         return true;
     };
@@ -353,13 +487,66 @@ bool Decoder::OpenCodec(bool preferHardware) {
     // Молча потерять альфу хуже, чем декодировать медленнее.
     if (info_.hasAlpha) preferHardware = false;
 
+    // Задан явно — пробуем только его. Тип устройства берём из таблицы:
+    // аппаратному декодеру он обязан соответствовать, иначе контекст не
+    // создастся и декодер откроется пустым.
+    if (const char* forced = ForcedDecoder()) {
+        // Отдельно принимаем НАЗВАНИЕ СПОСОБА, а не декодера: у AV1 и VP9
+        // декодеры называются по-разному, и «прогнать весь набор через
+        // D3D11VA» одним именем иначе не задать.
+        if (strcmp(forced, "d3d11va") == 0) {
+            for (const HardwareDecoder* hw = codec->hardware; hw->name; ++hw) {
+                if (hw->device != AV_HWDEVICE_TYPE_D3D11VA) continue;
+                if (tryDecoder(hw->name, hw->device, hw->hwaccel)) return true;
+                break;
+            }
+            SetError("d3d11va forced by AETHER_DECODER did not open");
+            return false;
+        }
+
+        AVHWDeviceType device = AV_HWDEVICE_TYPE_NONE;
+        for (const HardwareDecoder* hw = codec->hardware; hw->name; ++hw) {
+            if (strcmp(hw->name, forced) == 0) { device = hw->device; break; }
+        }
+
+        // AMD в автоматическом списке нет (см. выше), но задать его руками
+        // должно быть можно — иначе проверить исправленную сборку ffmpeg
+        // будет нечем.
+        if (device == AV_HWDEVICE_TYPE_NONE && strstr(forced, "_amf")) {
+            device = AV_HWDEVICE_TYPE_D3D11VA;
+        }
+        // Фирменный декодер или «обычный плюс ускоритель» — это РАЗНЫЕ пути,
+        // и различать их надо по таблице, а не по вопросу «умеет ли он такое
+        // устройство». Умеет и av1_cuvid — он тоже отдаёт кадры в память
+        // видеокарты, — но ускорителем при этом не пользуется. Спутав их,
+        // мы подписывали cuvid как «+ d3d11va» и зря запрещали ему потоки.
+        bool hwaccel = false;
+        bool known   = false;
+        for (const HardwareDecoder* hw = codec->hardware; hw->name; ++hw) {
+            if (strcmp(hw->name, forced) == 0) { hwaccel = hw->hwaccel; known = true; break; }
+        }
+
+        // Имени нет в таблице — это либо программный декодер, либо тот, что
+        // мы из автовыбора убрали. Тогда спрашиваем у него самого.
+        if (!known && device != AV_HWDEVICE_TYPE_NONE) {
+            AVPixelFormat probe = AV_PIX_FMT_NONE;
+            const AVCodec* dec = avcodec_find_decoder_by_name(forced);
+            hwaccel = dec && HardwareFormatFor(dec, device, &probe);
+        }
+
+        if (tryDecoder(forced, device, hwaccel)) return true;
+
+        SetError(std::string("decoder forced by AETHER_DECODER did not open: ") + forced);
+        return false;
+    }
+
     if (preferHardware) {
         for (const HardwareDecoder* hw = codec->hardware; hw->name; ++hw) {
-            if (tryDecoder(hw->name, hw->device)) return true;
+            if (tryDecoder(hw->name, hw->device, hw->hwaccel)) return true;
         }
     }
     for (const char* const* name = codec->software; *name; ++name) {
-        if (tryDecoder(*name, AV_HWDEVICE_TYPE_NONE)) return true;
+        if (tryDecoder(*name, AV_HWDEVICE_TYPE_NONE, false)) return true;
     }
 
     SetError("no decoder available for this codec");
