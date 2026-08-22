@@ -13,7 +13,7 @@
 
 #define AETHER_VERSION_MAJOR 1
 #define AETHER_VERSION_MINOR 2
-#define AETHER_VERSION_PATCH 2
+#define AETHER_VERSION_PATCH 3
 
 // Для ресурса версии Windows: четыре числа через запятую
 #define AETHER_VERSION_COMMA AETHER_VERSION_MAJOR, AETHER_VERSION_MINOR, AETHER_VERSION_PATCH, 0
@@ -26,3 +26,13 @@
 #define AETHER_VERSION_STR AETHER_STR(AETHER_VERSION_MAJOR) "." \
                            AETHER_STR(AETHER_VERSION_MINOR) "." \
                            AETHER_STR(AETHER_VERSION_PATCH)
+
+// То же широкими символами: окнам Windows нужны именно они. Собирается
+// отдельно, а не приставкой L к готовой строке — та уже склеена из трёх
+// кусков, и приставка легла бы только на первый.
+#define AETHER_WSTR2(x) L#x
+#define AETHER_WSTR(x)  AETHER_WSTR2(x)
+
+#define AETHER_VERSION_WSTR AETHER_WSTR(AETHER_VERSION_MAJOR) L"." \
+                            AETHER_WSTR(AETHER_VERSION_MINOR) L"." \
+                            AETHER_WSTR(AETHER_VERSION_PATCH)

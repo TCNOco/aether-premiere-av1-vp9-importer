@@ -90,12 +90,12 @@ Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [CustomMessages]
-ru.SettingsShortcut=Aether — настройки
-en.SettingsShortcut=Aether settings
-ru.SettingsComment=Переключить декодирование между процессором и видеокартой
-en.SettingsComment=Switch decoding between the CPU and the graphics card
-ru.OpenSettings=Открыть настройки плагина
-en.OpenSettings=Open plug-in settings
+ru.SettingsShortcut=Aether
+en.SettingsShortcut=Aether
+ru.SettingsComment=Настройки плагина и диагностика
+en.SettingsComment=Plug-in settings and diagnostics
+ru.OpenSettings=Проверить установку
+en.OpenSettings=Check the installation
 
 ru.FoundCaption=Приложения Adobe
 ru.FoundDesc=Куда попадёт плагин и кто его увидит
@@ -119,15 +119,47 @@ en.FoundWhere=Installing into:
 ; же), так что удалить их больше некому.
 Type: filesandordirs; Name: "{code:GetMediaCore}\{#OldPluginDir}"
 
+; Панель: при обновлении подпись меняется, и остатки прежней версии могут
+; поспорить с новой за один и тот же идентификатор.
+Type: filesandordirs; Name: "{code:GetCepExtensions}\com.nehade.aether"
+
+; Прежнее имя программы: до 1.2.3 окно называлось AetherSettings.exe.
+; Оставить его — значит оставить в папке файл, который никто не обновляет
+; и который однажды покажет настройки версии двухлетней давности.
+Type: files; Name: "{app}\AetherSettings.exe"
+
 [Icons]
-Name: "{autoprograms}\{cm:SettingsShortcut}"; Filename: "{app}\AetherSettings.exe"; Comment: "{cm:SettingsComment}"
+Name: "{autoprograms}\{cm:SettingsShortcut}"; Filename: "{app}\Aether.exe"; Comment: "{cm:SettingsComment}"
 
 [Files]
 Source: "{#SourcePlugin}"; DestDir: "{app}"; Flags: ignoreversion
 
-; Окно переключения декодера. Отдельная программа, а не окно внутри Premiere:
-; настройка нужна тогда, когда Premiere из-за драйвера не запускается
-Source: "..\build\Release\AetherSettings.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Окно плагина: настройки и диагностика. Отдельная программа, а не панель
+; внутри Premiere — она нужна и тогда, когда Premiere из-за драйвера не
+; запускается, и через полгода, когда установщика давно нет.
+Source: "..\build\Release\Aether.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+; Пробные клипы для диагностики. Кладутся рядом, а не распаковываются во
+; временную папку: нечего чистить и не на что ругаться антивирусу.
+; Каждый по паре секунд — проверяется путь распаковки, а не разрешение.
+Source: "..\build\media\samples\*"; DestDir: "{app}\samples"; Flags: ignoreversion
+
+; Движок диагностики без окна. Его зовёт панель внутри Premiere: она на HTML
+; и распаковывать видео не умеет никак, поэтому проверку делает та же
+; программа, что и окно, — расходиться им негде.
+Source: "..\build\Release\AetherDiagnose.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+; Панель для меню «Расширения». Ставится в ОБЩУЮ папку расширений Adobe,
+; а не в профиль пользователя, и это осознанно: установщик работает от
+; администратора, и «папка текущего пользователя» под повышением прав
+; означает не то, что кажется. Общая папка одна на всех и вопросов не
+; вызывает.
+;
+; Панель ПОДПИСАНА (installer\make-panel.ps1). Без подписи Premiere её не
+; покажет — молча, без единого сообщения; обойти это можно только режимом
+; разработчика, которого у обычного человека нет.
+Source: "..\build\panel\com.nehade.aether\*"; DestDir: "{code:GetCepExtensions}\com.nehade.aether"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; Значок нужен и после установки: на него смотрит «Установка и удаление программ»
 Source: "aether.ico"; DestDir: "{app}"; Flags: ignoreversion
@@ -149,7 +181,12 @@ Source: "..\THIRD-PARTY-NOTICES.md";  DestDir: "{app}"; Flags: ignoreversion
 Source: "..\ffmpeg\LICENSE.txt";      DestDir: "{app}"; DestName: "LICENSE-ffmpeg.txt"; Flags: ignoreversion
 
 [Run]
-Filename: "{app}\AetherSettings.exe"; Description: "{cm:OpenSettings}"; Flags: postinstall nowait skipifsilent
+; Диагностика запускается ПОСЛЕ установки и от обычного пользователя.
+; Проверять до установки нечего: главные вопросы — подхватил ли Premiere
+; плагин и распаковывается ли файл — все про уже установленное. К тому же
+; установщик работает от администратора, а Premiere никогда, и проверка
+; под повышенными правами прошла бы там, где настоящая работа не проходит.
+Filename: "{app}\Aether.exe"; Parameters: "--diagnose"; Description: "{cm:OpenSettings}"; Flags: postinstall nowait skipifsilent
 
 [Code]
 
@@ -226,6 +263,21 @@ begin
       CachedMediaCore := ExpandConstant('{commonpf}') + FallbackMediaCore;
   end;
   Result := CachedMediaCore;
+end;
+
+// Общая папка расширений CEP — та, из которой Premiere берёт панели.
+//
+// Берём общую, а не пользовательскую, и это не мелочь. Установщик работает
+// от администратора, а «папка текущего пользователя» под повышением прав
+// означает не то, что кажется: панель легко уедет в профиль администратора,
+// и человек её не увидит. Общая папка одна на всех и таких вопросов не
+// задаёт.
+//
+// Путь у неё в Program Files (x86) даже на 64-битной системе — так его
+// заложила Adobe, и от разрядности он не зависит.
+function GetCepExtensions(Param: String): String;
+begin
+  Result := ExpandConstant('{commoncf32}') + '\Adobe\CEP\extensions';
 end;
 
 // Корень Adobe — четыре уровня вверх от MediaCore. Считаем от найденной папки,

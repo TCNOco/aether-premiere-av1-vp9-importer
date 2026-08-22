@@ -15,13 +15,37 @@ REM cl does not create the intermediate directory itself - see build-test.bat
 if not exist build\obj mkdir build\obj
 
 REM The icon, so the settings window is not a blank rectangle in the taskbar
-rc /nologo /fo build\obj\settings.res installer\AetherSettings.rc
+rc /nologo /i src /fo build\obj\aether.res installer\Aether.rc
 if errorlevel 1 exit /b 1
 
-REM AetherSettings.exe - the decoder switch window
-REM /MT, not /MD: the plug-in must not depend on msvcp140.dll, and the settings
-REM app is kept consistent with it so a user without the redistributable can run it
+REM AetherDiagnose has no window, so it gets no icon and no manifest -
+REM only the version, so Properties on the file is not blank.
+rc /nologo /i src /fo build\obj\diagnose.res installer\AetherDiagnose.rc
+if errorlevel 1 exit /b 1
+
+REM Aether.exe - the plug-in window: settings and diagnostics.
+REM /MT, not /MD: the plug-in must not depend on msvcp140.dll, and the window
+REM is kept consistent with it so a user without the redistributable can run it.
 cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MT /DUNICODE /D_UNICODE ^
-   tools\settings_app.cpp src\AV1Settings.cpp build\obj\settings.res ^
-   /Fe:build\Release\AetherSettings.exe "/Fo:build\obj\\" ^
-   /link /SUBSYSTEM:WINDOWS shell32.lib ole32.lib user32.lib gdi32.lib
+   /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
+   /I"ffmpeg\include" ^
+   tools\aether_app.cpp tools\app_diagnose.cpp ^
+   src\AV1Settings.cpp src\AV1Decoder.cpp build\obj\aether.res ^
+   /Fe:build\Release\Aether.exe "/Fo:build\obj\\" ^
+   /link /SUBSYSTEM:WINDOWS /LIBPATH:"ffmpeg\lib" ^
+   avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib ^
+   shell32.lib ole32.lib user32.lib gdi32.lib comdlg32.lib advapi32.lib version.lib
+
+REM AetherDiagnose.exe - the diagnostic engine with no window of its own.
+REM Ships with the plug-in: the CEP panel inside Premiere is HTML and cannot
+REM decode video at all, so it runs this and reads the JSON back. One engine
+REM for the panel and the window means the two cannot drift apart.
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MT ^
+   /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
+   /I"ffmpeg\include" ^
+   tools\diagnose_app.cpp tools\app_diagnose.cpp ^
+   src\AV1Settings.cpp src\AV1Decoder.cpp build\obj\diagnose.res ^
+   /Fe:build\Release\AetherDiagnose.exe "/Fo:build\obj\\" ^
+   /link /LIBPATH:"ffmpeg\lib" ^
+   avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib ^
+   shell32.lib ole32.lib user32.lib advapi32.lib version.lib

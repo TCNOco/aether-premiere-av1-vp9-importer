@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Манифест окна настроек. Без него окно выглядит так, будто его собрали
+  в двухтысячном году, и на этом всё:
+
+  * без объявления Common Controls 6 стандартные кнопки и переключатели
+    рисуются старым, догалерейным стилем;
+  * без объявления осведомлённости о DPI Windows растягивает окно кусками,
+    и на экране со 150% текст выходит мыльным.
+
+  Оба объявления делаются только манифестом — из кода их не включить.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+
+  <assemblyIdentity type="win32" name="neoHaDe.Aether.Settings"
+                    version="1.0.0.0" processorArchitecture="amd64"/>
+
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32"
+                        name="Microsoft.Windows.Common-Controls"
+                        version="6.0.0.0"
+                        processorArchitecture="*"
+                        publicKeyToken="6595b64144ccf1df"
+                        language="*"/>
+    </dependentAssembly>
+  </dependency>
+
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <!-- Два объявления вместо одного: старое понимают все версии Windows,
+           новое добавляет пересчёт при переносе окна на другой монитор.
+           Windows берёт то, которое знает. -->
+      <dpiAware    xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">permonitorv2,permonitor</dpiAwareness>
+    </windowsSettings>
+  </application>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 и 11: без этого GetVersionEx врёт, что вокруг Vista -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
+
+</assembly>

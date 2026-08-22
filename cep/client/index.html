@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <header>
+    <h1>Aether</h1>
+    <span id="version" class="note">версия неизвестна</span>
+  </header>
+
+  <nav>
+    <button id="tab-settings" class="tab active">Настройки</button>
+    <button id="tab-diagnose" class="tab">Диагностика</button>
+  </nav>
+
+  <!-- ------------------------------------------------------- настройки -->
+  <section id="page-settings">
+    <h2>Как распаковывать видео AV1 и VP9</h2>
+
+    <label class="choice">
+      <input type="radio" name="decode" value="auto" checked>
+      <span class="title">Автоматически (рекомендуется)</span>
+      <span class="note">Процессором на машинах от 8 потоков, иначе видеокартой.</span>
+    </label>
+
+    <label class="choice">
+      <input type="radio" name="decode" value="software">
+      <span class="title">Процессором (dav1d)</span>
+      <span class="note">По замерам быстрее: видеокарте приходится копировать
+        каждый кадр в обычную память, а процессор сразу пишет туда.</span>
+    </label>
+
+    <label class="choice">
+      <input type="radio" name="decode" value="hardware">
+      <span class="title">Видеокартой (NVIDIA / Intel / AMD)</span>
+      <span class="note">Разгружает процессор. Выбирайте, если он слабый
+        или занят другим.</span>
+    </label>
+
+    <p class="note hint">Изменения вступят в силу после перезапуска Premiere Pro.</p>
+
+    <div class="bar">
+      <button id="save" class="primary">Сохранить</button>
+      <span id="saved" class="note"></span>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------ диагностика -->
+  <section id="page-diagnose" hidden>
+    <h2>Диагностика</h2>
+    <p class="note">Проверяет систему, приложения Adobe и распаковку видео.
+      Если какой-то файл не открывается — бросьте его сюда, и он будет
+      проверен отдельно.</p>
+
+    <div id="drop" class="drop">
+      <span id="drop-text">Перетащите сюда файл, который не открывается</span>
+      <button id="forget" hidden>убрать</button>
+    </div>
+
+    <div id="results" class="results"></div>
+    <p id="status" class="note"></p>
+
+    <div class="bar">
+      <button id="run" class="primary">Запустить проверку</button>
+      <button id="copy" disabled>Скопировать отчёт</button>
+    </div>
+  </section>
+
+  <script src="main.js"></script>
+</body>
+</html>

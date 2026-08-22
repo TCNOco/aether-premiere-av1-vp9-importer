@@ -1,0 +1,49 @@
+// Ресурсы окна Aether.exe.
+//
+// Пути указаны от корня репозитория, потому что оттуда запускается build.bat.
+
+// Значок. Одной строчки мало: в коде его ещё надо загрузить и положить
+// в класс окна, иначе в заголовке и на панели задач висит заглушка Windows.
+// Ровно так и было до 1.2.3 — ресурс лежал, а окно про него не знало.
+1 ICON "installer\\aether.ico"
+
+// Манифест: современные стили элементов и осведомлённость о DPI.
+// Номер 1 — это CREATEPROCESS_MANIFEST_RESOURCE_ID, тот, который Windows
+// ищет у исполняемого файла. Тип 24 — RT_MANIFEST.
+1 24 "installer\\Aether.manifest"
+
+// Запись о версии. Та же история, что и у плагина: без неё правый клик по
+// файлу показывает пустоту, и понять, какая сборка лежит в папке Adobe,
+// можно разве что по размеру. На плагине мы это уже проходили — окно и
+// диагност оставались без неё до 1.2.3.
+#include "AV1Version.h"
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION    AETHER_VERSION_COMMA
+    PRODUCTVERSION AETHER_VERSION_COMMA
+    FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+    FILEFLAGS      0x0L
+    FILEOS         VOS_NT_WINDOWS32
+    FILETYPE       VFT_APP
+    FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "neoHaDe"
+            VALUE "FileDescription",  "Aether - settings and diagnostics"
+            VALUE "FileVersion",      AETHER_VERSION_STR
+            VALUE "InternalName",     "Aether"
+            VALUE "LegalCopyright",   "Apache License 2.0"
+            VALUE "OriginalFilename", "Aether.exe"
+            VALUE "ProductName",      "Aether"
+            VALUE "ProductVersion",   AETHER_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

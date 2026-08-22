@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Панель Aether для Premiere Pro.
+
+  Без неё узнать, что плагин установлен, можно только одним способом: бросить
+  файл на таймлайн и посмотреть, открылся ли. Пункт в меню «Расширения» —
+  единственная дверь, которую Adobe оставляет плагину для разговора с человеком:
+  импортёр в меню попасть не может, у его интерфейса такого попросту нет.
+
+  Панель НЕ подменяет собой Aether.exe и не должна. Диагностика нужна ровно
+  тогда, когда Premiere не запускается, — а панель внутри Premiere в этот
+  момент бесполезна. Здесь удобство, там опора.
+-->
+<ExtensionManifest Version="7.0"
+    ExtensionBundleId="com.nehade.aether"
+    ExtensionBundleVersion="1.2.3"
+    ExtensionBundleName="Aether"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+  <ExtensionList>
+    <Extension Id="com.nehade.aether.panel" Version="1.2.3"/>
+  </ExtensionList>
+
+  <ExecutionEnvironment>
+    <HostList>
+      <!-- PPRO 14.0 — это Premiere Pro 2020. Ниже CEP 9 уже не тот, а сам
+           плагин проверен от 2019 до 2026; панель — приятное дополнение,
+           и терять на ней поддержку старых версий не жалко. -->
+      <Host Name="PPRO" Version="[14.0,99.9]"/>
+    </HostList>
+    <LocaleList>
+      <Locale Code="All"/>
+    </LocaleList>
+    <RequiredRuntimeList>
+      <RequiredRuntime Name="CSXS" Version="9.0"/>
+    </RequiredRuntimeList>
+  </ExecutionEnvironment>
+
+  <DispatchInfoList>
+    <Extension Id="com.nehade.aether.panel">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./client/index.html</MainPath>
+          <CEFCommandLine>
+            <!-- Node нужен по делу: панель читает файл настроек и запускает
+                 AetherDiagnose.exe. Распаковывать видео на HTML нельзя ни
+                 в каком виде, поэтому проверку делает та же программа, что
+                 и окно, а панель только показывает её ответ. -->
+            <Parameter>--enable-nodejs</Parameter>
+            <Parameter>--mixed-context</Parameter>
+          </CEFCommandLine>
+        </Resources>
+        <Lifecycle>
+          <AutoVisible>true</AutoVisible>
+        </Lifecycle>
+        <UI>
+          <Type>Panel</Type>
+          <Menu>Aether</Menu>
+          <Geometry>
+            <Size><Height>640</Height><Width>420</Width></Size>
+            <MinSize><Height>360</Height><Width>320</Width></MinSize>
+          </Geometry>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+  </DispatchInfoList>
+</ExtensionManifest>

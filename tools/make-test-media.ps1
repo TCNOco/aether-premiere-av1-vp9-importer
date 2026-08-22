@@ -148,6 +148,43 @@ Make "hdr_pq.mkv" @(
 
 Remove-Item (Join-Path $OutDir "hdr_pq_temp.mp4") -ErrorAction SilentlyContinue
 
+# ---------------------------------------------------------------------------
+# Пробные клипы для диагностики.
+#
+# Отдельно от проверочных, и не по прихоти: эти уезжают ПОЛЬЗОВАТЕЛЮ вместе
+# с плагином, поэтому должны быть маленькими. Проверяется путь распаковки,
+# а не разрешение, так что двух секунд и 320x180 хватает — весь набор меньше
+# мегабайта. Проверочные для этого не годятся: один только av1_8bit.mp4
+# весит почти столько же, сколько все пять вместе.
+$Samples = Join-Path $OutDir "samples"
+New-Item -ItemType Directory -Force $Samples | Out-Null
+
+function Sample($name, $ffargs) {
+    $path = Join-Path $Samples $name
+    if (Test-Path $path) { Write-Host "  have  samples\$name"; return }
+    Write-Host "  make  samples\$name"
+    & $FFmpeg -y -hide_banner -loglevel error @ffargs $path
+    if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed on samples\$name" }
+}
+
+Sample "av1.mp4" @(
+    "-f","lavfi","-i","testsrc2=size=320x180:rate=30:duration=2",
+    "-f","lavfi","-i","sine=frequency=440:duration=2",
+    "-map","0:v","-map","1:a",
+    "-c:v","libsvtav1","-preset","10","-crf","45","-g","30","-c:a","aac")
+
+# Остальные четыре повторяют проверочные: они и так небольшие, а собирать
+# второй раз то же самое незачем.
+foreach ($pair in @(
+    @("av1_10bit.mp4",  "av1_10.mp4"),
+    @("vp9.webm",       "vp9.webm"),
+    @("vfr.mkv",        "vfr.mkv"),
+    @("audio_only.mka", "opus.mka"))) {
+    $from = Join-Path $OutDir $pair[0]
+    $to   = Join-Path $Samples $pair[1]
+    if (-not (Test-Path $to)) { Copy-Item $from $to -Force }
+}
+
 # H.264, the most ordinary file there is - must be handed back untouched.
 # libopenh264 rather than libx264: the LGPL FFmpeg build has no x264 in it.
 Make "h264.mp4" @(

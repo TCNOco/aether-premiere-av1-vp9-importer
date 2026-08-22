@@ -20,6 +20,11 @@ if not exist "%~dp0..\build\Release\Aether.prm" (
     exit /b 1
 )
 
+REM The panel has to be signed before the installer can pick it up.
+REM Premiere shows no unsigned extension - silently, with no message at all.
+powershell -ExecutionPolicy Bypass -File "%~dp0make-panel.ps1"
+if errorlevel 1 exit /b 1
+
 "%ISCC%" "%~dp0Aether.iss"
 if errorlevel 1 exit /b 1
 

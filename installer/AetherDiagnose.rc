@@ -1,0 +1,38 @@
+// Ресурсы AetherDiagnose.exe — движка диагностики без окна.
+//
+// Ни значка, ни манифеста: программа консольная, окна не рисует, и ни стили
+// элементов, ни осведомлённость о DPI ей не нужны. Нужна только запись
+// о версии — чтобы правый клик по файлу показывал, что это за сборка,
+// а не пустоту.
+
+#include "AV1Version.h"
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION    AETHER_VERSION_COMMA
+    PRODUCTVERSION AETHER_VERSION_COMMA
+    FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+    FILEFLAGS      0x0L
+    FILEOS         VOS_NT_WINDOWS32
+    FILETYPE       VFT_APP
+    FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "neoHaDe"
+            VALUE "FileDescription",  "Aether diagnostics engine"
+            VALUE "FileVersion",      AETHER_VERSION_STR
+            VALUE "InternalName",     "AetherDiagnose"
+            VALUE "LegalCopyright",   "Apache License 2.0"
+            VALUE "OriginalFilename", "AetherDiagnose.exe"
+            VALUE "ProductName",      "Aether"
+            VALUE "ProductVersion",   AETHER_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

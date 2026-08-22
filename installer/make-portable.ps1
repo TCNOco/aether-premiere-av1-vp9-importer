@@ -32,7 +32,29 @@ New-Item -ItemType Directory -Force $folder | Out-Null
 
 # Ровно то же, что кладёт установщик, файл в файл
 Copy-Item $prm                                        $folder
-Copy-Item (Join-Path $release "AetherSettings.exe")   $folder
+Copy-Item (Join-Path $release "Aether.exe")           $folder
+
+# Пробные клипы для диагностики. Без них проверка распаковки пропускается,
+# и отчёт выходит наполовину пустым.
+# Берутся из build\media\samples, а НЕ из папки сборки: её этот же скрипт
+# чистит перед укладкой, и клипы исчезали бы за миг до того, как понадобятся.
+Copy-Item (Join-Path $release "AetherDiagnose.exe") $folder
+
+# Панель для меню «Расширения». В архиве она лежит отдельной папкой:
+# копировать её надо не туда, куда всё остальное, и INSTALL.txt это объясняет.
+$panel = Join-Path $Root "build\panel\com.nehade.aether"
+if (Test-Path $panel) {
+    Copy-Item $panel (Join-Path $staging "com.nehade.aether") -Recurse -Force
+} else {
+    throw "нет собранной панели: $panel (installer\make-panel.ps1)"
+}
+
+$samples = Join-Path $Root "build\media\samples"
+if (Test-Path $samples) {
+    Copy-Item $samples (Join-Path $folder "samples") -Recurse -Force
+} else {
+    throw "нет пробных клипов: $samples"
+}
 Copy-Item (Join-Path $PSScriptRoot "aether.ico")      $folder
 
 foreach ($dll in "avcodec-62.dll", "avformat-62.dll", "avutil-60.dll",
@@ -74,15 +96,27 @@ HOW TO INSTALL BY HAND
    and is shared by all of its applications. That is also why one copy is
    enough for Premiere, After Effects and Media Encoder together.
 
-4. Start Premiere and drag an AV1 or VP9 file onto the timeline.
+4. Copy the "com.nehade.aether" folder from this archive into:
+
+       C:\Program Files (x86)\Common Files\Adobe\CEP\extensions\
+
+   That one is optional. It adds Window -> Extensions -> Aether inside
+   Premiere: the same settings and the same diagnostics, without leaving
+   the application. The plug-in decodes video with or without it.
+
+   The panel is signed, so no developer mode is needed. Do not edit the
+   files inside it - any change breaks the signature and Premiere then
+   stops showing the panel, silently.
+
+5. Start Premiere and drag an AV1 or VP9 file onto the timeline.
 
 The files must stay together. The plug-in loads the FFmpeg libraries from its
 own folder by full path; on their own they are not found.
 
 TO REMOVE IT, delete the folder.
 
-DECODING ON THE CPU OR THE GPU is switched by AetherSettings.exe inside the
-folder. The default is the CPU, and that is a measurement rather than a
+DECODING ON THE CPU OR THE GPU is switched by Aether.exe inside the
+folder, or by the panel if you installed it. The default is the CPU, and that is a measurement rather than a
 preference - see the README in the repository.
 
 IF SOMETHING GOES WRONG, the log is here:
@@ -111,7 +145,19 @@ refuses. Attach it to a bug report.
    для всех её приложений. Поэтому же одной копии хватает сразу на Premiere,
    After Effects и Media Encoder.
 
-4. Запустите Premiere и перетащите файл AV1 или VP9 на таймлайн.
+4. Скопируйте папку "com.nehade.aether" из этого архива в:
+
+       C:\Program Files (x86)\Common Files\Adobe\CEP\extensions\
+
+   Это по желанию. Она добавляет в Premiere пункт Окно -> Расширения ->
+   Aether: те же настройки и та же диагностика, не выходя из программы.
+   Видео плагин распаковывает и без неё.
+
+   Панель подписана, режим разработчика не нужен. Не правьте файлы внутри
+   неё: любая правка ломает подпись, и Premiere перестаёт показывать
+   панель - молча, без единого сообщения.
+
+5. Запустите Premiere и перетащите файл AV1 или VP9 на таймлайн.
 
 Файлы должны лежать вместе. Плагин загружает библиотеки ffmpeg из своей папки
 по полному пути; по отдельности они не находятся.
@@ -119,7 +165,7 @@ refuses. Attach it to a bug report.
 ЧТОБЫ УДАЛИТЬ, удалите папку.
 
 РАСПАКОВКА ПРОЦЕССОРОМ ИЛИ ВИДЕОКАРТОЙ переключается программой
-AetherSettings.exe из этой же папки. По умолчанию процессором, и это по
+Aether.exe из этой же папки или панелью, если вы её поставили. По умолчанию процессором, и это по
 замеру, а не по вкусу - подробности в README репозитория.
 
 ЕСЛИ ЧТО-ТО НЕ ТАК, журнал лежит здесь:

@@ -31,6 +31,7 @@ The short answer: Windows, and an Adobe application. Nothing else.
 | **NVIDIA** | optional: `av1_cuvid`, `vp9_cuvid`, tested on an RTX 5080 |
 | **Intel QSV, AMD AMF** | not tried — the code is there, the hardware was not |
 | **Async delivery** | on. Worth 5–12% on the GPU path, nothing on the CPU; can be switched off |
+| **Panel in Premiere** | optional: Window → Extensions → Aether |
 | **Privileges** | administrator, to install only |
 
 The plug-in installs into the folder Adobe applications share, so all of them pick
@@ -674,6 +675,69 @@ for comparison: `expected.png` and `if-ignored.png`.
 
 No HDR display is needed: on a Rec.709 sequence the host flattens HDR to SDR
 itself, and it is that result one should be looking at.
+
+### Diagnostics: one tool, two doors
+
+There used to be exactly one way to tell whether the plug-in was installed:
+drag a file onto the timeline and see whether it opened. A poor way to learn
+anything, and a worse way to report a problem.
+
+There is now a report: the system, every installed version of the Adobe
+applications, the state of the plug-in, which decoders FFmpeg actually has, a
+run over five bundled clips — and **a check of the file that will not open**.
+
+That last one is the point. A report saying "all fine" to somebody whose file
+will not open is worse than no report: it answers a question nobody asked. The
+file goes through the same checks as the bundled ones, plus what the container
+actually holds — codec, bit depth, colour, frame rate, tracks.
+
+Seeking is checked with three requests: frame 0, the middle, frame 0 again. The
+first frame is nearly always delivered because it is a keyframe; what breaks is
+coming back.
+
+**Copy report** replaces the home folder with `%USERPROFILE%`, the user name
+with `<user>` and the machine name with `<machine>`. The report goes into a
+public issue, and without that we would be teaching people to publish more than
+they meant to.
+
+There are two doors to it, and both are needed:
+
+```
+Aether.exe             the window next to the plug-in
+Window → Extensions    the panel inside Premiere
+```
+
+The panel is more convenient; the window is more dependable. Diagnostics are
+wanted exactly when Premiere will not start because of a driver — and a panel
+inside Premiere is useless at that moment.
+
+Only one program does the work either way. The panel is HTML and cannot decode
+video at all, so it runs `AetherDiagnose.exe` — the same engine the window uses
+— and displays its answer. Writing the checks a second time in JavaScript would
+have created a second truth, and two truths drift apart.
+
+### The panel has to be signed
+
+Premiere does not show unsigned extensions. Silently: no message, no menu
+entry, nothing in a log. The only way around it is developer mode
+(`PlayerDebugMode`), which an ordinary user does not have and should not need.
+
+A self-signed certificate is accepted by Adobe — unlike Windows SmartScreen,
+where self-signing is worth nothing — and it costs nothing:
+
+```
+installer\make-cert.ps1     certificate and signing tool
+installer\make-panel.ps1    signing and verification
+```
+
+Timestamping is not optional. Without it the signature dies with the
+certificate, and one day the panel would silently stop appearing for
+**everybody** — no update, no reason, no message.
+
+The developer's own machine lies in the comforting direction here: developer
+mode is usually on, and the panel shows up even unsigned. That is why
+`make-panel.ps1` runs `-verify` — the one check that does not depend on the
+settings of the machine doing the build.
 
 ### The frame cache
 
