@@ -7,6 +7,20 @@
 #
 # The media is generated on the spot by FFmpeg from synthetic sources. No sample
 # files are committed, and none are downloaded from anywhere.
+#
+# NOTHING HERE FLOATS, and that is deliberate. A check that can go from green to
+# red without a single line of code changing is not a check - it reports the
+# weather. Every moving part below is nailed to a version:
+#
+#   * the runner image, because "windows-latest" is a label GitHub re-points at
+#     a new Windows Server release when it feels like it;
+#   * the FFmpeg build, because that "latest" tag is rebuilt every single day;
+#   * the actions, by commit hash rather than by tag, because a tag can be
+#     moved and a hash cannot.
+#
+# The cost is that these have to be raised by hand. That is the point: raising
+# them becomes a commit, with a date and a reason, instead of something that
+# happens to you overnight.
 
 name: core checks
 
@@ -18,22 +32,31 @@ on:
 
 jobs:
   core:
-    runs-on: windows-latest
+    # Pinned, not "windows-latest". Raise deliberately after checking the build
+    # still passes on the new image.
+    runs-on: windows-2022
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       # The n8.1 line, the same one the plug-in links against: the DLL names it
       # loads (avcodec-62 and friends) belong to that major version, so a jump
       # to 9.0 would not be a newer build but a different one.
+      #
+      # A dated build, not the "latest" tag: that tag is rebuilt daily, so the
+      # same commit could pass on Monday and fail on Tuesday with nobody having
+      # touched anything. This exact build is the one the last known-good run
+      # used.
       - name: Fetch FFmpeg
         run: |
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-lgpl-shared-8.1.zip"
+          $tag = "autobuild-2026-08-22-12-58"
+          $zip = "ffmpeg-n8.1.2-44-g7c533d0f86-win64-lgpl-shared-8.1.zip"
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$tag/$zip"
           Invoke-WebRequest $url -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
           $inner = (Get-ChildItem ffmpeg-tmp -Directory | Select-Object -First 1).FullName
           Move-Item $inner ffmpeg
-          Get-ChildItem ffmpeg | Select-Object Name
+          .\ffmpeg\bin\ffmpeg.exe -hide_banner -version | Select-Object -First 1
 
       - name: Build the core
         run: .\build-test.bat
@@ -50,7 +73,7 @@ jobs:
 
       - name: Keep the log if something went wrong
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: media
           path: build/media
