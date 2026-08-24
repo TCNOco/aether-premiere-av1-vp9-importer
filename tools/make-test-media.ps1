@@ -44,6 +44,18 @@ Make "av1_8bit.mp4" @(
     "-map","0:v","-map","1:a","-map","2:a",
     "-c:v","libsvtav1","-preset","12","-crf","50","-g","60","-c:a","aac")
 
+# Two audio tracks that are NOT alike: stereo first, mono second, and different
+# lengths. Every other multi-track file here has identical tracks, and identical
+# tracks hide a whole class of bug - the importer reporting track 0's channel
+# count, rate and duration for every stream. That is exactly what it did.
+Make "audio_tracks_differ.mp4" @(
+    "-f","lavfi","-i","testsrc2=size=320x180:rate=30:duration=10",
+    "-f","lavfi","-i","sine=frequency=440:duration=10:sample_rate=48000",
+    "-f","lavfi","-i","sine=frequency=880:duration=6:sample_rate=48000",
+    "-map","0:v","-map","1:a","-map","2:a",
+    "-ac:a:0","2","-ac:a:1","1",
+    "-c:v","libsvtav1","-preset","12","-crf","50","-g","30","-c:a","aac")
+
 # AV1, 10-bit, a gradient - banding shows up here if the depth is lost
 Make "av1_10bit.mp4" @(
     "-f","lavfi","-i","gradients=size=640x360:rate=30:duration=8:c0=black:c1=white:type=linear",

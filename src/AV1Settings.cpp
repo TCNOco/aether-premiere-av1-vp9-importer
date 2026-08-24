@@ -139,15 +139,19 @@ bool PreferHardware()
     return si.dwNumberOfProcessors < kSoftwareNeedsThreads;
 }
 
-// Асинхронная выдача. По умолчанию включена — выключенная возможность никем
-// не проверяется и тихо гниёт, — но выключатель есть, потому что это отдельный
-// поток внутри чужого процесса, и если он однажды окажется виноват, человек
-// должен уметь его отключить, не удаляя плагин.
-bool AsyncDeliveryEnabled()
+namespace {
+
+// Выключатель «включено, пока явно не выключили»: переменная среды главнее
+// файла, как и у выбора декодера.
+//
+// Вынесено в одно место, потому что таких выключателей стало два, а разбор
+// строки у них был бы посимвольно одинаковый. Второй копии достаточно, чтобы
+// они разъехались — и разъезжаются такие двойники в сторону редкого случая,
+// где никто не смотрит.
+bool EnabledUnlessTurnedOff(const wchar_t* envName, const char* key)
 {
-    // Переменная среды главнее файла, как и у выбора декодера
     wchar_t env[64] = {};
-    if (GetEnvironmentVariableW(L"AETHER_ASYNC", env, 64) > 0) {
+    if (GetEnvironmentVariableW(envName, env, 64) > 0) {
         return !LooksDisabled(env);
     }
 
@@ -157,14 +161,15 @@ bool AsyncDeliveryEnabled()
     FILE* f = nullptr;
     if (_wfopen_s(&f, path, L"rt") != 0 || !f) return true;
 
+    const size_t keyLen = strlen(key);
     bool enabled = true;
     char line[256];
     while (fgets(line, sizeof(line), f)) {
         char* p = line;
         while (*p == ' ' || *p == '\t') ++p;
-        if (_strnicmp(p, "async", 5) != 0) continue;
+        if (_strnicmp(p, key, keyLen) != 0) continue;
 
-        p += 5;
+        p += keyLen;
         while (*p == ' ' || *p == '\t') ++p;
         if (*p != '=') continue;
         ++p;
@@ -180,6 +185,27 @@ bool AsyncDeliveryEnabled()
     }
     fclose(f);
     return enabled;
+}
+
+} // namespace
+
+// Асинхронная выдача. По умолчанию включена — выключенная возможность никем
+// не проверяется и тихо гниёт, — но выключатель есть, потому что это отдельный
+// поток внутри чужого процесса, и если он однажды окажется виноват, человек
+// должен уметь его отключить, не удаляя плагин.
+bool AsyncDeliveryEnabled()
+{
+    return EnabledUnlessTurnedOff(L"AETHER_ASYNC", "async");
+}
+
+// Выдача кадров без перевода в RGB. По умолчанию включена по той же причине,
+// что и асинхронная, и выключатель есть по той же: путь новый, а решение
+// «беру или не беру» принимает хост, и предсказать его поведение на всех
+// версиях Adobe мы не можем. Если где-то цвет уедет, человек должен уметь
+// вернуться на прежний путь строкой в файле, а не удалением плагина.
+bool YuvEnabled()
+{
+    return EnabledUnlessTurnedOff(L"AETHER_YUV", "yuv");
 }
 
 } // namespace av1imp

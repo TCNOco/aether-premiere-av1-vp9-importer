@@ -21,6 +21,9 @@ extern "C" {
 
 namespace av1imp {
 
+// Счётчик живых декодеров видео на весь процесс, см. Decoder::Budget()
+std::atomic<int> Decoder::videoDecoders_{0};
+
 namespace {
 
 std::string AvErr(int err) {
@@ -310,6 +313,17 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
 
     info_.fullRange = (st->codecpar->color_range == AVCOL_RANGE_JPEG);
 
+    // Положение цветности. Нужно только выдаче без пересчёта: пока мы сами
+    // переводим в RGB, swscale разбирается с этим внутри себя, а вот отдавая
+    // цветность как есть, надо сказать хосту, где она стоит.
+    //
+    // Не указано — считаем «слева»: так лежит цветность в MPEG-2, H.264 и
+    // почти во всём остальном, и AV1 при неуказанном положении подразумевает
+    // то же. По центру она стоит у MPEG-1 и JPEG, то есть у древностей.
+    info_.chromaLocation = (st->codecpar->chroma_location != AVCHROMA_LOC_UNSPECIFIED)
+                           ? st->codecpar->chroma_location
+                           : AVCHROMA_LOC_LEFT;
+
     // Глубину и прозрачность выясняем ДО открытия декодера: от них зависит,
     // какой декодер вообще годится.
     //
@@ -395,14 +409,19 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
         return false;
     }
 
-    // Бюджет кэша считаем от разрешения, а не берём константой: кадр 4K весит
-    // вчетверо больше, чем 1440p, и фиксированные 256 МБ вмещали бы уже не
-    // полсекунды видео, а пятую часть. Цель — около секунды при 60 кадрах/с,
-    // с потолком, чтобы не отъедать память у самого монтажа.
+    // Сколько кэша хочет ЭТОТ клип: около секунды видео. Считаем от разрешения,
+    // а не константой — кадр 4K весит вчетверо больше, чем 1440p, и фиксированные
+    // 256 МБ вмещали бы уже не полсекунды, а пятую часть.
+    //
+    // Прежде здесь стоял ещё и нижний порог в 128 МБ, и он был вреден: клипу
+    // 640x360 нужно 20 МБ на секунду, а выдавалось 128 — вшестеро больше, чем
+    // он просил. Порог убран; сколько просит, столько и хочет.
+    //
+    // Сколько он ПОЛУЧИТ, решает уже общий предел на процесс — см. Budget().
     const size_t bytesPerFrame = (size_t)info_.width * info_.height * 3 / 2;  // NV12
-    const size_t wanted = bytesPerFrame * 60;
-    cacheBudget_ = std::min<size_t>(std::max<size_t>(wanted, 128u * 1024 * 1024),
-                                    512u * 1024 * 1024);
+    cacheBudget_ = bytesPerFrame * 60;
+    videoDecoders_.fetch_add(1, std::memory_order_relaxed);
+    countedAsVideo_ = true;
 
     lastDecodedFrame_ = -1;
     eofReached_ = false;
@@ -566,6 +585,44 @@ void Decoder::ClearCache() {
     cacheBytes_ = 0;
 }
 
+// Сколько памяти под кэш достаётся ЭТОМУ клипу прямо сейчас.
+//
+// Раньше бюджет считался только от разрешения и был у каждого клипа свой —
+// то есть общего предела не было вовсе. На 1440p это 331 МБ, и десять клипов
+// на таймлайне давали три с лишним гигабайта. Premiere держит свой кэш поверх
+// нашего, так что отъедать столько нельзя.
+//
+// Теперь общий предел на процесс делится между живыми декодерами видео.
+// Деление грубое, поровну, и это сознательно: узнать, какой клип сейчас
+// нужнее, нам неоткуда — хост про это не сообщает, а угадывать по времени
+// последнего запроса значит отдавать память тому, кто просто громче стучится.
+//
+// Предел меняется переменной среды AETHER_CACHE_MB (0 — вернуть прежнее
+// поведение без общего потолка).
+size_t Decoder::Budget() const {
+    static const size_t kCeiling = [] {
+        const char* env = std::getenv("AETHER_CACHE_MB");
+        if (env) {
+            const long mb = strtol(env, nullptr, 10);
+            if (mb >= 0) return (size_t)mb * 1024 * 1024;
+        }
+        return (size_t)512 * 1024 * 1024;
+    }();
+
+    if (kCeiling == 0) return cacheBudget_;      // потолок отключён намеренно
+
+    const int live = videoDecoders_.load(std::memory_order_relaxed);
+    size_t share = kCeiling / (live > 0 ? (size_t)live : 1u);
+
+    // Нижняя граница: кэш меньше нескольких кадров бесполезен — он не покроет
+    // даже один шаг назад, зато будет тратить время на вытеснение.
+    const size_t bytesPerFrame = (size_t)info_.width * info_.height * 3 / 2;
+    const size_t floor = bytesPerFrame * 4;
+    if (share < floor) share = floor;
+
+    return (cacheBudget_ < share) ? cacheBudget_ : share;
+}
+
 // Сохранить кадр в кэше. Кадр с видеокарты сначала переносится в обычную память:
 // держать полсотни кадров в памяти видеокарты нельзя, её быстро не хватит.
 void Decoder::StoreInCache(int64_t index, AVFrame* src) {
@@ -595,8 +652,13 @@ void Decoder::StoreInCache(int64_t index, AVFrame* src) {
     }
 
     // Тесним самые дальние от текущей позиции: при отматывании назад
-    // пригодятся ближайшие
-    while (cacheBytes_ + size > cacheBudget_ && !frameCache_.empty()) {
+    // пригодятся ближайшие.
+    //
+    // Предел спрашиваем на каждом кадре, а не считаем один раз при открытии:
+    // клипы на таймлайне появляются и закрываются по ходу работы, и доля
+    // каждого меняется вместе с их числом.
+    const size_t budget = Budget();
+    while (cacheBytes_ + size > budget && !frameCache_.empty()) {
         auto first = frameCache_.begin();
         auto last  = std::prev(frameCache_.end());
         auto drop  = (index - first->first) >= (last->first - index) ? first : last;
@@ -614,9 +676,17 @@ void Decoder::StoreInCache(int64_t index, AVFrame* src) {
 }
 
 void Decoder::CloseLocked() {
+    // Снимаемся со счёта раньше всего остального: доля памяти освобождается
+    // для соседних клипов сразу, а не после закрытия контекстов
+    if (countedAsVideo_) {
+        videoDecoders_.fetch_sub(1, std::memory_order_relaxed);
+        countedAsVideo_ = false;
+    }
+
     ClearCache();
     CloseAudioLocked();
     if (sws_)      { sws_freeContext(sws_); sws_ = nullptr; }
+    if (swsYuv_)   { sws_freeContext(swsYuv_); swsYuv_ = nullptr; }
     if (packet_)   { av_packet_free(&packet_); }
     if (frame_)    { av_frame_free(&frame_); }
     if (swFrame_)  { av_frame_free(&swFrame_); }
@@ -968,6 +1038,104 @@ bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW,
     return true;
 }
 
+namespace {
+
+// Построчное копирование с учётом знака шага.
+//
+// Отрицательный шаг означает, что буфер идёт снизу вверх, и dst указывает
+// на первую строку в порядке записи, а не на верхнюю строку картинки.
+// Умножение на ptrdiff_t обязательно: при int-арифметике кадр 4K
+// с отрицательным шагом переполняется на середине.
+void CopyPlane(uint8_t* dst, int dstStride,
+               const uint8_t* src, int srcStride,
+               int widthBytes, int height) {
+    for (int y = 0; y < height; ++y) {
+        memcpy(dst + (ptrdiff_t)y * dstStride,
+               src + (ptrdiff_t)y * srcStride,
+               (size_t)widthBytes);
+    }
+}
+
+} // namespace
+
+bool Decoder::CopyToYUV420(AVFrame* src,
+                           uint8_t* dstY, int strideY,
+                           uint8_t* dstU, int strideU,
+                           uint8_t* dstV, int strideV,
+                           int dstW, int dstH) {
+    AVFrame* srcFrame = src;
+
+    // Кадр с видеокарты по-прежнему надо забрать в обычную память: хост
+    // принимает только её. Здесь это тем более заметно — переносить остаётся
+    // столько же, а пересчёта, который раньше был главной статьёй, больше нет.
+    if (src->hw_frames_ctx) {
+        const auto t0 = std::chrono::steady_clock::now();
+        av_frame_unref(swFrame_);
+        if (av_hwframe_transfer_data(swFrame_, src, 0) < 0) {
+            SetError("cannot transfer frame from GPU memory");
+            return false;
+        }
+        srcFrame = swFrame_;
+        stats_.transferMs += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0).count();
+    }
+
+    // Та же вторая линия обороны, что и у пересчёта в BGRA: кадр без формата
+    // или без размеров swscale не отвергает, а роняет процесс по av_assert0.
+    if (srcFrame->width <= 0 || srcFrame->height <= 0 ||
+        srcFrame->format < 0 ||
+        !av_pix_fmt_desc_get((AVPixelFormat)srcFrame->format)) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "decoded frame is unusable: %dx%d, pixel format %d",
+                 srcFrame->width, srcFrame->height, srcFrame->format);
+        SetError(msg);
+        return false;
+    }
+
+    const auto tConv = std::chrono::steady_clock::now();
+
+    // Размеры плоскостей цветности округляются ВВЕРХ: у кадра нечётной высоты
+    // строк цветности всё равно на одну больше, чем даёт деление нацело,
+    // и без округления последняя осталась бы незаполненной полосой.
+    const int chromaW = (dstW + 1) / 2;
+    const int chromaH = (dstH + 1) / 2;
+
+    // Ради чего всё затевалось: если декодер уже отдал ровно то, что просит
+    // хост, работы нет вовсе — только перенос строк. Ни матрицы, ни
+    // интерполяции, ни свёртки в RGB.
+    if (srcFrame->format == AV_PIX_FMT_YUV420P &&
+        srcFrame->width == dstW && srcFrame->height == dstH) {
+        CopyPlane(dstY, strideY, srcFrame->data[0], srcFrame->linesize[0], dstW, dstH);
+        CopyPlane(dstU, strideU, srcFrame->data[1], srcFrame->linesize[1], chromaW, chromaH);
+        CopyPlane(dstV, strideV, srcFrame->data[2], srcFrame->linesize[2], chromaW, chromaH);
+    } else {
+        // Остальные случаи: кадр с видеокарты приезжает NV12 (цветность
+        // вперемешку), а при пониженном качестве воспроизведения хост просит
+        // кадр поменьше. И то и другое умеет swscale — но это по-прежнему
+        // работа внутри YUV, без перевода в RGB, то есть заметно дешевле
+        // прежнего пути.
+        swsYuv_ = sws_getCachedContext(swsYuv_,
+                                       srcFrame->width, srcFrame->height,
+                                       (AVPixelFormat)srcFrame->format,
+                                       dstW, dstH, AV_PIX_FMT_YUV420P,
+                                       SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!swsYuv_) {
+            SetError("cannot create plane converter");
+            return false;
+        }
+
+        uint8_t* dstData[4]    = { dstY, dstU, dstV, nullptr };
+        int      dstLinesize[4] = { strideY, strideU, strideV, 0 };
+        sws_scale(swsYuv_, srcFrame->data, srcFrame->linesize, 0, srcFrame->height,
+                  dstData, dstLinesize);
+    }
+
+    stats_.convertMs += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - tConv).count();
+    ++stats_.frames;
+    return true;
+}
+
 void Decoder::LimitCacheToFrames(int frames) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (frames <= 0 || info_.width <= 0 || info_.height <= 0) return;
@@ -994,22 +1162,8 @@ bool Decoder::PrefetchFrame(int64_t frameIndex) {
     return ok;
 }
 
-bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
-                           int dstWidth, int dstHeight, FrameFormat format) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!IsOpen() || !dst) {
-        SetError("file is not open");
-        return false;
-    }
-    if (!info_.hasVideo || !codec_) {
-        SetError("this file has no video");
-        return false;
-    }
+AVFrame* Decoder::AcquireFrameLocked(int64_t frameIndex) {
     if (frameIndex < 0) frameIndex = 0;
-
-    // Ноль означает «как в файле» — удобно для проверочных программ
-    if (dstWidth  <= 0) dstWidth  = info_.width;
-    if (dstHeight <= 0) dstHeight = info_.height;
 
     // Отматывание назад — единственный случай, когда кэш окупается: при чтении
     // вперёд кадры и так идут подряд, а кэш только тратил бы память
@@ -1019,7 +1173,7 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
     auto cached = frameCache_.find(frameIndex);
     if (cached != frameCache_.end()) {
         lastFrameTimeSec_ = FrameTimeSec(cached->second);
-        return ConvertToBGRA(cached->second, dst, dstStride, dstWidth, dstHeight, format);
+        return cached->second;
     }
 
     cacheFill_ = backward;
@@ -1032,9 +1186,75 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
     // При обрыве в конце файла DecodeUntil отдаёт последний удачно
     // раскодированный кадр и сообщает об успехе — на таймлайне это лучше
     // чёрного провала, а Premiere всё равно не запрашивает кадры за длиной.
-    if (!ok) return false;
+    if (!ok) return nullptr;
     lastFrameTimeSec_ = FrameTimeSec(frame_);
-    return ConvertToBGRA(frame_, dst, dstStride, dstWidth, dstHeight, format);
+    return frame_;
+}
+
+bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
+                           int dstWidth, int dstHeight, FrameFormat format) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!IsOpen() || !dst) {
+        SetError("file is not open");
+        return false;
+    }
+    if (!info_.hasVideo || !codec_) {
+        SetError("this file has no video");
+        return false;
+    }
+
+    // Ноль означает «как в файле» — удобно для проверочных программ
+    if (dstWidth  <= 0) dstWidth  = info_.width;
+    if (dstHeight <= 0) dstHeight = info_.height;
+
+    AVFrame* src = AcquireFrameLocked(frameIndex);
+    if (!src) return false;
+    return ConvertToBGRA(src, dst, dstStride, dstWidth, dstHeight, format);
+}
+
+bool Decoder::CanDeliverYUV420() const {
+    if (!info_.hasVideo) return false;
+
+    // Прозрачность в YUV хранить негде — такие файлы идут в BGRA целиком
+    if (info_.hasAlpha) return false;
+
+    // Десять бит у Premiere только двухплоскостные (10u_as16u), а доступ
+    // к плоскостям в SDK описан для восьмибитных. Оставлено на потом:
+    // сперва надо убедиться, что хост берёт хотя бы восьмибитный.
+    if (info_.bitDepth > 8) return false;
+
+    // BT.2020 в восьми битах у Premiere нет вовсе — ни одной константы.
+    // Файл редкий, но молча отдать его как BT.709 значило бы соврать о цвете.
+    if (info_.colourMatrix != AVCOL_SPC_BT709 &&
+        info_.colourMatrix != AVCOL_SPC_BT470BG &&
+        info_.colourMatrix != AVCOL_SPC_SMPTE170M) {
+        return false;
+    }
+    return true;
+}
+
+bool Decoder::GetFrameYUV420(int64_t frameIndex,
+                             uint8_t* dstY, int strideY,
+                             uint8_t* dstU, int strideU,
+                             uint8_t* dstV, int strideV,
+                             int dstWidth, int dstHeight) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!IsOpen() || !dstY || !dstU || !dstV) {
+        SetError("file is not open");
+        return false;
+    }
+    if (!info_.hasVideo || !codec_) {
+        SetError("this file has no video");
+        return false;
+    }
+
+    if (dstWidth  <= 0) dstWidth  = info_.width;
+    if (dstHeight <= 0) dstHeight = info_.height;
+
+    AVFrame* src = AcquireFrameLocked(frameIndex);
+    if (!src) return false;
+    return CopyToYUV420(src, dstY, strideY, dstU, strideU, dstV, strideV,
+                        dstWidth, dstHeight);
 }
 
 // ---------------------------------------------------------------------------
@@ -1049,6 +1269,7 @@ void Decoder::CloseAudioLocked() {
     if (audioFmt_)    { avformat_close_input(&audioFmt_); }
 
     audioStreamIndex_ = -1;
+    audioOrdinal_     = -1;
     pending_.clear();
     pendingOffset_ = 0;
     pendingCount_  = 0;
@@ -1136,6 +1357,7 @@ bool Decoder::OpenAudio(int ordinal) {
 
     pending_.assign(info_.audioChannels, std::vector<float>());
     audioCursor_ = -1;
+    audioOrdinal_ = ordinal;   // запоминаем ПОСЛЕ успеха: на отказе он остаётся -1
     return true;
 }
 

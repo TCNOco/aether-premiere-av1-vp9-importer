@@ -13,6 +13,7 @@
 #include "AV1Log.h"
 #include "AV1Settings.h"
 
+#include <mutex>
 #include <string>
 
 // ---------------------------------------------------------------------------
@@ -50,10 +51,29 @@ void CopyUtf16(prUTF16Char* dst, size_t dstCount, const prUTF16Char* src)
     dst[i] = 0;
 }
 
+// Замок на ленивое открытие — общий на весь плагин.
+//
+// Один и тот же экземпляр импортёра Premiere зовёт из РАЗНЫХ потоков разом:
+// конформирование звука идёт в своём, показ клипа просит кадры в другом, и оба
+// приходят к потоку 0, где живут и видео, и первая дорожка. Обе функции ниже
+// проверяют «уже открыто?» и открывают, если нет, — то есть классическая
+// проверка-и-действие, а между ними успевает вклиниться сосед. Два потока
+// входят в открытие вместе, второй сносит построенное первым (Open и OpenAudio
+// начинают со сноса прежнего состояния), и запрос возвращает отказ. Для
+// пользователя это «An unspecified error occurred while performing a conform
+// action» и пропавшая дорожка звука, а при повторном импорте всё хорошо —
+// потому что совпасть по времени во второй раз не обязано.
+//
+// Замок один на всех, а не по экземпляру: в ImporterLocalRec его не положить,
+// Premiere выдаёт под неё сырую память без вызова конструкторов. Цена нулевая —
+// сюда заходят один раз на файл, дальше срабатывает быстрая проверка внутри.
+std::mutex g_openMutex;
+
 // Premiere может спросить сведения о файле раньше, чем откроет его,
 // поэтому декодер создаём по требованию из сохранённого пути.
 bool EnsureDecoder(ImporterLocalRecPtr ldata)
 {
+    std::lock_guard<std::mutex> lock(g_openMutex);
     if (ldata->decoder && ldata->decoder->IsOpen()) return true;
 
     if (!ldata->decoder) ldata->decoder = new av1imp::Decoder();
@@ -71,8 +91,22 @@ bool EnsureDecoder(ImporterLocalRecPtr ldata)
 // не у всех потоков и не сразу
 bool EnsureAudio(ImporterLocalRecPtr ldata)
 {
+    std::lock_guard<std::mutex> lock(g_openMutex);
     if (!ldata->decoder) return false;
-    if (ldata->decoder->HasAudio()) return true;
+
+    // Сравниваем НОМЕР дорожки, а не просто «звук уже открыт».
+    //
+    // Premiere перебирает потоки, зовя imGetInfo8 с номерами 0,1,2,3 на одной
+    // и той же записи, и номер дорожки при этом переписывается. Прежняя проверка
+    // «HasAudio?» со второго раза отвечала «да» — и сведения о дорожках 1..N
+    // брались от дорожки 0: число каналов, частота, длина.
+    //
+    // На записях OBS не видно, там все дорожки одинаковые. Вылезло бы на файле,
+    // где дорожки разной длины или разной раскладки каналов.
+    if (ldata->decoder->HasAudio() &&
+        ldata->decoder->OpenAudioTrack() == ldata->audioTrack) {
+        return true;
+    }
     return ldata->decoder->OpenAudio(ldata->audioTrack);
 }
 
@@ -293,6 +327,9 @@ static prMALError AV1CloseFile(imStdParms* stdParms, imFileRef* fileRef, void* p
         if (ldata->PPixCacheSuiteVersion) {
             ldata->BasicSuite->ReleaseSuite(kPrSDKPPixCacheSuite, ldata->PPixCacheSuiteVersion);
         }
+        if (ldata->PPix2SuiteVersion) {
+            ldata->BasicSuite->ReleaseSuite(kPrSDKPPix2Suite, ldata->PPix2SuiteVersion);
+        }
         ldata->BasicSuite->ReleaseSuite(kPrSDKPPixSuite,        kPrSDKPPixSuiteVersion);
         ldata->BasicSuite->ReleaseSuite(kPrSDKTimeSuite,        kPrSDKTimeSuiteVersion);
         ldata->BasicSuite = nullptr;
@@ -364,6 +401,16 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
                           kPrSDKPPixCacheSuiteVersion, &ldata->PPixCacheSuite);
         av1imp::Log("suites: frame cache version %d%s", ldata->PPixCacheSuiteVersion,
                     ldata->PPixCacheSuiteVersion ? "" : " - working without it");
+
+        // Тем же перебором и по той же причине: адреса плоскостей появились
+        // во второй версии набора, и на хосте, где есть только первая, родной
+        // YUV предлагать нельзя — писать в него было бы некуда.
+        ldata->PPix2SuiteVersion =
+            AcquireNewest(ldata->BasicSuite, kPrSDKPPix2Suite,
+                          kPrSDKPPix2SuiteVersion, &ldata->PPix2Suite);
+        av1imp::Log("suites: PPix2 version %d%s", ldata->PPix2SuiteVersion,
+                    (ldata->PPix2SuiteVersion >= kPrSDKPPix2SuiteVersion2)
+                        ? "" : " - planar YUV unavailable");
     }
 
     // Какой поток спрашивают. Поток 0 — видео плюс первая дорожка звука,
@@ -473,8 +520,11 @@ static prMALError AV1ImportAudio7(imStdParms* stdParms, imFileRef fileRef,
     if (!ldataH) return imOtherErr;
 
     ImporterLocalRecPtr ldata = *ldataH;
+    const csSDK_int32 nth = ldata->audioRequests++;
+
     if (!EnsureDecoder(ldata) || !EnsureAudio(ldata)) {
-        av1imp::Log("imImportAudio7: audio unavailable - %s",
+        av1imp::Log("imImportAudio7: track %d request %d at %lld - audio unavailable: %s",
+                    ldata->audioTrack, nth, (long long)audioRec->position,
                     ldata->decoder ? ldata->decoder->LastError().c_str() : "no decoder");
         return imFileReadFailed;
     }
@@ -482,15 +532,18 @@ static prMALError AV1ImportAudio7(imStdParms* stdParms, imFileRef fileRef,
     if (!ldata->decoder->GetAudio(audioRec->position,
                                   static_cast<int32_t>(audioRec->size),
                                   audioRec->buffer)) {
-        av1imp::Log("audio at %lld: FAILED - %s", (long long)audioRec->position,
-                    ldata->decoder->LastError().c_str());
+        av1imp::Log("imImportAudio7: track %d request %d at %lld, %u samples - FAILED: %s",
+                    ldata->audioTrack, nth, (long long)audioRec->position,
+                    audioRec->size, ldata->decoder->LastError().c_str());
         return imFileReadFailed;
     }
 
-    // Пишем каждый запрос: конформирование читает дорожку целиком, и по этим
-    // строкам видно, на каком месте оно оборвалось, если оборвалось
-    av1imp::Log("audio: track %d, from %lld, %u samples",
-                ldata->audioTrack, (long long)audioRec->position, audioRec->size);
+    // Начало подробно, дальше редко: по этим строкам видно, докуда дошло
+    // конформирование, но они не заслоняют собой всё остальное.
+    if (nth < 3 || (nth % 200) == 0) {
+        av1imp::Log("audio: track %d, request %d, from %lld, %u samples",
+                    ldata->audioTrack, nth, (long long)audioRec->position, audioRec->size);
+    }
     return malNoError;
 }
 
@@ -498,32 +551,184 @@ static prMALError AV1ImportAudio7(imStdParms* stdParms, imFileRef fileRef,
 // В каком виде отдаём пиксели и какого размера
 // ---------------------------------------------------------------------------
 
+// Какой константой Premiere называет то, что уже лежит у нас в кадре.
+//
+// Смысл в том, что при выдаче плоскостями мы цвет не переводим, а называем:
+// матрица и размах перестают быть нашей работой и становятся частью имени
+// формата. Ошибиться тут — то же самое, что раньше было бы ошибкой в матрице
+// swscale, только последствие ровно одно и то же: цвета уедут.
+//
+// MPEG2 против MPEG4 в названии — это не про кодек, а про то, где стоит
+// цветность: слева (почти везде) или по центру (MPEG-1, JPEG).
+static bool NativeYUVFormat(const av1imp::MediaInfo& mi, PrPixelFormat* out)
+{
+    // Коды здесь свои, а не из заголовков ffmpeg: слой SDK намеренно про них
+    // не знает, а числа эти — не выдумка ffmpeg, а те же коды ITU, какими
+    // описание цвета записано в самом файле.
+    const int kMatrixBT709      = 1;
+    const int kChromaCentre     = 2;   // 1 — слева, 2 — по центру
+
+    const bool bt709   = (mi.colourMatrix == kMatrixBT709);
+    const bool centred = (mi.chromaLocation == kChromaCentre);
+
+    if (centred) {
+        if (bt709) {
+            *out = mi.fullRange ? PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_PLANAR_8u_709_FullRange
+                                : PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_PLANAR_8u_709;
+        } else {
+            *out = mi.fullRange ? PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_PLANAR_8u_601_FullRange
+                                : PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_PLANAR_8u_601;
+        }
+    } else {
+        if (bt709) {
+            *out = mi.fullRange ? PrPixelFormat_YUV_420_MPEG2_FRAME_PICTURE_PLANAR_8u_709_FullRange
+                                : PrPixelFormat_YUV_420_MPEG2_FRAME_PICTURE_PLANAR_8u_709;
+        } else {
+            *out = mi.fullRange ? PrPixelFormat_YUV_420_MPEG2_FRAME_PICTURE_PLANAR_8u_601_FullRange
+                                : PrPixelFormat_YUV_420_MPEG2_FRAME_PICTURE_PLANAR_8u_601;
+        }
+    }
+    return true;
+}
+
+// Наш ли это родной формат. Восемь констант — все, какие Premiere знает для
+// восьмибитного YUV 4:2:0 кадром: две расстановки цветности × две матрицы ×
+// два размаха. Перечислены поимённо, а не диапазоном: числовые значения
+// в заголовке идут не подряд, и «от и до» сломалось бы на первом же обновлении
+// SDK, причём молча.
+bool av1imp::IsNativeYUV(PrPixelFormat f)
+{
+    switch (f) {
+        case PrPixelFormat_YUV_420_MPEG2_FRAME_PICTURE_PLANAR_8u_601:
+        case PrPixelFormat_YUV_420_MPEG2_FRAME_PICTURE_PLANAR_8u_601_FullRange:
+        case PrPixelFormat_YUV_420_MPEG2_FRAME_PICTURE_PLANAR_8u_709:
+        case PrPixelFormat_YUV_420_MPEG2_FRAME_PICTURE_PLANAR_8u_709_FullRange:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_PLANAR_8u_601:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_PLANAR_8u_601_FullRange:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_PLANAR_8u_709:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_PLANAR_8u_709_FullRange:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool av1imp::WriteFrameToBuffer(av1imp::Decoder& decoder, int64_t frameIndex,
+                                PrSDKPPixSuite* ppixSuite, PrSDKPPix2Suite* ppix2Suite,
+                                PPixHand frame, PrPixelFormat pixelFormat,
+                                int width, int height, const char** outWhy)
+{
+    const char* dummy = nullptr;
+    if (!outWhy) outWhy = &dummy;
+    *outWhy = nullptr;
+
+    if (av1imp::IsNativeYUV(pixelFormat)) {
+        if (!ppix2Suite) { *outWhy = "planar asked for without the PPix2 suite"; return false; }
+
+        char* planeY = nullptr; char* planeU = nullptr; char* planeV = nullptr;
+        csSDK_uint32 rowY = 0, rowU = 0, rowV = 0;
+        const prSuiteError err = ppix2Suite->GetYUV420PlanarBuffers(
+            frame, PrPPixBufferAccess_ReadWrite,
+            &planeY, &rowY, &planeU, &rowU, &planeV, &rowV);
+
+        if (err != suiteError_NoError || !planeY || !planeU || !planeV) {
+            *outWhy = "GetYUV420PlanarBuffers refused";
+            return false;
+        }
+
+        // Шаги приходят беззнаковыми, но означать могут и движение вверх —
+        // так задокументировано. Приводим к знаковому, иначе отрицательный
+        // шаг стал бы четырьмя миллиардами и запись ушла бы мимо буфера.
+        return decoder.GetFrameYUV420(frameIndex,
+                                      reinterpret_cast<uint8_t*>(planeY), (int)rowY,
+                                      reinterpret_cast<uint8_t*>(planeU), (int)rowU,
+                                      reinterpret_cast<uint8_t*>(planeV), (int)rowV,
+                                      width, height);
+    }
+
+    char* buffer = nullptr;
+    csSDK_int32 rowBytes = 0;
+    ppixSuite->GetPixels(frame, PrPPixBufferAccess_ReadWrite, &buffer);
+    ppixSuite->GetRowBytes(frame, &rowBytes);
+    if (!buffer || rowBytes <= 0) { *outWhy = "host gave no buffer"; return false; }
+
+    // Строка обязана вмещать кадр целиком. Буфер создаём мы сами и тем же
+    // прямоугольником, так что это про случай «хост отдал не то, что просили»:
+    // цена проверки — одно умножение, цена ошибки — запись за пределы буфера
+    // внутри чужого процесса.
+    const int bytesPerPixel = (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? 8 : 4;
+    if (rowBytes < width * bytesPerPixel) {
+        *outWhy = "row too small for the frame";
+        return false;
+    }
+
+    // У Premiere 32-битные буферы идут снизу вверх: пишем с последней строки
+    // отрицательным шагом, и переворот делает сам масштабатор ffmpeg
+    uint8_t* lastRow = reinterpret_cast<uint8_t*>(buffer)
+                     + static_cast<size_t>(height - 1) * rowBytes;
+
+    const av1imp::FrameFormat frameFormat =
+        (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? av1imp::FrameFormat::BGRA16
+                                                     : av1imp::FrameFormat::BGRA8;
+    return decoder.GetFrameBGRA(frameIndex, lastRow, -rowBytes, width, height, frameFormat);
+}
+
+// Собираемся ли мы отдавать этот файл плоскостями.
+//
+// Спрашивают в двух местах — при перечислении форматов и при объявлении цвета,
+// — и ответ обязан быть один и тот же. Разойдись они, вышло бы худшее из
+// возможного: отдаём YUV, а хосту сказали, что это RGB, и он не станет
+// переводить. Картинка при этом не пропадёт, а позеленеет.
+static bool PrefersNativeYUV(ImporterLocalRecPtr ldata)
+{
+    if (!ldata || !ldata->decoder || !ldata->decoder->IsOpen()) return false;
+
+    // Без второй версии набора PPix2 адреса плоскостей узнать нечем
+    if (!ldata->PPix2Suite || ldata->PPix2SuiteVersion < kPrSDKPPix2SuiteVersion2) {
+        return false;
+    }
+    return av1imp::YuvEnabled() && ldata->decoder->CanDeliverYUV420();
+}
+
 // Premiere опрашивает форматы по одному, пока не получит imBadFormatIndex,
-// и порядок здесь означает предпочтение. Для 10-битного файла первым идёт
-// шестнадцатибитный формат, вторым — восьмибитный: если хост шестнадцать бит
-// не потянет, ему есть на что откатиться. Для обычного 8-битного файла список
-// как был, из одного формата, — лишнего выбора там не нужно.
+// и порядок здесь означает предпочтение.
+//
+// Первым, где можно, идёт родной YUV: кадр уходит хосту как есть, а перевод
+// в RGB делает он сам — по нашему замеру этот перевод стоил три четверти
+// всего времени (3.02 мс из 4 на 1440p). Хост волен его не взять; тогда он
+// спросит следующий формат, и всё пойдёт прежним путём. Поэтому BGRA из
+// списка никуда не девается — он запасной, а не бывший.
+//
+// Для 10-битного файла порядок прежний: шестнадцать бит, потом восемь.
 static prMALError AV1GetIndPixelFormat(imStdParms* stdParms, csSDK_size_t idx,
                                        imIndPixelFormatRec* rec)
 {
     bool deep = false;
+    bool native = false;
+    PrPixelFormat nativeFormat = PrPixelFormat_BGRA_4444_8u;
+
     if (rec->privatedata) {
         ImporterLocalRecH ldataH = reinterpret_cast<ImporterLocalRecH>(rec->privatedata);
         if (*ldataH && (*ldataH)->decoder && (*ldataH)->decoder->IsOpen()) {
-            deep = (*ldataH)->decoder->Info().bitDepth > 8;
+            const av1imp::MediaInfo& mi = (*ldataH)->decoder->Info();
+            deep = mi.bitDepth > 8;
+            if (PrefersNativeYUV(*ldataH)) {
+                native = NativeYUVFormat(mi, &nativeFormat);
+            }
         }
     }
 
-    if (idx == 0) {
-        rec->outPixelFormat = deep ? PrPixelFormat_BGRA_4444_16u
-                                   : PrPixelFormat_BGRA_4444_8u;
-        return malNoError;
-    }
-    if (idx == 1 && deep) {
-        rec->outPixelFormat = PrPixelFormat_BGRA_4444_8u;
-        return malNoError;
-    }
-    return imBadFormatIndex;
+    // Список строится по порядку предпочтения, а потом из него берётся idx-й.
+    // Так понятнее, чем лесенка из if по номеру: видно сам порядок.
+    PrPixelFormat order[3];
+    csSDK_size_t count = 0;
+    if (native) order[count++] = nativeFormat;
+    if (deep)   order[count++] = PrPixelFormat_BGRA_4444_16u;
+    order[count++] = PrPixelFormat_BGRA_4444_8u;
+
+    if (idx >= count) return imBadFormatIndex;
+    rec->outPixelFormat = order[idx];
+    return malNoError;
 }
 
 static prMALError AV1PreferredFrameSize(imStdParms* stdParms,
@@ -577,16 +782,29 @@ static prMALError AV1GetIndColorSpace(imStdParms* stdParms, csSDK_size_t index,
     sei.colorPrimariesCode        = mi.colourPrimaries;
     sei.transferCharacteristicCode = mi.colourTransfer;
 
-    // Единичная: мы отдаём RGB, и переводить его обратно хосту не нужно
-    sei.matrixEquationsCode = static_cast<csSDK_int32>(PrMatrixEquations::kIdentity);
+    // Описание обязано совпадать с тем, что мы на самом деле кладём в буфер.
+    // Отдавая плоскости, мы не переводим цвет — значит матрица никуда не делась
+    // и размах остался тем, что в файле. Отдавая RGB, наоборот: матрица уже
+    // применена, и объявлять её второй раз значит применить дважды.
+    const bool planar = PrefersNativeYUV(ldata);
+    if (planar) {
+        sei.matrixEquationsCode = mi.colourMatrix;
+        sei.isFullRange         = mi.fullRange ? kPrTrue : kPrFalse;
+        sei.isRGB               = kPrFalse;
+    } else {
+        sei.matrixEquationsCode = static_cast<csSDK_int32>(PrMatrixEquations::kIdentity);
+        sei.isFullRange         = kPrTrue;    // RGB у нас всегда полного размаха
+        sei.isRGB               = kPrTrue;
+    }
 
     sei.bitDepth        = (mi.bitDepth > 8) ? 16 : 8;
-    sei.isFullRange     = kPrTrue;    // RGB у нас всегда полного размаха
-    sei.isRGB           = kPrTrue;
     sei.isSceneReferred = kPrFalse;   // PQ, HLG и BT.709 — все про показ
 
-    av1imp::Log("imGetIndColorSpace: primaries %d, transfer %d, %d-bit RGB",
-                sei.colorPrimariesCode, sei.transferCharacteristicCode, sei.bitDepth);
+    av1imp::Log("imGetIndColorSpace: primaries %d, transfer %d, matrix %d, %d-bit %s%s",
+                sei.colorPrimariesCode, sei.transferCharacteristicCode,
+                sei.matrixEquationsCode, sei.bitDepth,
+                planar ? "YUV" : "RGB",
+                (planar && !mi.fullRange) ? " (limited range)" : "");
     return malNoError;
 }
 
@@ -641,10 +859,13 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
     if (format->inFrameHeight <= 0) format->inFrameHeight = mi.height;
 
     // Формат просит хост, а не мы: он выбирает из того списка, что мы дали
-    // в imGetIndPixelFormat. Всё, кроме явных шестнадцати бит, отдаём восемью.
+    // в imGetIndPixelFormat. Всё, кроме явных шестнадцати бит и родного YUV,
+    // отдаём восемью битами BGRA.
+    const bool wantsNative = av1imp::IsNativeYUV(format->inPixelFormat);
     const PrPixelFormat pixelFormat =
-        (format->inPixelFormat == PrPixelFormat_BGRA_4444_16u)
-            ? PrPixelFormat_BGRA_4444_16u : PrPixelFormat_BGRA_4444_8u;
+        wantsNative ? format->inPixelFormat
+                    : ((format->inPixelFormat == PrPixelFormat_BGRA_4444_16u)
+                           ? PrPixelFormat_BGRA_4444_16u : PrPixelFormat_BGRA_4444_8u);
     const av1imp::FrameFormat frameFormat =
         (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? av1imp::FrameFormat::BGRA16
                                                      : av1imp::FrameFormat::BGRA8;
@@ -657,38 +878,21 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
                                                  pixelFormat, &rect);
     if (result != malNoError) return result;
 
-    char* buffer = nullptr;
-    csSDK_int32 rowBytes = 0;
-    ldata->PPixSuite->GetPixels(*videoRec->outFrame, PrPPixBufferAccess_ReadWrite, &buffer);
-    ldata->PPixSuite->GetRowBytes(*videoRec->outFrame, &rowBytes);
-    if (!buffer || rowBytes <= 0) return imOtherErr;
-
-    // Строка обязана вмещать кадр целиком. Буфер создаём мы сами и тем же
-    // прямоугольником, так что это про случай «хост отдал не то, что просили»:
-    // цена проверки — одно умножение, цена ошибки — запись за пределы буфера
-    // внутри чужого процесса.
-    const int bytesPerPixel = (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? 8 : 4;
-    if (rowBytes < format->inFrameWidth * bytesPerPixel) {
-        av1imp::Log("imGetSourceVideo: row of %d bytes is too small for %d pixels",
-                    rowBytes, format->inFrameWidth);
-        return imOtherErr;
-    }
-
-    // У Premiere 32-битные буферы идут снизу вверх: пишем с последней строки
-    // отрицательным шагом, и переворот делает сам масштабатор ffmpeg
-    uint8_t* lastRow = reinterpret_cast<uint8_t*>(buffer)
-                     + static_cast<size_t>(format->inFrameHeight - 1) * rowBytes;
-
-    if (!ldata->decoder->GetFrameBGRA(frameIndex, lastRow, -rowBytes,
-                                      format->inFrameWidth, format->inFrameHeight,
-                                      frameFormat)) {
-        av1imp::Log("frame %d: FAILED - %s", frameIndex, ldata->decoder->LastError().c_str());
-        return imFileReadFailed;
+    const char* why = nullptr;
+    if (!av1imp::WriteFrameToBuffer(*ldata->decoder, frameIndex,
+                                    ldata->PPixSuite, ldata->PPix2Suite,
+                                    *videoRec->outFrame, pixelFormat,
+                                    format->inFrameWidth, format->inFrameHeight, &why)) {
+        av1imp::Log("frame %d: FAILED - %s", frameIndex,
+                    why ? why : ldata->decoder->LastError().c_str());
+        return why ? imOtherErr : imFileReadFailed;
     }
     if (frameIndex < 3) {
-        av1imp::Log("frame %d delivered (%dx%d, stride %d, %s)", frameIndex,
-                    format->inFrameWidth, format->inFrameHeight, rowBytes,
-                    frameFormat == av1imp::FrameFormat::BGRA16 ? "16u" : "8u");
+        av1imp::Log("frame %d delivered (%dx%d, %s)", frameIndex,
+                    format->inFrameWidth, format->inFrameHeight,
+                    wantsNative ? "planar YUV"
+                                : (frameFormat == av1imp::FrameFormat::BGRA16 ? "BGRA 16u"
+                                                                              : "BGRA 8u"));
     }
 
     if (ldata->PPixCacheSuite) {

@@ -169,6 +169,124 @@ void CheckAlphaSurvives(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
     Check(hi > lo, name);
 }
 
+// Выдача плоскостями показывает ТУ ЖЕ картинку, что и обычная.
+//
+// Быстрый неверный путь хуже медленного верного, а ошибиться тут есть чем:
+// перепутать U и V (цвета вывернутся), не так понять шаг строки (картинку
+// перекосит), перевернуть кадр. Всё это на глаз в мелком окне незаметно.
+//
+// Проверяем обратным пересчётом: из готового кадра BGRA считаем, какими
+// обязаны быть яркость и цветность, и сравниваем с тем, что отдали плоскости.
+// Яркость — попиксельно, цветность — по блокам 2x2, как она и получается
+// при сжатии.
+void CheckPlanesMatchBGRA(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
+{
+    const char* name = "planes carry the same picture as BGRA";
+    if (!dec.CanDeliverYUV420()) {
+        printf("  %-46s SKIP (no native path for this file)\n", name);
+        return;
+    }
+
+    const int w = info.width, h = info.height;
+    const int strideC = (w + 1) / 2, chromaH = (h + 1) / 2;
+    std::vector<uint8_t> bgra((size_t)w * 4 * h);
+    std::vector<uint8_t> Y((size_t)w * h), U((size_t)strideC * chromaH), V(U.size());
+
+    const int64_t at = 5;
+    if (!dec.GetFrameBGRA(at, bgra.data(), w * 4, 0, 0) ||
+        !dec.GetFrameYUV420(at, Y.data(), w, U.data(), strideC, V.data(), strideC, 0, 0)) {
+        Check(false, name);
+        return;
+    }
+
+    // Коэффициенты той же матрицы, какой файл описан, и тот же размах.
+    // Не «примерно 0.299» на всё подряд: у BT.709 и BT.601 разница в яркости
+    // доходит до десятка уровней на насыщенном цвете, и проверка с одной
+    // матрицей на оба случая пропускала бы настоящую путаницу.
+    const bool bt709 = (info.colourMatrix == 1);
+    const double kr = bt709 ? 0.2126 : 0.299;
+    const double kb = bt709 ? 0.0722 : 0.114;
+    const double kg = 1.0 - kr - kb;
+    const double scale = info.fullRange ? 1.0   : 219.0 / 255.0;
+    const double base  = info.fullRange ? 0.0   : 16.0;
+
+    double sumAbs = 0.0;
+    double worst = 0.0;
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* row = bgra.data() + (size_t)y * w * 4;
+        const uint8_t* yrow = Y.data() + (size_t)y * w;
+        for (int x = 0; x < w; ++x) {
+            const double b = row[x * 4 + 0], g = row[x * 4 + 1], r = row[x * 4 + 2];
+            const double expect = base + scale * (kr * r + kg * g + kb * b);
+            const double diff = std::fabs(expect - (double)yrow[x]);
+            sumAbs += diff;
+            if (diff > worst) worst = diff;
+        }
+    }
+    const double mean = sumAbs / ((double)w * h);
+
+    // Цветность сравниваем ПОПИКСЕЛЬНО, а не средним по кадру.
+    //
+    // Средним я и попробовал сначала — оно перестановку U и V не заметило:
+    // на этом ролике средние по кадру у обеих плоскостей близки, и разница
+    // вышла 1.36 при допуске 3. То есть проверка проходила бы на заведомо
+    // сломанном коде. Попиксельная разница на том же ролике разъезжается
+    // на порядок сильнее, потому что совпадают там средние, а не пиксели.
+    double sumU = 0.0, sumV = 0.0;
+    for (int cy = 0; cy < chromaH; ++cy) {
+        for (int cx = 0; cx < strideC; ++cx) {
+            // Среднее по блоку 2x2 исходного кадра — так же, как цветность
+            // и получалась при сжатии. Края кадра нечётного размера берут
+            // столько пикселей, сколько есть.
+            double b = 0, g = 0, r = 0;
+            int n = 0;
+            for (int dy = 0; dy < 2; ++dy) {
+                const int y = cy * 2 + dy;
+                if (y >= h) break;
+                const uint8_t* row = bgra.data() + (size_t)y * w * 4;
+                for (int dx = 0; dx < 2; ++dx) {
+                    const int x = cx * 2 + dx;
+                    if (x >= w) break;
+                    b += row[x * 4 + 0]; g += row[x * 4 + 1]; r += row[x * 4 + 2];
+                    ++n;
+                }
+            }
+            if (!n) continue;
+            b /= n; g /= n; r /= n;
+
+            const double luma = kr * r + kg * g + kb * b;
+            const double eU = 128.0 + scale * 0.5 * (b - luma) / (1.0 - kb);
+            const double eV = 128.0 + scale * 0.5 * (r - luma) / (1.0 - kr);
+            sumU += std::fabs(eU - (double)U[(size_t)cy * strideC + cx]);
+            sumV += std::fabs(eV - (double)V[(size_t)cy * strideC + cx]);
+        }
+    }
+    const double meanU = sumU / ((double)strideC * chromaH);
+    const double meanV = sumV / ((double)strideC * chromaH);
+
+    // Пороги взяты по замеру, а не на глаз, и вот сам замер.
+    //
+    // На всём наборе файлов правильный код даёт по яркости 0.00–2.70,
+    // по цветности 0.00–7.68. Ноль — это `sync.mp4`, картинка простая:
+    // там растяжение цветности вдвое обратимо точно, и совпадение выходит
+    // побитовым. Значит расхождение на остальных даёт не ошибка, а интерполяция
+    // на детальной картинке — обратный пересчёт из BGRA не может её повторить.
+    //
+    // Сломанный код проверен отдельно: перестановка плоскостей U и V даёт
+    // по цветности 96 и 92. Пороги ниже оставляют втрое запаса над настоящей
+    // погрешностью и впятеро под настоящей поломкой.
+    //
+    // ⚠ Сначала цветность сравнивалась средним по кадру — и перестановки
+    // НЕ ЗАМЕЧАЛА: средние у двух плоскостей на этом ролике близки, разница
+    // вышла 1.36 при допуске 3. Проверка проходила бы на заведомо сломанном
+    // коде; поэтому сравнение здесь попиксельное, а не по среднему.
+    const bool lumaOk   = (mean  < 6.0);
+    const bool chromaOk = (meanU < 20.0 && meanV < 20.0);
+    Check(lumaOk && chromaOk, name);
+    printf("      luma off by %.2f on average (worst %.0f), chroma by %.2f and %.2f\n",
+           mean, worst, meanU, meanV);
+}
+
 void CheckReadingPastTheEnd(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 {
     if (!info.hasVideo) {
@@ -474,13 +592,39 @@ void CheckAudioIsRepeatable(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
     // range, moves every sample by a fraction of the signal itself.
     const int   kSettling     = 1024;    // one AAC frame
     const float kSettlingMax  = 0.02f;   // about -34 dBFS, well above the 0.005 seen
-    const float kRoundingMax  = 1e-4f;   // -80 dBFS: what different arithmetic costs
+
+    // Порог за окном — ОТНОСИТЕЛЬНО сигнала в этом же куске, а не абсолютный.
+    //
+    // Абсолютные 1e-4 были взяты на синтетике, и на живой записи проверка
+    // падала без дефекта: 12 отсчётов из 9600 расходились на 1.2e-4, дальше
+    // всех — на позиции 3512. Тише не значит вернее: кусок там сам по себе
+    // тихий, пик 0.009, и расхождение составляет 1.3% от него.
+    //
+    // Разделять надо тем же признаком, что записан выше: перемотка не туда
+    // двигает отсчёты НА ДОЛЮ САМОГО СИГНАЛА. Замерено на этом же файле
+    // сломанным нарочно кодом (чтение со сдвигом на 512 отсчётов):
+    //
+    //     как есть : 12 отсчётов, расхождение 1.3% от пика куска
+    //     сломано  : 7395 отсчётов, расхождение 135% — соизмеримо с сигналом
+    //
+    // Порог в 10% стоит между ними: вшестеро выше настоящего шума пересборки
+    // и вчетверо ниже настоящей поломки. Абсолютный пол остаётся ради
+    // цифровой тишины, где пик нулевой и любая доля от него — тоже ноль.
+    float peak = 0.0f;
+    for (int c = 0; c < ch; ++c) {
+        for (int i = 0; i < count; ++i) {
+            const float mag = a[c][i] < 0 ? -a[c][i] : a[c][i];
+            if (mag > peak) peak = mag;
+        }
+    }
+    const float kRoundingMax = (peak * 0.10f > 1e-4f) ? peak * 0.10f : 1e-4f;
 
     int   beyond   = 0;          // samples past the window that differ by more than noise
     float worst    = 0.0f;       // largest difference inside the window
     float worstFar = 0.0f;       // and outside it
     int   firstAt  = -1;
     int   lastAt   = -1;
+    int   lastLoud = -1;         // где сидит САМЫЙ ДАЛЬНИЙ отсчёт сверх порога
     for (int c = 0; c < ch; ++c) {
         for (int i = 0; i < count; ++i) {
             const float diff = a[c][i] - b[c][i];
@@ -491,7 +635,7 @@ void CheckAudioIsRepeatable(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
             lastAt = i;
             if (i >= kSettling) {
                 if (mag > worstFar) worstFar = mag;
-                if (mag > kRoundingMax) ++beyond;
+                if (mag > kRoundingMax) { ++beyond; if (i > lastLoud) lastLoud = i; }
             } else if (mag > worst) {
                 worst = mag;
             }
@@ -503,8 +647,8 @@ void CheckAudioIsRepeatable(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 
     if (firstAt >= 0) {
         printf("      after the seek: positions %d..%d, up to %.6f inside the first"
-               " AAC frame, %.6f past it (%d above the noise floor)\n",
-               firstAt, lastAt, worst, worstFar, beyond);
+               " AAC frame, %.6f past it (%d over %.6f, last at %d; peak %.3f)\n",
+               firstAt, lastAt, worst, worstFar, beyond, kRoundingMax, lastLoud, peak);
     }
 }
 
@@ -604,6 +748,68 @@ int main(int argc, char** argv)
                st.decodeMs * per, st.transferMs * per, st.convertMs * per);
     }
 
+    // Handing the host planes instead of BGRA. This is the whole point of the
+    // native path: the colour conversion is three quarters of the work above,
+    // and a host that takes YUV directly makes it disappear.
+    //
+    // Measured BGRA, YUV, then BGRA again — deliberately. Runs early in a
+    // series read faster or slower for reasons that have nothing to do with
+    // the code, and the only cheap defence is to bracket the new thing between
+    // two runs of the old one.
+    if (dec.CanDeliverYUV420()) {
+        const int strideY = info.width;
+        const int strideC = (info.width + 1) / 2;
+        const int chromaH = (info.height + 1) / 2;
+        std::vector<uint8_t> planeY((size_t)strideY * info.height);
+        std::vector<uint8_t> planeU((size_t)strideC * chromaH);
+        std::vector<uint8_t> planeV((size_t)strideC * chromaH);
+
+        auto passYUV = [&](int64_t from) {
+            dec.ResetStats();
+            const auto a = std::chrono::steady_clock::now();
+            int got = 0;
+            for (int i = 1; i <= kSeq; ++i) {
+                if (dec.GetFrameYUV420(from + i,
+                                       planeY.data(), strideY,
+                                       planeU.data(), strideC,
+                                       planeV.data(), strideC, 0, 0)) ++got;
+            }
+            const auto b = std::chrono::steady_clock::now();
+            return std::chrono::duration<double, std::milli>(b - a).count() / (got ? got : 1);
+        };
+        auto passBGRA = [&](int64_t from) {
+            dec.ResetStats();
+            const auto a = std::chrono::steady_clock::now();
+            int got = 0;
+            for (int i = 1; i <= kSeq; ++i) {
+                if (dec.GetFrameBGRA(from + i, buf.data(), stride, 0, 0, format)) ++got;
+            }
+            const auto b = std::chrono::steady_clock::now();
+            return std::chrono::duration<double, std::milli>(b - a).count() / (got ? got : 1);
+        };
+
+        // Проходы идут ПОДРЯД, а не с одного места: возврат к началу означал бы
+        // перемотку внутри замера, а она стоит больше самой выдачи и сглаживает
+        // разницу между способами до неразличимости. Так меряется ровно то,
+        // чем занят Premiere при воспроизведении, — чтение вперёд.
+        const double bgraFirst = passBGRA(wanted + 0 * kSeq);
+        const double yuvMs     = passYUV (wanted + 1 * kSeq);
+        const double copyMs    = dec.GetStats().frames
+                               ? dec.GetStats().convertMs / dec.GetStats().frames : 0.0;
+        const double bgraAgain = passBGRA(wanted + 2 * kSeq);
+        const double bgra      = (bgraFirst + bgraAgain) / 2;
+
+        printf("native YUV : %.2f ms/frame vs BGRA %.2f (%.2f and %.2f)\n",
+               yuvMs, bgra, bgraFirst, bgraAgain);
+        printf("             copying planes costs %.2f ms of that\n", copyMs);
+        if (yuvMs > 0.0) {
+            printf("             %.1fx %s\n", bgra > yuvMs ? bgra / yuvMs : yuvMs / bgra,
+                   bgra > yuvMs ? "faster" : "SLOWER - the native path is not worth it");
+        }
+    } else {
+        printf("native YUV : not available for this file\n");
+    }
+
     // Stepping backwards — the worst case for an inter-frame codec, and what an
     // editor does constantly
     const int kBack = 30;
@@ -681,6 +887,7 @@ int main(int argc, char** argv)
     // --- checks ---
     printf("\nchecks:\n");
     CheckAlphaSurvives(dec, info);
+    CheckPlanesMatchBGRA(dec, info);
     CheckReadingPastTheEnd(dec, info);
     CheckDeepColour(dec, info);
     CheckReducedSizeStaysInBuffer(dec, info);

@@ -59,4 +59,9 @@ bool PreferHardware();
 // файле настроек или переменная среды AETHER_ASYNC=0.
 bool AsyncDeliveryEnabled();
 
+// Отдавать ли кадры в родном YUV, без перевода в RGB. Хост может и не взять —
+// тогда всё идёт прежним путём само собой. Выключатель на случай, если возьмёт,
+// а цвет уедет: строка `yuv = off` в файле настроек или AETHER_YUV=0.
+bool YuvEnabled();
+
 } // namespace av1imp

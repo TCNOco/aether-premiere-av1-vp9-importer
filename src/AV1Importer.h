@@ -23,6 +23,7 @@
 #include "PrSDKPPixCreatorSuite.h"
 #include "PrSDKPPixCacheSuite.h"
 #include "PrSDKPPixSuite.h"
+#include "PrSDKPPix2Suite.h"
 #include "PrSDKTimeSuite.h"
 #include "PrSDKAppInfoSuite.h"
 #include "PrSDKMemoryManagerSuite.h"
@@ -56,18 +57,55 @@ typedef struct
     csSDK_int32             streamIdx;
     int                     audioTrack;     // номер дорожки звука для этого потока
 
+    // Сколько запросов звука уже обслужено этим экземпляром.
+    //
+    // Нужен ради журнала. Конформирование читает дорожку целиком: пятиминутная
+    // запись — это три с половиной тысячи запросов на дорожку, а дорожек
+    // у записи OBS четыре. Четырнадцать тысяч строк не помогают разбирать
+    // беду, они её прячут. Поэтому подробно пишем начало, дальше по одной
+    // строке на каждые двести запросов, а отказы — всегда.
+    csSDK_int32             audioRequests;
+
     PlugMemoryFuncsPtr      memFuncs;
     SPBasicSuite*           BasicSuite;
     PrSDKPPixCreatorSuite*  PPixCreatorSuite;
     PrSDKPPixCacheSuite*    PPixCacheSuite;
     PrSDKPPixSuite*         PPixSuite;
+    PrSDKPPix2Suite*        PPix2Suite;     // адреса плоскостей; может не быть
     PrSDKTimeSuite*         TimeSuite;
 
     // Версия набора кэша, которую согласился отдать хост. Заголовки SDK знают
     // восьмую, но Premiere постарше отдаёт седьмую и ниже, а отдавать набор
     // положено ровно той версией, какой брали.
     csSDK_int32             PPixCacheSuiteVersion;
+
+    // То же и для набора PPix2: адреса плоскостей появились только во второй
+    // версии, а на Premiere постарше набор отдаётся первой — тогда родной YUV
+    // мы просто не предлагаем и идём прежним путём.
+    csSDK_int32             PPix2SuiteVersion;
 } ImporterLocalRec, *ImporterLocalRecPtr, **ImporterLocalRecH;
+
+namespace av1imp {
+
+// Записать кадр в буфер, который выдал хост.
+//
+// Одна на оба пути выдачи, обычный и асинхронный, и это не красота ради
+// красоты: раньше запись была написана дважды, и когда появилась выдача
+// плоскостями, асинхронный путь про неё не узнал. Поддельный хост поймал это
+// сразу — «кадр асинхронного пути не совпадает с обычным», — но в Premiere
+// это выглядело бы как позеленевшая картинка при включённом ускорении.
+//
+// pixelFormat решает, как писать: BGRA одним куском или тремя плоскостями.
+// ppix2 нужен только плоскостям и может быть нулевым в остальных случаях.
+bool WriteFrameToBuffer(Decoder& decoder, int64_t frameIndex,
+                        PrSDKPPixSuite* ppixSuite, PrSDKPPix2Suite* ppix2Suite,
+                        PPixHand frame, PrPixelFormat pixelFormat,
+                        int width, int height, const char** outWhy);
+
+// Наш ли это формат плоскостей — восемь констант YUV 4:2:0 кадром.
+bool IsNativeYUV(PrPixelFormat f);
+
+} // namespace av1imp
 
 extern "C" {
 PREMPLUGENTRY DllExport xImportEntry(csSDK_int32  selector,

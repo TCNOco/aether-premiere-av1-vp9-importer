@@ -36,6 +36,7 @@ struct AsyncState {
     // Наборы функций хоста — копии указателей, не ссылка на чужую структуру
     PrSDKPPixCreatorSuite* PPixCreatorSuite = nullptr;
     PrSDKPPixSuite*        PPixSuite        = nullptr;
+    PrSDKPPix2Suite*       PPix2Suite       = nullptr;   // адреса плоскостей
 
     int   width  = 0;
     int   height = 0;
@@ -236,12 +237,13 @@ prMALError GetFrame(AsyncState* s, imSourceVideoRec* videoRec)
     if (format->inFrameWidth  <= 0) format->inFrameWidth  = s->width;
     if (format->inFrameHeight <= 0) format->inFrameHeight = s->height;
 
+    // Формат берём тот, что просит хост, ничего не подменяя: подмена здесь
+    // и была бы расхождением с обычным путём.
     const PrPixelFormat pixelFormat =
-        (format->inPixelFormat == PrPixelFormat_BGRA_4444_16u)
-            ? PrPixelFormat_BGRA_4444_16u : PrPixelFormat_BGRA_4444_8u;
-    const FrameFormat frameFormat =
-        (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? FrameFormat::BGRA16
-                                                     : FrameFormat::BGRA8;
+        av1imp::IsNativeYUV(format->inPixelFormat)
+            ? format->inPixelFormat
+            : ((format->inPixelFormat == PrPixelFormat_BGRA_4444_16u)
+                   ? PrPixelFormat_BGRA_4444_16u : PrPixelFormat_BGRA_4444_8u);
 
     prRect rect;
     prSetRect(&rect, 0, 0, format->inFrameWidth, format->inFrameHeight);
@@ -250,23 +252,28 @@ prMALError GetFrame(AsyncState* s, imSourceVideoRec* videoRec)
         videoRec->outFrame, PrPPixBufferAccess_ReadWrite, pixelFormat, &rect);
     if (result != malNoError) return aiUnknownError;
 
-    char* buffer = nullptr;
-    csSDK_int32 rowBytes = 0;
-    s->PPixSuite->GetPixels(*videoRec->outFrame, PrPPixBufferAccess_ReadWrite, &buffer);
-    s->PPixSuite->GetRowBytes(*videoRec->outFrame, &rowBytes);
-    if (!buffer || rowBytes <= 0) return aiUnknownError;
-
-    const int bytesPerPixel = (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? 8 : 4;
-    if (rowBytes < format->inFrameWidth * bytesPerPixel) return aiUnknownError;
-
-    // Снизу вверх, как и в обычном пути
-    uint8_t* lastRow = reinterpret_cast<uint8_t*>(buffer)
-                     + static_cast<size_t>(format->inFrameHeight - 1) * rowBytes;
-
-    if (!s->decoder.GetFrameBGRA(frame, lastRow, -rowBytes,
-                                 format->inFrameWidth, format->inFrameHeight,
-                                 frameFormat)) {
+    // Запись — общей функцией с обычным путём. Своей копией она тут и была,
+    // и ровно поэтому не узнала про выдачу плоскостями.
+    const char* why = nullptr;
+    if (!av1imp::WriteFrameToBuffer(s->decoder, frame,
+                                    s->PPixSuite, s->PPix2Suite,
+                                    *videoRec->outFrame, pixelFormat,
+                                    format->inFrameWidth, format->inFrameHeight, &why)) {
+        Log("async frame %lld: FAILED - %s", (long long)frame,
+            why ? why : s->decoder.LastError().c_str());
         return aiFrameNotFound;
+    }
+
+    // Первые кадры записываем — иначе по журналу вообще не видно, каким путём
+    // идёт выдача. Обычный путь такие строки писал, асинхронный молчал, и на
+    // живом Premiere, который берёт именно его, вопрос «взял ли хост родной
+    // YUV» оказалось нечем закрыть.
+    if (frame < 3) {
+        Log("async frame %lld delivered (%dx%d, %s)", (long long)frame,
+            format->inFrameWidth, format->inFrameHeight,
+            av1imp::IsNativeYUV(pixelFormat)
+                ? "planar YUV"
+                : (pixelFormat == PrPixelFormat_BGRA_4444_16u ? "BGRA 16u" : "BGRA 8u"));
     }
 
     std::lock_guard<std::mutex> lock(s->mutex);
@@ -391,6 +398,7 @@ bool CreateAsyncImporter(ImporterLocalRecPtr source, imAsyncImporterCreationRec*
 
     s->PPixCreatorSuite = source->PPixCreatorSuite;
     s->PPixSuite        = source->PPixSuite;
+    s->PPix2Suite       = source->PPix2Suite;
     s->width            = mi.width;
     s->height           = mi.height;
     s->ticksPerFrame    = source->ticksPerFrame;

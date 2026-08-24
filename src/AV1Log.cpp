@@ -8,6 +8,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <share.h>      // _SH_DENYWR для _wfsopen
 #include <mutex>
 #include <string>
 
@@ -50,12 +51,20 @@ std::wstring MakeLogPath()
     return dir + L"\\log.txt";
 }
 
+// _wfsopen, а НЕ _wfopen_s — и это не вкусовщина.
+//
+// _wfopen_s открывает файл монопольно: пока Premiere работает, журнал нельзя
+// ни прочитать, ни скопировать, ни приложить к issue. Открывается он один раз
+// на весь сеанс, значит запрет держится всё время, пока Premiere запущен, —
+// то есть ровно тогда, когда журнал и нужен. Проверено вживую: попытка
+// прочитать его при живом Premiere даёт «файл используется другим процессом».
+//
+// _SH_DENYWR запрещает другим писать, но разрешает читать: посторонний
+// не испортит запись, а прочесть и скопировать сможет кто угодно.
 FILE* OpenLog(const wchar_t* mode)
 {
     if (g_path.empty()) return nullptr;
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, g_path.c_str(), mode) != 0) return nullptr;
-    return f;
+    return _wfsopen(g_path.c_str(), mode, _SH_DENYWR);
 }
 
 void CloseLogFile()

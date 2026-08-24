@@ -34,6 +34,28 @@ cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
    /link /LIBPATH:"ffmpeg\lib" avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib
 if errorlevel 1 exit /b 1
 
+REM cache_probe - how much memory the frame caches take with many clips open.
+REM The budget used to be per clip with no overall ceiling: ten 1440p clips
+REM reached 4.4 GB. Measured, not assumed - this is the instrument.
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
+   /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
+   /I"ffmpeg\include" ^
+   src\AV1Decoder.cpp tools\cache_probe.cpp ^
+   /Fe:build\cache_probe.exe /Fo:build\obj\ ^
+   /link /LIBPATH:"ffmpeg\lib" avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib psapi.lib
+if errorlevel 1 exit /b 1
+
+REM conform_probe - reads one audio track end to end, the way conforming does.
+REM Written while chasing "an unspecified error occurred while performing a
+REM conform action": the decoder had to be cleared before looking further up.
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
+   /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
+   /I"ffmpeg\include" ^
+   src\AV1Decoder.cpp tools\conform_probe.cpp ^
+   /Fe:build\conform_probe.exe /Fo:build\obj\ ^
+   /link /LIBPATH:"ffmpeg\lib" avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib
+if errorlevel 1 exit /b 1
+
 REM fuzz_test - the same core, fed deliberately broken files
 cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^

@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <atomic>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -33,6 +34,7 @@
 #include "PrSDKPPixCreatorSuite.h"
 #include "PrSDKPPixCacheSuite.h"
 #include "PrSDKPPixSuite.h"
+#include "PrSDKPPix2Suite.h"
 #include "PrSDKTimeSuite.h"
 #include "PrSDKAppInfoSuite.h"
 #include "PrSDKAsyncImporter.h"
@@ -63,11 +65,13 @@ struct HostProfile
     bool         hasFrameCache;    // отдаёт ли хост набор кэша кадров
     csSDK_uint32 appFourCC;
     unsigned     appMajor;
+    bool         hasPlanarBuffers;  // выдаёт ли набор PPix2 с адресами плоскостей
 };
 
 const HostProfile* g_host = nullptr;
 int  g_cacheVersionGiven = 0;   // какую версию кэша хост в итоге отдал
 bool g_cacheWasUsed      = false;
+int  g_ppix2VersionGiven = 0;   // и какую версию набора с плоскостями
 
 // ---------------------------------------------------------------------------
 // Пиксельные буферы хоста
@@ -81,7 +85,34 @@ struct FakeFrame
     PPix*                pixPtr;
     PPix                 pix;
     std::vector<uint8_t> data;
+
+    // Кадр в родном YUV лежит не строками пикселей, а тремя плоскостями подряд,
+    // и адреса цветности плагин узнаёт отдельным вызовом. Помним раскладку,
+    // чтобы было что ему ответить.
+    bool                 planar   = false;
+    int                  planeW   = 0;   // ширина яркости
+    int                  planeH   = 0;
+    size_t               offsetU  = 0;
+    size_t               offsetV  = 0;
 };
+
+// Восемь констант родного YUV 4:2:0 — те же, что перечислены в плагине.
+bool IsPlanarYUV(PrPixelFormat f)
+{
+    switch (f) {
+        case PrPixelFormat_YUV_420_MPEG2_FRAME_PICTURE_PLANAR_8u_601:
+        case PrPixelFormat_YUV_420_MPEG2_FRAME_PICTURE_PLANAR_8u_601_FullRange:
+        case PrPixelFormat_YUV_420_MPEG2_FRAME_PICTURE_PLANAR_8u_709:
+        case PrPixelFormat_YUV_420_MPEG2_FRAME_PICTURE_PLANAR_8u_709_FullRange:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_PLANAR_8u_601:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_PLANAR_8u_601_FullRange:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_PLANAR_8u_709:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_PLANAR_8u_709_FullRange:
+            return true;
+        default:
+            return false;
+    }
+}
 
 std::vector<FakeFrame*> g_frames;
 
@@ -126,7 +157,13 @@ prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pix
     const int bytesPerPixel = (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? 8 : 4;
 
     if (g_benchMode) {
-        const size_t bytes = static_cast<size_t>(width) * bytesPerPixel * height;
+        const bool planar  = IsPlanarYUV(pixelFormat);
+        const int  chromaW = (width + 1) / 2;
+        const int  chromaH = (height + 1) / 2;
+        const size_t bytes = planar
+            ? static_cast<size_t>(width) * height + 2u * chromaW * chromaH
+            : static_cast<size_t>(width) * bytesPerPixel * height;
+
         if (!g_benchFrame) {
             g_benchFrame = new FakeFrame();
             g_benchFrame->pixPtr = &g_benchFrame->pix;
@@ -135,9 +172,19 @@ prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pix
 
         memset(&g_benchFrame->pix, 0, sizeof(g_benchFrame->pix));
         g_benchFrame->pix.bounds       = *rect;
-        g_benchFrame->pix.rowbytes     = width * bytesPerPixel;
+        g_benchFrame->pix.rowbytes     = planar ? width : width * bytesPerPixel;
         g_benchFrame->pix.bitsperpixel = 32;
         g_benchFrame->pix.pix          = g_benchFrame->data.data();
+
+        // Раскладка нужна и в замере: без неё набор с плоскостями откажет,
+        // плагин отступит, и замер молча померил бы прежний путь под видом
+        // нового — то есть показал бы «выигрыша нет» на ровном месте.
+        g_benchFrame->planar  = planar;
+        g_benchFrame->planeW  = width;
+        g_benchFrame->planeH  = height;
+        g_benchFrame->offsetU = static_cast<size_t>(width) * height;
+        g_benchFrame->offsetV = g_benchFrame->offsetU +
+                                static_cast<size_t>(chromaW) * chromaH;
 
         *outHand = reinterpret_cast<PPixHand>(g_benchFrame);
         return suiteError_NoError;
@@ -150,9 +197,25 @@ prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pix
     f->pix.rowbytes     = width * bytesPerPixel;
     f->pix.bitsperpixel = 32;
 
+    size_t bytes = static_cast<size_t>(f->pix.rowbytes) * height;
+
+    // Родной YUV лежит иначе: яркость целиком, за ней две плоскости цветности
+    // вполовину меньше по каждой стороне. Всего полтора байта на пиксель против
+    // четырёх — и это, помимо скорости, вторая выгода от такой выдачи.
+    if (IsPlanarYUV(pixelFormat)) {
+        const int chromaW = (width + 1) / 2;
+        const int chromaH = (height + 1) / 2;
+        f->planar  = true;
+        f->planeW  = width;
+        f->planeH  = height;
+        f->offsetU = static_cast<size_t>(width) * height;
+        f->offsetV = f->offsetU + static_cast<size_t>(chromaW) * chromaH;
+        bytes      = f->offsetV + static_cast<size_t>(chromaW) * chromaH;
+        f->pix.rowbytes = width;
+    }
+
     // Заполняем узнаваемым мусором: так видно, что плагин действительно записал
     // кадр, а не оставил буфер как был. В замере это лишняя работа — см. выше.
-    const size_t bytes = static_cast<size_t>(f->pix.rowbytes) * height;
     if (g_benchMode) f->data.resize(bytes);
     else             f->data.assign(bytes, 0xCD);
     f->pix.pix = f->data.data();
@@ -189,6 +252,33 @@ prSuiteError GetRowBytes(PPixHand hand, csSDK_int32* outRowBytes)
 }
 
 prSuiteError DisposePPix(PPixHand) { return suiteError_NoError; }
+
+// Адреса трёх плоскостей. Настоящий Premiere волен разложить их где угодно
+// и с любым шагом; мы кладём подряд — но отвечаем честными числами, чтобы
+// плагин не имел права на догадки о раскладке.
+prSuiteError GetYUV420PlanarBuffers(PPixHand hand, PrPPixBufferAccess,
+                                    char** outY, csSDK_uint32* rowY,
+                                    char** outU, csSDK_uint32* rowU,
+                                    char** outV, csSDK_uint32* rowV)
+{
+    if (!hand) return suiteError_Fail;
+    FakeFrame* f = FrameOf(hand);
+
+    // Кадр не в плоскостях — набор обязан отказать, а не отдать что попало.
+    // Плагин на такой ответ должен уметь отступить, а не писать вслепую.
+    if (!f->planar) return suiteError_Fail;
+
+    const csSDK_uint32 chromaRow = (csSDK_uint32)((f->planeW + 1) / 2);
+    uint8_t* base = f->data.data();
+
+    *outY = reinterpret_cast<char*>(base);
+    *rowY = (csSDK_uint32)f->planeW;
+    *outU = reinterpret_cast<char*>(base + f->offsetU);
+    *rowU = chromaRow;
+    *outV = reinterpret_cast<char*>(base + f->offsetV);
+    *rowV = chromaRow;
+    return suiteError_NoError;
+}
 
 // ---------------------------------------------------------------------------
 // Кэш кадров хоста
@@ -237,6 +327,7 @@ PrSDKPPixSuite        g_ppixSuite    = {};
 PrSDKPPixCacheSuite   g_cacheSuite   = {};
 PrSDKTimeSuite        g_timeSuite    = {};
 PrSDKAppInfoSuite     g_appInfoSuite = {};
+PrSDKPPix2Suite       g_ppix2Suite   = {};
 
 // ---------------------------------------------------------------------------
 // SPBasicSuite — здесь и живёт вся имитация возраста хоста
@@ -258,6 +349,16 @@ SPErr AcquireSuite(const char* name, int version, const void** suite)
         if (!g_host->hasFrameCache) return kSPBadParameterError;
         g_cacheVersionGiven = version;
         *suite = &g_cacheSuite;
+        return kSPNoError;
+    }
+
+    // Адреса плоскостей появились во второй версии этого набора. Хост, который
+    // знает только первую, обязан отдать её — и плагин обязан на этом отказаться
+    // от родного YUV, а не звать функцию, которой в той версии нет.
+    if (strcmp(name, kPrSDKPPix2Suite) == 0) {
+        if (!g_host->hasPlanarBuffers) return kSPBadParameterError;
+        g_ppix2VersionGiven = version;
+        *suite = &g_ppix2Suite;
         return kSPNoError;
     }
     return kSPBadParameterError;
@@ -301,6 +402,8 @@ void BuildHostTables()
     g_ppixSuite.GetPixels   = GetPixels;
     g_ppixSuite.GetRowBytes = GetRowBytes;
     g_ppixSuite.Dispose     = DisposePPix;
+
+    g_ppix2Suite.GetYUV420PlanarBuffers = GetYUV420PlanarBuffers;
 
     g_cacheSuite.AddFrameToCache   = AddFrameToCache;
     g_cacheSuite.GetFrameFromCache = GetFrameFromCache;
@@ -360,6 +463,8 @@ struct RunResult
     bool colourIsRGB      = false;
     bool colourIdentity   = false;   // матрица единичная — мы же отдаём RGB
     bool colourEnumEnds   = false;   // перебор пространств завершается
+    bool firstTouchRace   = true;    // пережил ли первый одновременный запрос звука и кадра
+    bool streamInfoAgrees = true;    // одинаково ли описан поток при переборе и при прямом открытии
     int  colourPrimaries  = 0;
     int  colourTransfer   = 0;
     int  colourBitDepth   = 0;
@@ -675,7 +780,7 @@ double BenchAsync(ImportEntryProc entry, imStdParms* stdParms, void* privateData
 // Прогон замера целиком: открыть файл, взять сведения, сравнить пути.
 int RunBench(ImportEntryProc entry, const wchar_t* mediaPath, int frames, bool reversed)
 {
-    static const HostProfile modern = { "bench", 24, 99, true };
+    static const HostProfile modern = { "bench", 24, 99, true, 0, 0, true };
     g_host = &modern;
     g_benchMode = true;
 
@@ -777,6 +882,194 @@ int RunBench(ImportEntryProc entry, const wchar_t* mediaPath, int frames, bool r
         g_frames.clear();
     }
     return 0;
+}
+
+// Первое обращение к только что открытому файлу с двух сторон сразу.
+//
+// Так делает настоящий Premiere при импорте: конформирование звука идёт
+// в своём потоке, а показ клипа просит кадры в другом — и оба приходят
+// к ОДНОМУ и тому же потоку 0, где живут и видео, и первая дорожка звука.
+//
+// Опасность именно в первом обращении: и декодер, и дорожка звука
+// открываются лениво. Если открытие не защищено, два потока входят в него
+// разом, второй сносит то, что построил первый, и звук возвращает отказ.
+// Со стороны Premiere это «An unspecified error occurred while performing
+// a conform action», а при повторном импорте всё проходит — потому что
+// совпасть по времени во второй раз не обязано.
+//
+// Кругов много и с открытием заново: гонка на то и гонка, что с первого
+// раза может не сойтись.
+bool RunFirstTouchRace(ImportEntryProc entry, imStdParms* stdParms,
+                       const wchar_t* mediaPath, int rounds = 60)
+{
+    bool everFailed = false;
+
+    for (int round = 0; round < rounds && !everFailed; ++round) {
+        imFileOpenRec8 openRec = {};
+        openRec.fileinfo.filepath = reinterpret_cast<const prUTF16Char*>(mediaPath);
+        openRec.inStreamIdx       = 0;
+        openRec.inImporterID      = 1;
+
+        imFileRef fileRef = imInvalidHandleValue;
+        if (entry(imOpenFile8, stdParms, &fileRef, &openRec) != malNoError) return false;
+
+        imFileInfoRec8 fileInfo = {};
+        fileInfo.privatedata = openRec.privatedata;
+        fileInfo.streamIdx   = 0;
+        const prMALError infoResult =
+            entry(imGetInfo8, stdParms, &openRec.fileinfo, &fileInfo);
+        if (infoResult != malNoError && infoResult != imIterateStreams) {
+            entry(imCloseFile, stdParms, &fileRef, openRec.privatedata);
+            return false;
+        }
+        if (fileInfo.audInfo.numChannels <= 0 || !fileInfo.hasVideo) {
+            entry(imCloseFile, stdParms, &fileRef, openRec.privatedata);
+            return true;   // нечему сталкиваться
+        }
+
+        const int    channels = fileInfo.audInfo.numChannels;
+        const size_t samples  = 2048;
+        std::vector<std::vector<float>> audio(channels, std::vector<float>(samples, 0.0f));
+        std::vector<float*> ptrs(channels);
+        for (int c = 0; c < channels; ++c) ptrs[c] = audio[c].data();
+
+        // Оба потока стартуют по одному сигналу: без этого второй почти всегда
+        // приходит уже к готовому декодеру, и столкновения не происходит.
+        std::atomic<bool> go(false);
+        std::atomic<bool> audioFailed(false);
+
+        std::thread conform([&]() {
+            while (!go.load()) std::this_thread::yield();
+            imImportAudioRec7 rec = {};
+            rec.position    = 0;
+            rec.size        = static_cast<csSDK_uint32>(samples);
+            rec.buffer      = ptrs.data();
+            rec.privateData = openRec.privatedata;
+            if (entry(imImportAudio7, stdParms, fileRef, &rec) != malNoError) {
+                audioFailed.store(true);
+            }
+        });
+
+        std::thread playback([&]() {
+            while (!go.load()) std::this_thread::yield();
+            imFrameFormat format = {};
+            format.inFrameWidth  = fileInfo.vidInfo.imageWidth;
+            format.inFrameHeight = fileInfo.vidInfo.imageHeight;
+            format.inPixelFormat = PrPixelFormat_BGRA_4444_8u;
+
+            PPixHand hand = nullptr;
+            imSourceVideoRec videoRec = {};
+            videoRec.inPrivateData     = openRec.privatedata;
+            videoRec.inFrameFormats    = &format;
+            videoRec.inNumFrameFormats = 1;
+            videoRec.outFrame          = &hand;
+            videoRec.inFrameTime       = 0;
+            entry(imGetSourceVideo, stdParms, fileRef, &videoRec);
+        });
+
+        go.store(true);
+        conform.join();
+        playback.join();
+
+        if (audioFailed.load()) everFailed = true;
+
+        entry(imCloseFile, stdParms, &fileRef, openRec.privatedata);
+
+        std::lock_guard<std::mutex> lock(g_framesMutex);
+        for (FakeFrame* f : g_frames) delete f;
+        g_frames.clear();
+    }
+
+    return !everFailed;
+}
+
+// Сведения о дорожке звука не должны зависеть от того, как до неё дошли.
+//
+// Premiere узнаёт про потоки двумя способами: либо перебором — зовёт imGetInfo8
+// с номерами 0,1,2... на ОДНОЙ записи, пока та отвечает imIterateStreams, —
+// либо открывая файл сразу нужным потоком. Оба обязаны давать одно и то же.
+//
+// Эталон снаружи для этого не нужен, и это ценно: проверка сравнивает плагин
+// сам с собой и потому работает на любом файле, а не только на подготовленном.
+//
+// Ловит она вот что: проверка «звук уже открыт?» без сравнения НОМЕРА дорожки.
+// При переборе со второго потока она отвечала «да», и сведения о дорожках 1..N
+// приезжали от дорожки 0 — число каналов, частота, длина. На файле с четырьмя
+// одинаковыми дорожками OBS это незаметно; на файле с разными видно сразу.
+bool RunStreamInfoAgrees(ImportEntryProc entry, imStdParms* stdParms,
+                         const wchar_t* mediaPath)
+{
+    struct Info { int channels; float rate; csSDK_int64 duration; bool got; };
+
+    auto askByIteration = [&](csSDK_int32 wanted) -> Info {
+        Info out = {};
+        imFileOpenRec8 openRec = {};
+        openRec.fileinfo.filepath = reinterpret_cast<const prUTF16Char*>(mediaPath);
+        openRec.inStreamIdx       = 0;
+        openRec.inImporterID      = 1;
+
+        imFileRef fileRef = imInvalidHandleValue;
+        if (entry(imOpenFile8, stdParms, &fileRef, &openRec) != malNoError) return out;
+
+        for (csSDK_int32 idx = 0; idx <= wanted; ++idx) {
+            imFileInfoRec8 fi = {};
+            fi.privatedata = openRec.privatedata;
+            fi.streamIdx   = idx;
+            const prMALError r = entry(imGetInfo8, stdParms, &openRec.fileinfo, &fi);
+            if (r != malNoError && r != imIterateStreams) break;
+            if (idx == wanted) {
+                out.channels = fi.audInfo.numChannels;
+                out.rate     = fi.audInfo.sampleRate;
+                out.duration = fi.audDuration;
+                out.got      = true;
+            }
+            if (r != imIterateStreams) break;   // потоки кончились
+        }
+        entry(imCloseFile, stdParms, &fileRef, openRec.privatedata);
+        return out;
+    };
+
+    auto askDirectly = [&](csSDK_int32 wanted) -> Info {
+        Info out = {};
+        imFileOpenRec8 openRec = {};
+        openRec.fileinfo.filepath = reinterpret_cast<const prUTF16Char*>(mediaPath);
+        openRec.inStreamIdx       = wanted;
+        openRec.inImporterID      = 1;
+
+        imFileRef fileRef = imInvalidHandleValue;
+        if (entry(imOpenFile8, stdParms, &fileRef, &openRec) != malNoError) return out;
+
+        imFileInfoRec8 fi = {};
+        fi.privatedata = openRec.privatedata;
+        fi.streamIdx   = wanted;
+        const prMALError r = entry(imGetInfo8, stdParms, &openRec.fileinfo, &fi);
+        if (r == malNoError || r == imIterateStreams) {
+            out.channels = fi.audInfo.numChannels;
+            out.rate     = fi.audInfo.sampleRate;
+            out.duration = fi.audDuration;
+            out.got      = true;
+        }
+        entry(imCloseFile, stdParms, &fileRef, openRec.privatedata);
+        return out;
+    };
+
+    // Второй поток: на первом расхождению взяться неоткуда, там оба пути
+    // приходят к дорожке 0.
+    const Info viaIteration = askByIteration(1);
+    const Info direct       = askDirectly(1);
+
+    if (!viaIteration.got || !direct.got) return true;   // одной дорожки — нечего сверять
+
+    const bool same = viaIteration.channels == direct.channels &&
+                      viaIteration.rate     == direct.rate &&
+                      viaIteration.duration == direct.duration;
+    if (!same) {
+        printf("      stream 1 by iteration: %d ch, %.0f Hz, %lld samples\n",
+               viaIteration.channels, viaIteration.rate, (long long)viaIteration.duration);
+        printf("      stream 1 opened directly: %d ch, %.0f Hz, %lld samples\n",
+               direct.channels, direct.rate, (long long)direct.duration);
+    }
+    return same;
 }
 
 RunResult Run(ImportEntryProc entry, const HostProfile& profile,
@@ -923,6 +1216,13 @@ RunResult Run(ImportEntryProc entry, const HostProfile& profile,
         }
     }
 
+    // Гонку первого обращения гоняем на самом свежем профиле: она про наш
+    // код, а не про возраст хоста, и стоит десятков открытий файла
+    if (profile.interfaceVer >= 24) {
+        out.firstTouchRace   = RunFirstTouchRace(entry, &stdParms, mediaPath);
+        out.streamInfoAgrees = RunStreamInfoAgrees(entry, &stdParms, mediaPath);
+    }
+
     entry(imCloseFile, &stdParms, &fileRef, openRec.privatedata);
 
     {
@@ -976,14 +1276,15 @@ int wmain(int argc, wchar_t** argv)
     // Версии интерфейса импортёра из PrSDKImport.h: 24 = Premiere 23.2 и новее
     // (с тех пор не менялась), 21 = 13.0, то есть 2019 год.
     const HostProfile profiles[] = {
-        { "Premiere 2025 (as built)",   IMPORTMOD_VERSION, 99, true,  kAppPremierePro,  25 },
-        { "host with cache suite 7",    IMPORTMOD_VERSION,  7, true,  kAppPremierePro,  23 },
-        { "Premiere 13.0-era host",     21,                 2, true,  kAppPremierePro,  13 },
-        { "host without a frame cache", IMPORTMOD_VERSION, 99, false, kAppPremierePro,  25 },
-        { "After Effects",              IMPORTMOD_VERSION, 99, true,  kAppAfterEffects, 25 },
+        { "Premiere 2025 (as built)",   IMPORTMOD_VERSION, 99, true,  kAppPremierePro,  25, true  },
+        { "host with cache suite 7",    IMPORTMOD_VERSION,  7, true,  kAppPremierePro,  23, true  },
+        { "Premiere 13.0-era host",     21,                 2, true,  kAppPremierePro,  13, false },
+        { "host without a frame cache", IMPORTMOD_VERSION, 99, false, kAppPremierePro,  25, true  },
+        { "After Effects",              IMPORTMOD_VERSION, 99, true,  kAppAfterEffects, 25, true  },
     };
 
-    std::vector<uint8_t> reference;
+    // Эталонный кадр на каждый формат пикселей отдельно
+    std::map<int, std::vector<uint8_t>> reference;
 
     for (const HostProfile& profile : profiles) {
         printf("\n%s (interface %d, suites up to %d, frame cache %s)\n",
@@ -1027,8 +1328,18 @@ int wmain(int argc, wchar_t** argv)
             printf("    colour: primaries %d, transfer %d, %d-bit\n",
                    r.colourPrimaries, r.colourTransfer, r.colourBitDepth);
             Check(r.colourAsked,    "colour space declared to the host");
-            Check(r.colourIsRGB,    "declared as RGB, which is what we deliver");
-            Check(r.colourIdentity, "matrix declared identity after the conversion");
+            // Объявление обязано совпадать с тем, что реально лежит в буфере.
+            // Отдавая RGB, матрицу надо назвать единичной: она уже применена,
+            // и объявить её второй раз значит применить дважды. Отдавая
+            // плоскости, наоборот — матрица не применялась, и назвать её
+            // единичной значит не применить вовсе.
+            const bool planar = IsPlanarYUV((PrPixelFormat)r.pixelFormat);
+            Check(r.colourIsRGB == !planar,
+                  planar ? "declared as YUV, which is what we deliver"
+                         : "declared as RGB, which is what we deliver");
+            Check(r.colourIdentity == !planar,
+                  planar ? "matrix declared, because we did not apply it"
+                         : "matrix declared identity after the conversion");
             Check(r.colourEnumEnds, "the list of colour spaces ends");
         }
 
@@ -1047,15 +1358,38 @@ int wmain(int argc, wchar_t** argv)
             Check(r.async.stressSurvived, "async survives concurrent calls and a close mid-work");
         }
 
+        // Звук и кадр, запрошенные разом у только что открытого файла
+        if (!r.hasVideo || !r.hasAudio) {
+            printf("    %-44s SKIP (needs both video and audio)\n",
+                   "audio survives a conform racing playback");
+        } else {
+            Check(r.firstTouchRace, "audio survives a conform racing playback");
+        }
+
+        if (!r.hasAudio) {
+            printf("    %-44s SKIP (no audio)\n", "stream info is the same by either route");
+        } else {
+            Check(r.streamInfoAgrees, "stream info is the same by either route");
+        }
+
         // Кадр обязан быть тем же самым независимо от возраста хоста: версия
-        // набора влияет на скорость, а не на пиксели
+        // набора влияет на скорость, а не на пиксели.
+        //
+        // Сравнение идёт внутри своего формата, а не со всеми подряд. Хост
+        // постарше не отдаёт адреса плоскостей, поэтому получает BGRA, а не
+        // родной YUV, — и байты у них разные по определению. Сравнивать их
+        // между собой значило бы требовать, чтобы четыре байта на пиксель
+        // совпали с полутора.
         if (!r.hasVideo) {
             // сверять нечего
-        } else if (reference.empty()) {
-            reference = r.firstFrame;
         } else {
-            Check(!r.firstFrame.empty() && r.firstFrame == reference,
-                  "frame 0 identical to the newest host");
+            std::vector<uint8_t>& ref = reference[r.pixelFormat];
+            if (ref.empty()) {
+                ref = r.firstFrame;
+            } else {
+                Check(!r.firstFrame.empty() && r.firstFrame == ref,
+                      "frame 0 identical to the newest host");
+            }
         }
     }
 
