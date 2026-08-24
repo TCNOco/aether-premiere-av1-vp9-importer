@@ -321,6 +321,11 @@ private:
     // Статический счётчик, а не поле — декодеры друг о друге не знают и знать
     // не должны, а число их нужно каждому.
     static std::atomic<int> videoDecoders_;
+
+    // Сколько потоков дать декодеру, который открывается сейчас: число ядер
+    // делится между живыми. Обоснование и замеры — в .cpp
+    static int ThreadsForNewDecoder();
+
     bool     countedAsVideo_ = false;   // учтён ли ЭТОТ в счётчике
     bool     cacheFill_     = false;
     int64_t  lastRequested_ = -1;
