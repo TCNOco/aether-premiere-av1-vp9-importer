@@ -853,6 +853,22 @@ int main(int argc, char** argv)
         const int ch = info.audioChannels;
         const int32_t want = info.audioSampleRate;   // one second
 
+        // Printed BEFORE the read, not after, and that is the point.
+        //
+        // A crash inside the read used to leave the last line of output being
+        // the previous track, so the report said "died after track 0" when it
+        // had in fact died inside track 1. Announcing the track first makes the
+        // last line the true one. Costs one line of output; buys the difference
+        // between guessing and knowing.
+        printf("  track %d: %d ch, %d Hz, %lld samples, reading %d from %lld\n",
+               track, ch, info.audioSampleRate, (long long)info.audioSampleCount,
+               want, (long long)(info.audioSampleCount / 3));
+
+        if (ch <= 0 || want <= 0) {
+            printf("  track %d: REFUSED - %d channels at %d Hz\n", track, ch, want);
+            continue;
+        }
+
         std::vector<std::vector<float>> abuf(ch, std::vector<float>(want));
         std::vector<float*> ptrs(ch);
         for (int c = 0; c < ch; ++c) ptrs[c] = abuf[c].data();
@@ -879,9 +895,8 @@ int main(int argc, char** argv)
         // fractions and looks identical to an empty one
         const double db = peak > 0 ? 20.0 * std::log10(peak) : -120.0;
 
-        printf("  track %d: %d ch, %d Hz, %lld samples, peak %.1f dB%s\n",
-               track, ch, info.audioSampleRate, (long long)info.audioSampleCount,
-               db, db < -90.0 ? "  (digital silence)" : "");
+        printf("  track %d: peak %.1f dB%s\n",
+               track, db, db < -90.0 ? "  (digital silence)" : "");
     }
 
     // --- checks ---

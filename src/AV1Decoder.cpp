@@ -1421,10 +1421,25 @@ bool Decoder::DecodeMoreAudio() {
 
         if (err == 0) {
             const int n = audioFrame_->nb_samples;
-            for (auto& ch : pending_) ch.resize(n);
+
+            // Число дорожек берём по МЕНЬШЕМУ из двух: сколько каналов
+            // объявлено и сколько буферов на самом деле есть.
+            //
+            // Раньше индекс брался только из info_.audioChannels, и если бы
+            // они разошлись — pending_[c] уходил бы за пределы вектора. Такое
+            // расхождение мы считаем невозможным, но «невозможное» здесь
+            // означает падение всего Premiere с нарушением доступа, а не
+            // ошибку импорта. Цена проверки — одно сравнение на кадр.
+            const int channels = std::min<int>({ info_.audioChannels,
+                                                 (int)pending_.size(), 64 });
+            if (channels <= 0) {
+                SetError("audio buffers are not ready");
+                return false;
+            }
+
+            for (int c = 0; c < channels; ++c) pending_[c].resize(n);
 
             float* out[64] = {};
-            const int channels = std::min<int>(info_.audioChannels, 64);
             for (int c = 0; c < channels; ++c) out[c] = pending_[c].data();
 
             const int got = swr_convert(swr_, reinterpret_cast<uint8_t**>(out), n,
@@ -1488,13 +1503,23 @@ bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* d
     }
     if (startSample < 0) startSample = 0;
 
+    // Столько каналов, сколько объявлено хосту: буферы под них выделил он,
+    // и меньше писать нельзя — незаполненный канал останется мусором.
     const int channels = info_.audioChannels;
+    if (channels <= 0 || sampleCount <= 0) {
+        SetError("audio request makes no sense");
+        return false;
+    }
 
     // Тишина по умолчанию: если файл кончился раньше запроса, Premiere получит
     // нули, а не остатки прошлого куска
     for (int c = 0; c < channels; ++c) {
         std::fill_n(dst[c], sampleCount, 0.0f);
     }
+
+    // А вот ЧИТАТЬ можно только оттуда, где есть буферы. Разойтись эти два
+    // числа не должны, но если разойдутся — пусть будет тишина, а не падение.
+    const int readable = std::min<int>(channels, (int)pending_.size());
 
     // Назад или далеко вперёд — перематываем. Небольшой прыжок вперёд дешевле
     // домотать декодированием, как и с видео.
@@ -1548,9 +1573,28 @@ bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* d
         }
 
         const int64_t skip = want - chunkStart;
-        const int64_t take = std::min<int64_t>(pendingCount_ - skip, sampleCount - written);
+        int64_t take = std::min<int64_t>(pendingCount_ - skip, sampleCount - written);
 
-        for (int c = 0; c < channels; ++c) {
+        // Сколько отсчётов ФИЗИЧЕСКИ лежит в буфере за вычетом уже отданных.
+        //
+        // Выше проверки гарантируют 0 <= skip < pendingCount_, а pendingCount_
+        // не может превысить размер буфера — но гарантируют они это через
+        // цепочку допущений о том, что вернул swr_convert и что стоит в метках
+        // времени. Отрицательный или слишком большой take превращает memcpy
+        // в запись мимо памяти: внутри Premiere это не ошибка импорта,
+        // а закрывшийся Premiere.
+        const int64_t have = pending_.empty()
+                           ? 0
+                           : (int64_t)pending_[0].size() - (pendingOffset_ + skip);
+        if (take > have) take = have;
+
+        if (take <= 0) {
+            // Брать нечего — дальше по этому куску идти некуда
+            pendingCount_ = 0;
+            continue;
+        }
+
+        for (int c = 0; c < readable; ++c) {
             memcpy(dst[c] + written,
                    pending_[c].data() + pendingOffset_ + skip,
                    (size_t)take * sizeof(float));
