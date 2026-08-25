@@ -2,6 +2,7 @@
 // Copyright 2026 neoHaDe
 
 #include "app_diagnose.h"
+#include "localization.h"
 
 #include "../src/AV1Decoder.h"
 #include "../src/AV1Settings.h"
@@ -114,7 +115,7 @@ std::wstring WindowsName()
 
     std::wstring out = name.empty() ? L"Windows" : name;
     if (!disp.empty())  out += L" " + disp;
-    if (!build.empty()) out += L" (сборка " + build + L")";
+    if (!build.empty()) out += Tr(L" (build ", L" (сборка ") + build + L")";
     return out;
 }
 
@@ -131,18 +132,21 @@ std::wstring CpuName()
 
     SYSTEM_INFO si = {};
     GetSystemInfo(&si);
-    if (name.empty()) name = L"неизвестен";
-    return name + Format(L", логических процессоров: %lu", si.dwNumberOfProcessors);
+    if (name.empty()) name = Tr(L"unknown", L"неизвестен");
+    return name + Format(Tr(L", logical processors: %lu",
+                            L", логических процессоров: %lu"),
+                         si.dwNumberOfProcessors);
 }
 
 std::wstring MemorySize()
 {
     MEMORYSTATUSEX m = { sizeof(m) };
-    if (!GlobalMemoryStatusEx(&m)) return L"неизвестно";
+    if (!GlobalMemoryStatusEx(&m)) return Tr(L"unknown", L"неизвестно");
 
     const double total = (double)m.ullTotalPhys / (1024.0 * 1024.0 * 1024.0);
     const double avail = (double)m.ullAvailPhys / (1024.0 * 1024.0 * 1024.0);
-    return Format(L"%.1f ГБ, свободно %.1f ГБ", total, avail);
+    return Format(Tr(L"%.1f GB, %.1f GB available",
+                     L"%.1f ГБ, свободно %.1f ГБ"), total, avail);
 }
 
 // Видеокарта берётся через EnumDisplayDevices, а не через WMI.
@@ -168,12 +172,12 @@ std::wstring GpuName()
         if (key.rfind(prefix, 0) == 0) {
             key = key.substr(wcslen(prefix));
             const std::wstring ver = RegString(HKEY_LOCAL_MACHINE, key.c_str(), L"DriverVersion");
-            if (!ver.empty()) out += L", драйвер " + ver;
+            if (!ver.empty()) out += Tr(L", driver ", L", драйвер ") + ver;
         }
         break;
     }
 
-    return out.empty() ? L"не определилась" : out;
+    return out.empty() ? Tr(L"not detected", L"не определилась") : out;
 }
 
 // --------------------------------------------------------------------------
@@ -260,7 +264,7 @@ void CheckAdobe(Section& s)
         }
 
         if (versions.empty()) {
-            Add(s, app.name, State::Skip, L"не найдено");
+            Add(s, app.name, State::Skip, Tr(L"not found", L"не найдено"));
         } else {
             Add(s, app.name, State::Pass, versions);
             ++found;
@@ -268,13 +272,14 @@ void CheckAdobe(Section& s)
     }
 
     const std::wstring core = MediaCore();
-    Add(s, L"Общая папка плагинов",
+    Add(s, Tr(L"Shared plug-in folder", L"Общая папка плагинов"),
         GetFileAttributesW(core.c_str()) == INVALID_FILE_ATTRIBUTES ? State::Fail : State::Pass,
         core);
 
     if (found == 0) {
-        Add(s, L"Итог", State::Warn,
-            L"ни одного приложения Adobe не найдено — плагину нечего обслуживать");
+        Add(s, Tr(L"Summary", L"Итог"), State::Warn,
+            Tr(L"no Adobe applications found — there is no host for the plug-in",
+               L"ни одного приложения Adobe не найдено — плагину нечего обслуживать"));
     }
 }
 
@@ -319,39 +324,47 @@ void CheckPlugin(Section& s)
     else if (GetFileAttributesW(there.c_str()) != INVALID_FILE_ATTRIBUTES) prm = there;
 
     if (prm.empty()) {
-        Add(s, L"Файл плагина", State::Fail,
-            L"Aether.prm не найден ни рядом с программой, ни в папке Adobe");
+        Add(s, Tr(L"Plug-in file", L"Файл плагина"), State::Fail,
+            Tr(L"Aether.prm was not found beside this app or in Adobe's folder",
+               L"Aether.prm не найден ни рядом с программой, ни в папке Adobe"));
         return;
     }
 
     const std::wstring ver = FileVersionOf(prm);
-    Add(s, L"Файл плагина", State::Pass, prm);
-    Add(s, L"Версия плагина",
+    Add(s, Tr(L"Plug-in file", L"Файл плагина"), State::Pass, prm);
+    Add(s, Tr(L"Plug-in version", L"Версия плагина"),
         ver.empty() ? State::Warn : State::Info,
-        ver.empty() ? L"нет ресурса версии — сборка старее 1.2.2" : ver);
+        ver.empty() ? Tr(L"no version resource — build predates 1.2.2",
+                         L"нет ресурса версии — сборка старее 1.2.2") : ver);
 
     // Версия окна настроек и версия плагина обязаны совпадать: разъехались —
     // значит установка неполная, и половина поведения не та, что ожидается.
     const std::wstring mine = AETHER_VERSION_WSTR;
     if (!ver.empty() && ver != mine) {
-        Add(s, L"Совпадение версий", State::Warn,
-            L"плагин " + ver + L", это окно " + mine + L" — переустановите");
+        Add(s, Tr(L"Version match", L"Совпадение версий"), State::Warn,
+            Tr(L"plug-in ", L"плагин ") + ver +
+            Tr(L", this app ", L", это окно ") + mine +
+            Tr(L" — reinstall Aether", L" — переустановите"));
     }
 
     // Загрузка. Ровно то, что делает Premiere, и ровно то, что чаще всего
     // не получается: не тот разряд, нет библиотек рядом, нет прав.
     HMODULE m = LoadLibraryExW(prm.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!m) {
-        Add(s, L"Загрузка плагина", State::Fail,
-            Format(L"не загрузился, ошибка Windows %lu", GetLastError()));
+        Add(s, Tr(L"Load plug-in", L"Загрузка плагина"), State::Fail,
+            Format(Tr(L"failed to load, Windows error %lu",
+                      L"не загрузился, ошибка Windows %lu"), GetLastError()));
         return;
     }
-    Add(s, L"Загрузка плагина", State::Pass, L"библиотека загружается");
+    Add(s, Tr(L"Load plug-in", L"Загрузка плагина"), State::Pass,
+        Tr(L"library loads", L"библиотека загружается"));
 
-    Add(s, L"Точка входа",
+    Add(s, Tr(L"Entry point", L"Точка входа"),
         GetProcAddress(m, "xImportEntry") ? State::Pass : State::Fail,
-        GetProcAddress(m, "xImportEntry") ? L"xImportEntry на месте"
-                                          : L"xImportEntry нет — Premiere сочтёт файл чужим");
+        GetProcAddress(m, "xImportEntry")
+            ? Tr(L"xImportEntry is present", L"xImportEntry на месте")
+            : Tr(L"xImportEntry is missing — Premiere will reject the importer",
+                 L"xImportEntry нет — Premiere сочтёт файл чужим"));
     FreeLibrary(m);
 }
 
@@ -368,8 +381,8 @@ void CheckFfmpeg(Section& s)
     // сборку могли подменить, и тогда правда важнее нашей уверенности.
     struct Want { const char* codec; const wchar_t* label; };
     const Want wanted[] = {
-        { "libdav1d",  L"dav1d (AV1, процессор)" },
-        { "libvpx-vp9",L"libvpx (VP9, процессор)" },
+        { "libdav1d",  Tr(L"dav1d (AV1, CPU)", L"dav1d (AV1, процессор)") },
+        { "libvpx-vp9",Tr(L"libvpx (VP9, CPU)", L"libvpx (VP9, процессор)") },
         { "av1_cuvid", L"av1_cuvid (AV1, NVIDIA)" },
         { "vp9_cuvid", L"vp9_cuvid (VP9, NVIDIA)" },
         { "av1_qsv",   L"av1_qsv (AV1, Intel)" },
@@ -377,16 +390,24 @@ void CheckFfmpeg(Section& s)
     for (const Want& w : wanted) {
         const AVCodec* c = avcodec_find_decoder_by_name(w.codec);
         Add(s, w.label, c ? State::Pass : State::Skip,
-            c ? L"есть" : L"нет в этой сборке ffmpeg");
+            c ? Tr(L"available", L"есть")
+              : Tr(L"not present in this FFmpeg build",
+                   L"нет в этой сборке ffmpeg"));
     }
 
-    const wchar_t* mode = L"автоматически";
+    const wchar_t* mode = Tr(L"automatic", L"автоматически");
     switch (av1imp::CurrentMode()) {
-        case av1imp::DecodeMode::Software: mode = L"процессором (задано вручную)"; break;
-        case av1imp::DecodeMode::Hardware: mode = L"видеокартой (задано вручную)"; break;
+        case av1imp::DecodeMode::Software:
+            mode = Tr(L"CPU (selected manually)",
+                      L"процессором (задано вручную)");
+            break;
+        case av1imp::DecodeMode::Hardware:
+            mode = Tr(L"GPU (selected manually)",
+                      L"видеокартой (задано вручную)");
+            break;
         default: break;
     }
-    Add(s, L"Выбор декодера", State::Info, mode);
+    Add(s, Tr(L"Decoder selection", L"Выбор декодера"), State::Info, mode);
 }
 
 // --------------------------------------------------------------------------
@@ -403,40 +424,50 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
 {
     av1imp::Decoder dec;
     if (!dec.Open(Narrow(path), av1imp::PreferHardware(), true)) {
-        Add(s, label, State::Fail, L"не открылся: " + Widen(dec.LastError()));
+        Add(s, label, State::Fail,
+            Tr(L"failed to open: ", L"не открылся: ") + Widen(dec.LastError()));
         return;
     }
 
     const av1imp::MediaInfo& mi = dec.Info();
 
     if (verbose) {
-        Add(s, L"Внутри", State::Info,
-            Format(L"%hs %dx%d, %d бит, %.3f кадр/с, %.1f с",
+        Add(s, Tr(L"Contents", L"Внутри"), State::Info,
+            Format(Tr(L"%hs %dx%d, %d-bit, %.3f fps, %.1f s",
+                      L"%hs %dx%d, %d бит, %.3f кадр/с, %.1f с"),
                    mi.codecName.c_str(), mi.width, mi.height, mi.bitDepth,
                    mi.fps, mi.durationSec));
-        Add(s, L"Декодер", State::Info, Widen(mi.decoderName) +
-            (mi.hardwareDecode ? L" (видеокарта)" : L" (процессор)"));
-        Add(s, L"Цвет", State::Info,
-            Format(L"первичные %d, кривая %d, матрица %d, размах %s",
+        Add(s, Tr(L"Decoder", L"Декодер"), State::Info, Widen(mi.decoderName) +
+            (mi.hardwareDecode ? Tr(L" (GPU)", L" (видеокарта)")
+                               : Tr(L" (CPU)", L" (процессор)")));
+        Add(s, Tr(L"Colour", L"Цвет"), State::Info,
+            Format(Tr(L"primaries %d, transfer %d, matrix %d, %s range",
+                      L"первичные %d, кривая %d, матрица %d, размах %s"),
                    mi.colourPrimaries, mi.colourTransfer, mi.colourMatrix,
-                   mi.fullRange ? L"полный" : L"урезанный"));
+                   mi.fullRange ? Tr(L"full", L"полный")
+                                : Tr(L"limited", L"урезанный")));
         // Дорожку надо открыть: до этого число каналов и частота пустые,
         // и отчёт показывал бы «каналов 0, 0 Гц» у совершенно исправного файла.
         if (mi.audioStreamCount > 0 && dec.OpenAudio(0)) {
-            Add(s, L"Звук", State::Info,
-                Format(L"дорожек %d, каналов %d, %d Гц, отсчётов %lld",
+            Add(s, Tr(L"Audio", L"Звук"), State::Info,
+                Format(Tr(L"%d tracks, %d channels, %d Hz, %lld samples",
+                          L"дорожек %d, каналов %d, %d Гц, отсчётов %lld"),
                        mi.audioStreamCount, mi.audioChannels, mi.audioSampleRate,
                        mi.audioSampleCount));
         } else if (mi.audioStreamCount > 0) {
-            Add(s, L"Звук", State::Fail,
-                Format(L"дорожек %d, но первая не открылась", mi.audioStreamCount));
+            Add(s, Tr(L"Audio", L"Звук"), State::Fail,
+                Format(Tr(L"%d tracks, but the first one did not open",
+                          L"дорожек %d, но первая не открылась"),
+                       mi.audioStreamCount));
         } else {
-            Add(s, L"Звук", State::Skip, L"дорожек нет");
+            Add(s, Tr(L"Audio", L"Звук"), State::Skip,
+                Tr(L"no tracks", L"дорожек нет"));
         }
     }
 
     if (!mi.hasVideo) {
-        Add(s, label, State::Pass, L"файл только со звуком, открыт");
+        Add(s, label, State::Pass,
+            Tr(L"audio-only file opened", L"файл только со звуком, открыт"));
         return;
     }
 
@@ -444,25 +475,32 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
     std::vector<uint8_t> buf((size_t)stride * mi.height);
 
     if (!dec.GetFrameBGRA(0, buf.data(), stride, mi.width, mi.height)) {
-        Add(s, label, State::Fail, L"первый кадр не отдался");
+        Add(s, label, State::Fail,
+            Tr(L"first frame was not delivered", L"первый кадр не отдался"));
         return;
     }
 
     const int64_t middle = mi.frameCount > 2 ? mi.frameCount / 2 : 0;
     if (middle && !dec.GetFrameBGRA(middle, buf.data(), stride, mi.width, mi.height)) {
-        Add(s, label, State::Fail, Format(L"кадр %lld не отдался — сломана перемотка", middle));
+        Add(s, label, State::Fail,
+            Format(Tr(L"frame %lld was not delivered — seeking is broken",
+                      L"кадр %lld не отдался — сломана перемотка"), middle));
         return;
     }
 
     // Ещё раз первый: проверяем возврат назад, он идёт другим путём, чем
     // движение вперёд, и ломается отдельно.
     if (middle && !dec.GetFrameBGRA(0, buf.data(), stride, mi.width, mi.height)) {
-        Add(s, label, State::Fail, L"возврат к началу не сработал");
+        Add(s, label, State::Fail,
+            Tr(L"returning to the start failed",
+               L"возврат к началу не сработал"));
         return;
     }
 
     Add(s, label, State::Pass,
-        Format(L"%dx%d, %d бит, кадры 0 и %lld", mi.width, mi.height, mi.bitDepth, middle));
+        Format(Tr(L"%dx%d, %d-bit, frames 0 and %lld",
+                  L"%dx%d, %d бит, кадры 0 и %lld"),
+               mi.width, mi.height, mi.bitDepth, middle));
 }
 
 // Вшитые клипы лежат рядом с программой, в подпапке. Установщик кладёт их
@@ -472,11 +510,12 @@ void CheckBundled(Section& s, const std::function<void(const std::wstring&)>& on
 {
     struct Sample { const wchar_t* file; const wchar_t* label; };
     const Sample samples[] = {
-        { L"av1.mp4",     L"AV1, 8 бит" },
-        { L"av1_10.mp4",  L"AV1, 10 бит" },
-        { L"vp9.webm",    L"VP9 в WebM" },
-        { L"vfr.mkv",     L"плавающая частота, MKV" },
-        { L"opus.mka",    L"Opus, только звук" },
+        { L"av1.mp4",     Tr(L"AV1, 8-bit", L"AV1, 8 бит") },
+        { L"av1_10.mp4",  Tr(L"AV1, 10-bit", L"AV1, 10 бит") },
+        { L"vp9.webm",    Tr(L"VP9 in WebM", L"VP9 в WebM") },
+        { L"vfr.mkv",     Tr(L"variable frame rate, MKV",
+                             L"плавающая частота, MKV") },
+        { L"opus.mka",    Tr(L"Opus, audio only", L"Opus, только звук") },
     };
 
     const std::wstring dir = ExeFolder() + L"samples\\";
@@ -485,7 +524,9 @@ void CheckBundled(Section& s, const std::function<void(const std::wstring&)>& on
     for (const Sample& sm : samples) {
         const std::wstring path = dir + sm.file;
         if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            Add(s, sm.label, State::Skip, L"пробный файл не установлен");
+            Add(s, sm.label, State::Skip,
+                Tr(L"sample file is not installed",
+                   L"пробный файл не установлен"));
             ++missing;
             continue;
         }
@@ -494,8 +535,9 @@ void CheckBundled(Section& s, const std::function<void(const std::wstring&)>& on
     }
 
     if (missing == (int)(sizeof(samples) / sizeof(samples[0]))) {
-        Add(s, L"Пробные файлы", State::Warn,
-            L"папка samples рядом с программой пуста — переустановите плагин");
+        Add(s, Tr(L"Sample files", L"Пробные файлы"), State::Warn,
+            Tr(L"the samples folder beside the app is empty — reinstall Aether",
+               L"папка samples рядом с программой пуста — переустановите плагин"));
     }
 }
 
@@ -623,16 +665,19 @@ std::wstring Report::Json() const
         out += L"]}";
     }
 
-    out += L"]}";
+    out += L"],\"plainText\":\"" + JsonEscape(PlainText()) + L"\"}";
     return Scrub(out);
 }
 
 std::wstring Report::PlainText() const
 {
-    const wchar_t* mark[] = { L"OK  ", L"СБОЙ", L"!   ", L"    ", L"—   " };
+    const wchar_t* mark[] = {
+        L"OK  ", Tr(L"FAIL", L"СБОЙ"), L"!   ", L"    ", L"—   "
+    };
 
-    std::wstring out = L"Отчёт диагностики Aether\n";
-    out += L"Версия окна: ";
+    std::wstring out = Tr(L"Aether diagnostic report\n",
+                          L"Отчёт диагностики Aether\n");
+    out += Tr(L"App version: ", L"Версия окна: ");
     out += AETHER_VERSION_WSTR;
     out += L"\n\n";
 
@@ -648,8 +693,11 @@ std::wstring Report::PlainText() const
         out += L"\n";
     }
 
-    out += L"Проверено ядро плагина на этой машине. Это не доказывает, что\n"
-           L"Premiere откроет файл: он ходит к плагину своим путём.\n";
+    out += Tr(
+        L"The plug-in core was checked on this machine. This does not prove\n"
+        L"that Premiere will open the file: it reaches the plug-in differently.\n",
+        L"Проверено ядро плагина на этой машине. Это не доказывает, что\n"
+        L"Premiere откроет файл: он ходит к плагину своим путём.\n");
 
     return Scrub(out);
 }
@@ -659,18 +707,18 @@ Report Run(const std::wstring& userFile,
 {
     Report r;
 
-    onStep(L"система");
+    onStep(Tr(L"system", L"система"));
     {
         Section s;
-        s.title = L"Система";
+        s.title = Tr(L"System", L"Система");
         Add(s, L"Windows",     State::Info, WindowsName());
-        Add(s, L"Процессор",   State::Info, CpuName());
-        Add(s, L"Память",      State::Info, MemorySize());
-        Add(s, L"Видеокарта",  State::Info, GpuName());
+        Add(s, Tr(L"CPU", L"Процессор"), State::Info, CpuName());
+        Add(s, Tr(L"Memory", L"Память"), State::Info, MemorySize());
+        Add(s, Tr(L"GPU", L"Видеокарта"), State::Info, GpuName());
         r.sections.push_back(s);
     }
 
-    onStep(L"приложения Adobe");
+    onStep(Tr(L"Adobe applications", L"приложения Adobe"));
     {
         Section s;
         s.title = L"Adobe";
@@ -678,7 +726,7 @@ Report Run(const std::wstring& userFile,
         r.sections.push_back(s);
     }
 
-    onStep(L"плагин");
+    onStep(Tr(L"plug-in", L"плагин"));
     {
         Section s;
         s.title = L"Aether";
@@ -689,21 +737,21 @@ Report Run(const std::wstring& userFile,
 
     {
         Section s;
-        s.title = L"Распаковка";
+        s.title = Tr(L"Decoding", L"Распаковка");
         CheckBundled(s, onStep);
         r.sections.push_back(s);
     }
 
     if (!userFile.empty()) {
-        onStep(L"ваш файл");
+        onStep(Tr(L"your file", L"ваш файл"));
         Section s;
-        s.title = L"Ваш файл";
-        Add(s, L"Путь", State::Info, userFile);
-        CheckOneFile(s, userFile, L"Проверка", true);
+        s.title = Tr(L"Your file", L"Ваш файл");
+        Add(s, Tr(L"Path", L"Путь"), State::Info, userFile);
+        CheckOneFile(s, userFile, Tr(L"Check", L"Проверка"), true);
         r.sections.push_back(s);
     }
 
-    onStep(L"готово");
+    onStep(Tr(L"done", L"готово"));
     return r;
 }
 

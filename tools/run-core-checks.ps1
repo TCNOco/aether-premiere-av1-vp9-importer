@@ -21,6 +21,7 @@ param(
     [string]$Fuzz     = "build\fuzz_test.exe",
     [string]$Settings = "build\settings_test.exe",
     [string]$Math     = "build\importer_math_test.exe",
+    [string]$Diagnose = "build\AetherDiagnose-test.exe",
     [switch]$NoFuzz
 )
 
@@ -33,6 +34,7 @@ $ErrorActionPreference = "Continue"
 if (-not (Test-Path $Exe))      { throw "not built: $Exe" }
 if (-not (Test-Path $Settings)) { throw "not built: $Settings" }
 if (-not (Test-Path $Math))     { throw "not built: $Math" }
+if (-not (Test-Path $Diagnose)) { throw "not built: $Diagnose" }
 if (-not (Test-Path $MediaDir)) { throw "no media: $MediaDir - run tools\make-test-media.ps1" }
 
 $settingsOutput = & $Settings | Out-String
@@ -48,6 +50,24 @@ if ($LASTEXITCODE -ne 0 -or $mathOutput -notmatch "ALL IMPORTER MATH CHECKS PASS
     throw "importer math checks failed"
 }
 Write-Host "importer duration  overflow OK"
+
+$diagnoseFile = Join-Path $MediaDir "av1_8bit.mp4"
+$englishReport = & $Diagnose --json --lang en $diagnoseFile 2>$null | Out-String
+if ($englishReport -notmatch '"title":"System"' -or
+    $englishReport -notmatch '"title":"Your file"' -or
+    $englishReport -notmatch '"plainText":"Aether diagnostic report') {
+    Write-Host $englishReport.Trim()
+    throw "English diagnostic report is missing or mixed"
+}
+
+$russianReport = & $Diagnose --json --lang ru $diagnoseFile 2>$null | Out-String
+if ($russianReport -notmatch '"title":"Система"' -or
+    $russianReport -notmatch '"title":"Ваш файл"' -or
+    $russianReport -notmatch '"plainText":"Отчёт диагностики Aether') {
+    Write-Host $russianReport.Trim()
+    throw "Russian diagnostic report is missing or mixed"
+}
+Write-Host "diagnostic i18n    English/Russian OK"
 
 $expect = [ordered]@{
     "av1_8bit.mp4"    = "accept"

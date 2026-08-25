@@ -13,9 +13,10 @@
 //      с ключом --json и читает ответ. Проверка у панели и у окна выходит
 //      буквально одна и та же, расходиться нечему.
 //
-//   AetherDiagnose.exe [--json] [файл, на который жалуются]
+//   AetherDiagnose.exe [--json] [--lang en|ru] [файл, на который жалуются]
 
 #include "app_diagnose.h"
+#include "localization.h"
 
 #include <windows.h>
 #include <cstdio>
@@ -26,11 +27,16 @@ int wmain(int argc, wchar_t** argv)
 {
     bool json = false;
     std::wstring file;
+    aether::UiLanguage language = aether::DetectUiLanguage();
 
     for (int i = 1; i < argc; ++i) {
         if (wcscmp(argv[i], L"--json") == 0) json = true;
+        else if (wcscmp(argv[i], L"--lang") == 0 && i + 1 < argc) {
+            language = aether::ParseUiLanguage(argv[++i]);
+        }
         else if (file.empty())               file = argv[i];
     }
+    aether::SetUiLanguage(language);
 
     // Вывод в UTF-8, а не в кодовую страницу консоли.
     //
