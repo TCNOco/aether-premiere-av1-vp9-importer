@@ -13,6 +13,8 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cwchar>
+#include <iomanip>
+#include <sstream>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -432,33 +434,41 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
     const av1imp::MediaInfo& mi = dec.Info();
 
     if (verbose) {
-        Add(s, Tr(L"Contents", L"Внутри"), State::Info,
-            Format(Tr(L"%hs %dx%d, %d-bit, %.3f fps, %.1f s",
-                      L"%hs %dx%d, %d бит, %.3f кадр/с, %.1f с"),
-                   mi.codecName.c_str(), mi.width, mi.height, mi.bitDepth,
-                   mi.fps, mi.durationSec));
+        std::wostringstream contents;
+        contents << Widen(mi.codecName) << L" " << mi.width << L"x" << mi.height
+                 << L", " << mi.bitDepth << Tr(L"-bit, ", L" бит, ")
+                 << std::fixed << std::setprecision(3) << mi.fps
+                 << Tr(L" fps, ", L" кадр/с, ")
+                 << std::setprecision(1) << mi.durationSec << Tr(L" s", L" с");
+        Add(s, Tr(L"Contents", L"Внутри"), State::Info, contents.str());
+
         Add(s, Tr(L"Decoder", L"Декодер"), State::Info, Widen(mi.decoderName) +
             (mi.hardwareDecode ? Tr(L" (GPU)", L" (видеокарта)")
                                : Tr(L" (CPU)", L" (процессор)")));
-        Add(s, Tr(L"Colour", L"Цвет"), State::Info,
-            Format(Tr(L"primaries %d, transfer %d, matrix %d, %s range",
-                      L"первичные %d, кривая %d, матрица %d, размах %s"),
-                   mi.colourPrimaries, mi.colourTransfer, mi.colourMatrix,
-                   mi.fullRange ? Tr(L"full", L"полный")
-                                : Tr(L"limited", L"урезанный")));
+
+        std::wostringstream colour;
+        colour << Tr(L"primaries ", L"первичные ") << mi.colourPrimaries
+               << Tr(L", transfer ", L", кривая ") << mi.colourTransfer
+               << Tr(L", matrix ", L", матрица ") << mi.colourMatrix
+               << Tr(L", range ", L", размах ")
+               << (mi.fullRange ? Tr(L"full", L"полный")
+                                : Tr(L"limited", L"урезанный"));
+        Add(s, Tr(L"Colour", L"Цвет"), State::Info, colour.str());
+
         // Дорожку надо открыть: до этого число каналов и частота пустые,
         // и отчёт показывал бы «каналов 0, 0 Гц» у совершенно исправного файла.
         if (mi.audioStreamCount > 0 && dec.OpenAudio(0)) {
-            Add(s, Tr(L"Audio", L"Звук"), State::Info,
-                Format(Tr(L"%d tracks, %d channels, %d Hz, %lld samples",
-                          L"дорожек %d, каналов %d, %d Гц, отсчётов %lld"),
-                       mi.audioStreamCount, mi.audioChannels, mi.audioSampleRate,
-                       mi.audioSampleCount));
+            std::wostringstream audio;
+            audio << mi.audioStreamCount << Tr(L" tracks, ", L" дорожек, ")
+                  << mi.audioChannels << Tr(L" channels, ", L" каналов, ")
+                  << mi.audioSampleRate << Tr(L" Hz, ", L" Гц, ")
+                  << mi.audioSampleCount << Tr(L" samples", L" отсчётов");
+            Add(s, Tr(L"Audio", L"Звук"), State::Info, audio.str());
         } else if (mi.audioStreamCount > 0) {
-            Add(s, Tr(L"Audio", L"Звук"), State::Fail,
-                Format(Tr(L"%d tracks, but the first one did not open",
-                          L"дорожек %d, но первая не открылась"),
-                       mi.audioStreamCount));
+            std::wstring detail = std::to_wstring(mi.audioStreamCount) +
+                Tr(L" tracks, but the first one did not open",
+                   L" дорожек, но первая не открылась");
+            Add(s, Tr(L"Audio", L"Звук"), State::Fail, detail);
         } else {
             Add(s, Tr(L"Audio", L"Звук"), State::Skip,
                 Tr(L"no tracks", L"дорожек нет"));
@@ -483,8 +493,9 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
     const int64_t middle = mi.frameCount > 2 ? mi.frameCount / 2 : 0;
     if (middle && !dec.GetFrameBGRA(middle, buf.data(), stride, mi.width, mi.height)) {
         Add(s, label, State::Fail,
-            Format(Tr(L"frame %lld was not delivered — seeking is broken",
-                      L"кадр %lld не отдался — сломана перемотка"), middle));
+            Tr(L"frame ", L"кадр ") + std::to_wstring(middle) +
+            Tr(L" was not delivered — seeking is broken",
+               L" не отдался — сломана перемотка"));
         return;
     }
 
@@ -497,10 +508,10 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
         return;
     }
 
-    Add(s, label, State::Pass,
-        Format(Tr(L"%dx%d, %d-bit, frames 0 and %lld",
-                  L"%dx%d, %d бит, кадры 0 и %lld"),
-               mi.width, mi.height, mi.bitDepth, middle));
+    std::wostringstream delivered;
+    delivered << mi.width << L"x" << mi.height << L", " << mi.bitDepth
+              << Tr(L"-bit, frames 0 and ", L" бит, кадры 0 и ") << middle;
+    Add(s, label, State::Pass, delivered.str());
 }
 
 // Вшитые клипы лежат рядом с программой, в подпапке. Установщик кладёт их
