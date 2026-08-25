@@ -86,7 +86,7 @@ if not exist "%SDK%" (
     echo.
     echo Adobe SDK not found in sdk\ - plugin_test and host_test skipped.
     echo That is expected on a machine that only builds the core.
-    exit /b 0
+    goto after_sdk_tests
 )
 
 REM host_test - drives the .prm from a fake host that can pretend to be older
@@ -103,3 +103,14 @@ cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    /I"%SDK%" ^
    tools\plugin_test.cpp ^
    /Fe:build\plugin_test.exe "/Fo:build\obj\\"
+if errorlevel 1 exit /b 1
+
+:after_sdk_tests
+REM Sanitizer runtimes are added to PATH by vcvars64 inside this setlocal.
+REM Run checks here when requested; after the batch exits that PATH is gone
+REM and an ASan-instrumented executable cannot even start.
+if /I "%AETHER_RUN_CORE_CHECKS%"=="1" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File tools\run-core-checks.ps1
+    if errorlevel 1 exit /b 1
+)
+exit /b 0

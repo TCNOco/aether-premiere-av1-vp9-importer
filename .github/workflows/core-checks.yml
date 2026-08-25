@@ -82,10 +82,10 @@ jobs:
       - name: Rebuild and run under AddressSanitizer
         run: |
           $env:AETHER_ASAN = "1"
+          $env:AETHER_RUN_CORE_CHECKS = "1"
           $env:ASAN_OPTIONS = "halt_on_error=1"
           $env:PATH = "$pwd\ffmpeg\bin;$env:PATH"
           .\build-test.bat
-          powershell -File tools\run-core-checks.ps1
 
       - name: Keep the log if something went wrong
         if: failure()
