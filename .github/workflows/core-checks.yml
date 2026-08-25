@@ -54,8 +54,13 @@ jobs:
         run: |
           $tag = "autobuild-2026-08-22-12-58"
           $zip = "ffmpeg-n8.1.2-44-g7c533d0f86-win64-lgpl-shared-8.1.zip"
+          $expectedSha256 = "e04fcdac8a27e0fcee986376cac0cb20fd0f17fe5896b42cbc5efcb895b82f87"
           $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$tag/$zip"
           Invoke-WebRequest $url -OutFile ffmpeg.zip
+          $actualSha256 = (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "FFmpeg SHA256 mismatch: expected $expectedSha256, got $actualSha256"
+          }
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
           $inner = (Get-ChildItem ffmpeg-tmp -Directory | Select-Object -First 1).FullName
           Move-Item $inner ffmpeg

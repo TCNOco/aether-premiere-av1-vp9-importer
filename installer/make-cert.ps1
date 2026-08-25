@@ -32,12 +32,28 @@ New-Item -ItemType Directory -Force $signDir | Out-Null
 New-Item -ItemType Directory -Force $toolDir | Out-Null
 
 # ---------------------------------------------------------------- подписывалка
+$toolSha256 = "ffc2223167225ce61d024eb463fc5ad1a1be16133f99ef334a646f7311916c98"
 if (-not (Test-Path $tool)) {
-    # Официальный репозиторий Adobe. Версия закреплена намеренно: подпись —
-    # не то место, где хочется получить неожиданное поведение от «последней».
-    $url = "https://raw.githubusercontent.com/Adobe-CEP/CEP-Resources/master/ZXPSignCMD/4.1.3/x64/ZXPSignCmd.exe"
+    # Официальный репозиторий Adobe. Закреплены и версия, и commit: ветка
+    # master может измениться без нашего коммита, а подписывающий EXE не должен.
+    $commit = "8897cfaf9801b0ad5321951199dd831a82964583"
+    $url = "https://raw.githubusercontent.com/Adobe-CEP/CEP-Resources/$commit/ZXPSignCMD/4.1.3/x64/ZXPSignCmd.exe"
+    $download = $tool + ".download"
     Write-Host "качаю ZXPSignCmd 4.1.3 с github.com/Adobe-CEP"
-    Invoke-WebRequest -Uri $url -OutFile $tool -UseBasicParsing
+    Invoke-WebRequest -Uri $url -OutFile $download -UseBasicParsing
+    $downloadHash = (Get-FileHash $download -Algorithm SHA256).Hash
+    if ($downloadHash -ne $toolSha256) {
+        Remove-Item $download -Force -ErrorAction SilentlyContinue
+        throw "SHA256 ZXPSignCmd не совпал: ожидался $toolSha256, получен $downloadHash"
+    }
+    Move-Item $download $tool -Force
+}
+
+# Проверяем и уже лежащий файл: одна успешная загрузка не защищает от случайной
+# замены или повреждения инструмента на машине сборки.
+$actualToolHash = (Get-FileHash $tool -Algorithm SHA256).Hash
+if ($actualToolHash -ne $toolSha256) {
+    throw "неверный SHA256 у ${tool}: ожидался $toolSha256, получен $actualToolHash"
 }
 Write-Host "подписывалка: $tool"
 
