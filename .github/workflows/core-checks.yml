@@ -77,7 +77,7 @@ jobs:
       - name: Run the checks
         run: |
           $env:PATH = "$pwd\ffmpeg\bin;$env:PATH"
-          powershell -File tools\run-core-checks.ps1
+          powershell -File tools\run-core-checks.ps1 -NoDiagnose
 
       - name: Rebuild and run under AddressSanitizer
         run: |
