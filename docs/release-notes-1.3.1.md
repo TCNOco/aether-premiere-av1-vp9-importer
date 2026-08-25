@@ -1,6 +1,6 @@
-﻿# Aether 1.3.1
+# Aether 1.3.1
 
-A hardening release. No new features â€” the plug-in is safer to load, stricter
+A hardening release. No new features - the plug-in is safer to load, stricter
 about what it opens, and quieter on AAC audio inside Matroska.
 
 ## FFmpeg only from the plug-in folder
@@ -27,7 +27,7 @@ container without EOF can no longer spin the host thread forever.
 
 Matroska stores audio timestamps on a 1 ms grid. An AAC frame is 1024 samples
 (~21.33 ms). On every boundary the plug-in saw a false overlap or gap of a
-handful of samples â€” Premiere heard that as crackle. WebM with Opus was fine:
+handful of samples - Premiere heard that as crackle. WebM with Opus was fine:
 its frame is exactly 20 ms.
 
 Continuous reads now stitch those boundaries; after a seek the grid is not
@@ -40,7 +40,7 @@ rewritten, so scrubbing stays correct. Checked in Premiere Pro 26.
 - Input frame-format structs from Premiere are no longer written into.
 - Stride checks use 64-bit arithmetic.
 - Files open with `FILE_SHARE_WRITE | FILE_SHARE_DELETE` so a recording that is
-  still being written is not rejected as â€œunsupportedâ€.
+  still being written is not rejected as "unsupported".
 - `settings.ini` is read once per process (environment variables still win on
   every call). The CEP panel writes it the same way C++ does: temporary file,
   then replace.
@@ -59,8 +59,8 @@ Encoder, run it. Administrator rights are required. Installs over any earlier
 version; no need to uninstall first.
 
 There is also **`Aether-1.3.1-portable.zip`**: `Aether` goes into
-`â€¦\Adobe\Common\Plug-ins\7.0\MediaCore\`, and `com.nehade.aether` into
-`â€¦\Common Files\Adobe\CEP\extensions\` if you want the panel. `INSTALL.txt` in
+`...\Adobe\Common\Plug-ins\7.0\MediaCore\`, and `com.nehade.aether` into
+`...\Common Files\Adobe\CEP\extensions\` if you want the panel. `INSTALL.txt` in
 the archive spells it out.
 
 The installer is not code-signed, so Windows will warn about an unknown
