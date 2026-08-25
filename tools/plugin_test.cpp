@@ -105,8 +105,9 @@ int wmain(int argc, wchar_t** argv)
     //
     // Раньше здесь стояла проверка наоборот — ждала ffmpeg сразу после загрузки.
     // После переноса она перестала соответствовать замыслу и просто врала.
-    const wchar_t* modules[] = { L"avutil-60.dll", L"avcodec-62.dll",
-                                 L"avformat-62.dll", L"swscale-9.dll" };
+    const wchar_t* modules[] = { L"avutil-60.dll", L"swresample-6.dll",
+                                 L"swscale-9.dll", L"avcodec-62.dll",
+                                 L"avformat-62.dll" };
     bool tooEarly = false;
     for (const wchar_t* m : modules) {
         if (GetModuleHandleW(m)) {

@@ -354,6 +354,7 @@ You will need, none of which are in this repository:
 ```
 build.bat                        the plug-in -> build\Release\Aether.prm
 build-test.bat                   the test programs
+release-check.bat                strict pre-release gate; SDK checks may not skip
 installer\build-installer.bat    the installer -> dist\
 ```
 
@@ -365,6 +366,13 @@ build\decoder_test.exe <file.mp4>                          metadata, timings, au
 build\plugin_test.exe  <Aether.prm>                   plug-in loading and its answers
 build\host_test.exe    <Aether.prm> <file.mp4>        the whole import, from a fake host
 ```
+
+`build-test.bat` deliberately skips the SDK-dependent programs when the SDK is
+absent, which is useful for the public core CI but is not sufficient before a
+release. `release-check.bat` requires the SDK, builds and stages the actual
+plug-in with its FFmpeg DLLs, runs the core checks, verifies the `.prm`, and
+drives representative files through all fake-host profiles. Any skipped layer
+is a failure.
 
 
 ## How it works
