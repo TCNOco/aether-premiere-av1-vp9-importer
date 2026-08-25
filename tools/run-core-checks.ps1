@@ -74,6 +74,25 @@ $extraArgs = @{
     "colour_bt709.mp4" = @("--colour")
 }
 
+# A path that is not Latin, in a folder that is not Latin either, with a space
+# in it. The same media as av1_8bit.mp4 - what is under test is the PATH.
+#
+# Every other name above is ASCII, and that gap let a real bug live: the log
+# printed the path with %S, MSVC converted it through the C locale, and the
+# line stopped dead at the first Cyrillic character without even a newline.
+# The one line you want when a file will not open, missing for everyone whose
+# footage is not in Latin folders.
+#
+# Built from character codes on purpose: this file has no byte-order mark, and
+# Windows PowerShell 5.1 reads such a file in the system ANSI code page, so a
+# typed Cyrillic literal would become mojibake and point at a file that does
+# not exist. Same reasoning as in make-test-media.ps1, same helper.
+function Cyr([int[]]$codes) { -join ($codes | ForEach-Object { [char]$_ }) }
+
+$cyrPath = (Cyr @(0x043F,0x0430,0x043F,0x043A,0x0430)) + " test\" +
+           (Cyr @(0x0432,0x0438,0x0434,0x0435,0x043E)) + "_av1.mp4"
+$expect[$cyrPath] = "accept"
+
 $failed = 0
 
 foreach ($name in $expect.Keys) {

@@ -8,6 +8,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cwctype>      // towlower — сверка пути без учёта регистра
 #include <share.h>      // _SH_DENYWR для _wfsopen
 #include <mutex>
 #include <string>
@@ -76,6 +77,54 @@ void CloseLogFile()
 }
 
 } // namespace
+
+// Перевод широкой строки в UTF-8 — тем же вызовом Windows, каким импортёр
+// готовит путь для ffmpeg. Не локалью C, и в этом всё дело: локаль знает
+// только ASCII, а WideCharToMultiByte знает всё.
+//
+// Сам файл журнала и так UTF-8: заголовок «=== Aether, запуск …» пишется
+// из исходника, а он в UTF-8. То есть кодировка у файла была одна, а пути
+// в него попадали по другому правилу — теперь по тому же.
+std::string Utf8(const wchar_t* wide)
+{
+    if (!wide || !*wide) return std::string();
+
+    const int need = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
+    if (need <= 1) return std::string();
+
+    std::string out(static_cast<size_t>(need - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide, -1, &out[0], need, nullptr, nullptr);
+    return out;
+}
+
+std::string LogPath(const wchar_t* path)
+{
+    if (!path || !*path) return std::string();
+
+    std::wstring out = path;
+
+    // Домашняя папка целиком: она содержит имя пользователя, а иногда и
+    // фамилию. Меняем на переменную — путь остаётся понятным, имя уходит.
+    wchar_t profile[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        const std::wstring from = profile;
+        if (!from.empty()) {
+            size_t at = 0;
+            // Ищем без учёта регистра: Premiere присылает пути с приставкой
+            // \\?\ и не обязан совпадать по регистру с переменной среды.
+            std::wstring lowerOut = out, lowerFrom = from;
+            for (auto& c : lowerOut)  c = (wchar_t)towlower(c);
+            for (auto& c : lowerFrom) c = (wchar_t)towlower(c);
+            while ((at = lowerOut.find(lowerFrom, at)) != std::wstring::npos) {
+                out.replace(at, from.size(), L"%USERPROFILE%");
+                lowerOut.replace(at, lowerFrom.size(), L"%userprofile%");
+                at += 13;
+            }
+        }
+    }
+    return Utf8(out.c_str());
+}
 
 void LogReset()
 {
@@ -167,6 +216,10 @@ const char* SelectorName(int selector)
         case 59: return "imQueryInputFileList";
         case 60: return "imQueryStreamLabel";
         case 64: return "imGetAudioChannelLayout";
+        // 65 и 83 Premiere 26 спрашивает по три десятка раз за сеанс, и в
+        // журнале они выглядели голыми числами. Читать журнал по цифрам
+        // невыносимо — ради этого таблица и заведена.
+        case 65: return "imSelectClipFrameDescriptor";
         case 66: return "imPerformSourceSettingsCommand";
         case 67: return "imGetExtendedFormatInfo";
         case 68: return "imGetDataStreamsInfo";
@@ -175,6 +228,7 @@ const char* SelectorName(int selector)
         case 80: return "imGetCurrentSystemState";
         case 81: return "imGetInfo9";
         case 82: return "imGetEmbeddedLUT";
+        case 83: return "imSelectClipFrameDescriptor2";
         case 84: return "imGetColorSpaceFromOpaqueData";
         default: break;
     }

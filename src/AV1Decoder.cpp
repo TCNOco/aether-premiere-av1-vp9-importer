@@ -11,6 +11,7 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
+#include <libavutil/display.h>
 }
 
 #include <algorithm>
@@ -245,8 +246,32 @@ Decoder::~Decoder() {
     Close();
 }
 
+// Текст ошибки собирается ДО захвата замка: av_strerror лезет в ffmpeg, и
+// держать под замком чужой вызов незачем — замок должен покрывать ровно
+// присваивание строки, ничего сверх.
 void Decoder::SetError(const std::string& msg, int averr) {
-    lastError_ = averr ? msg + ": " + AvErr(averr) : msg;
+    std::string text = averr ? msg + ": " + AvErr(averr) : msg;
+    std::lock_guard<std::mutex> lock(errorMutex_);
+    lastError_ = std::move(text);
+}
+
+void Decoder::SetAudioError(const std::string& msg, int averr) {
+    std::string text = averr ? msg + ": " + AvErr(averr) : msg;
+    std::lock_guard<std::mutex> lock(errorMutex_);
+    lastAudioError_ = std::move(text);
+}
+
+std::string Decoder::LastError() const {
+    std::lock_guard<std::mutex> lock(errorMutex_);
+    return lastError_;
+}
+
+// Если звук ещё ни разу не жаловался, отдаём общую ошибку: у отказа на
+// открытии файла звуковой половины просто нет, а вызывающему нужен текст,
+// а не пустая строка.
+std::string Decoder::LastAudioError() const {
+    std::lock_guard<std::mutex> lock(errorMutex_);
+    return lastAudioError_.empty() ? lastError_ : lastAudioError_;
 }
 
 bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVideo) {
@@ -397,6 +422,37 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
 
     info_.width  = st->codecpar->width;
     info_.height = st->codecpar->height;
+
+    // Поворот при показе. Лежит рядом с потоком отдельным довеском —
+    // матрицей 3x3, — а не в самом видео: кадры телефон пишет как есть,
+    // горизонтально, и только эта матрица говорит, что смотреть на них надо
+    // повёрнутыми.
+    //
+    // av_display_rotation_get уже отдаёт градусы ПРОТИВ часовой стрелки —
+    // ровно то, что нам нужно, и переворачивать знак не надо. (Знак минус
+    // встречается в самом ffmpeg, но там он нужен фильтру rotate, который
+    // считает по часовой. Первая версия этой правки его скопировала, и файл
+    // с меткой 90 объявлялся как 270. Поймано сверкой с ffprobe, который
+    // печатает то же самое число.)
+    //
+    // Сверять есть с чем и впредь:
+    //     ffprobe -select_streams v:0 -show_entries stream_side_data=rotation
+    if (const AVPacketSideData* sd =
+            av_packet_side_data_get(st->codecpar->coded_side_data,
+                                    st->codecpar->nb_coded_side_data,
+                                    AV_PKT_DATA_DISPLAYMATRIX)) {
+        if (sd->data && sd->size >= sizeof(int32_t) * 9) {
+            const double angle = av_display_rotation_get((const int32_t*)sd->data);
+            if (!std::isnan(angle)) {
+                // К ближайшей четверти оборота: матрица может нести и
+                // произвольный угол, но контейнеры пишут только эти четыре.
+                int deg = (int)llround(angle / 90.0) * 90;
+                deg = ((deg % 360) + 360) % 360;
+                info_.rotationDegrees    = deg;
+                info_.rotationSwapsSides = (deg == 90 || deg == 270);
+            }
+        }
+    }
 
     AVRational fr = st->avg_frame_rate.num ? st->avg_frame_rate : st->r_frame_rate;
     info_.fps    = (fr.num && fr.den) ? av_q2d(fr) : 0.0;
@@ -740,6 +796,7 @@ void Decoder::CloseLocked() {
     CloseAudioLocked();
     if (sws_)      { sws_freeContext(sws_); sws_ = nullptr; }
     if (swsYuv_)   { sws_freeContext(swsYuv_); swsYuv_ = nullptr; }
+    if (swsP010_)  { sws_freeContext(swsP010_); swsP010_ = nullptr; }
     if (packet_)   { av_packet_free(&packet_); }
     if (frame_)    { av_frame_free(&frame_); }
     if (swFrame_)  { av_frame_free(&swFrame_); }
@@ -1008,34 +1065,8 @@ void Decoder::ApplyColourspace(const AVFrame* src) {
 
 bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW, int dstH,
                             FrameFormat format) {
-    AVFrame* srcFrame = src;
-
-    // Если декодировала видеокарта, кадр лежит в её памяти — забираем в обычную
-    if (src->hw_frames_ctx) {
-        const auto t0 = std::chrono::steady_clock::now();
-        av_frame_unref(swFrame_);
-        if (av_hwframe_transfer_data(swFrame_, src, 0) < 0) {
-            SetError("cannot transfer frame from GPU memory");
-            return false;
-        }
-        srcFrame = swFrame_;
-        stats_.transferMs += std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - t0).count();
-    }
-
-    // Вторая линия обороны. Кадр без формата или без размеров swscale не
-    // отвергает, а роняет процесс по av_assert0 — внутри Premiere это была бы
-    // не ошибка импорта, а закрывшийся Premiere. Настоящую причину чинит
-    // DecodeUntil, но проверка тут стоит и остаётся: цена ей ноль.
-    if (srcFrame->width <= 0 || srcFrame->height <= 0 ||
-        srcFrame->format < 0 ||
-        !av_pix_fmt_desc_get((AVPixelFormat)srcFrame->format)) {
-        char msg[128];
-        snprintf(msg, sizeof(msg), "decoded frame is unusable: %dx%d, pixel format %d",
-                 srcFrame->width, srcFrame->height, srcFrame->format);
-        SetError(msg);
-        return false;
-    }
+    AVFrame* srcFrame = ToSystemMemory(src);
+    if (!srcFrame) return false;
 
     const auto tConv = std::chrono::steady_clock::now();
 
@@ -1049,17 +1080,42 @@ bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW,
                                ? AV_PIX_FMT_BGRA64LE
                                : AV_PIX_FMT_BGRA;
 
+    // Способ интерполяции по тому качеству, которое просит хост.
+    //
+    // SWS_BICUBIC там, где картинку будут смотреть; SWS_FAST_BILINEAR там, где
+    // человек таскает ползунок и Premiere сам попросил уменьшенный кадр.
+    //
+    // Замер, 1440p, 120 кадров, четыре прогона в обоих порядках, взято лучшее:
+    //
+    //     размер выхода      bicubic    fast_bilinear
+    //     1280x720           326.3 мс      227.8 мс     -30.2%
+    //      640x360           269.8 мс      211.6 мс     -21.6%
+    //     2560x1440 (как в файле)
+    //                        214.6 мс      215.0 мс      +0.2%
+    //
+    // Последняя строка тут важнее первых двух: при совпадении размеров
+    // масштабировать нечего, и флаг не значит НИЧЕГО. То есть качество
+    // финального кадра этой правкой не задето вовсе — платит ровно тот
+    // случай, ради которого хост поле inQuality и присылает.
+    const int wantFlags = (scaling_ == Scaling::Fast) ? SWS_FAST_BILINEAR : SWS_BICUBIC;
+
     // Пересчётчик кэшируется по всем своим параметрам, включая формат выхода:
-    // иначе переключение между 8 и 16 битами молча продолжило бы писать в старом
-    if (swsDstFmt_ != dstFmt) {
+    // иначе переключение между 8 и 16 битами молча продолжило бы писать в старом.
+    //
+    // Флаги в этот список входят отдельной строкой, и это не перестраховка:
+    // sws_getCachedContext сверяет только размеры и форматы, а флаги
+    // игнорирует. Не сноси мы контекст сами — смена качества не делала бы
+    // ничего вовсе, и проверить это было бы нечем.
+    if (swsDstFmt_ != dstFmt || swsFlags_ != wantFlags) {
         sws_freeContext(sws_);
         sws_ = nullptr;
         swsDstFmt_ = dstFmt;
+        swsFlags_  = wantFlags;
     }
     sws_ = sws_getCachedContext(sws_,
                                 srcFrame->width, srcFrame->height, (AVPixelFormat)srcFrame->format,
                                 dstW, dstH, dstFmt,
-                                SWS_BICUBIC, nullptr, nullptr, nullptr);
+                                wantFlags, nullptr, nullptr, nullptr);
     if (!sws_) {
         SetError("cannot create colour converter");
         return false;
@@ -1111,30 +1167,32 @@ void CopyPlane(uint8_t* dst, int dstStride,
 
 } // namespace
 
-bool Decoder::CopyToYUV420(AVFrame* src,
-                           uint8_t* dstY, int strideY,
-                           uint8_t* dstU, int strideU,
-                           uint8_t* dstV, int strideV,
-                           int dstW, int dstH) {
+// Кадр в обычной памяти и заведомо пригодный к работе.
+//
+// Обе половины этой функции были написаны дважды — в пересчёте в BGRA и
+// в выдаче плоскостями, — и с появлением десятибитного пути стали бы писаться
+// трижды. Расходятся такие двойники молча (это в проекте уже случалось
+// с записью кадра в буфер хоста), поэтому лучше одна функция.
+AVFrame* Decoder::ToSystemMemory(AVFrame* src) {
     AVFrame* srcFrame = src;
 
-    // Кадр с видеокарты по-прежнему надо забрать в обычную память: хост
-    // принимает только её. Здесь это тем более заметно — переносить остаётся
-    // столько же, а пересчёта, который раньше был главной статьёй, больше нет.
+    // Если декодировала видеокарта, кадр лежит в её памяти — забираем в обычную
     if (src->hw_frames_ctx) {
         const auto t0 = std::chrono::steady_clock::now();
         av_frame_unref(swFrame_);
         if (av_hwframe_transfer_data(swFrame_, src, 0) < 0) {
             SetError("cannot transfer frame from GPU memory");
-            return false;
+            return nullptr;
         }
         srcFrame = swFrame_;
         stats_.transferMs += std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - t0).count();
     }
 
-    // Та же вторая линия обороны, что и у пересчёта в BGRA: кадр без формата
-    // или без размеров swscale не отвергает, а роняет процесс по av_assert0.
+    // Вторая линия обороны. Кадр без формата или без размеров swscale не
+    // отвергает, а роняет процесс по av_assert0 — внутри Premiere это была бы
+    // не ошибка импорта, а закрывшийся Premiere. Настоящую причину чинит
+    // DecodeUntil, но проверка тут стоит и остаётся: цена ей ноль.
     if (srcFrame->width <= 0 || srcFrame->height <= 0 ||
         srcFrame->format < 0 ||
         !av_pix_fmt_desc_get((AVPixelFormat)srcFrame->format)) {
@@ -1142,8 +1200,18 @@ bool Decoder::CopyToYUV420(AVFrame* src,
         snprintf(msg, sizeof(msg), "decoded frame is unusable: %dx%d, pixel format %d",
                  srcFrame->width, srcFrame->height, srcFrame->format);
         SetError(msg);
-        return false;
+        return nullptr;
     }
+    return srcFrame;
+}
+
+bool Decoder::CopyToYUV420(AVFrame* src,
+                           uint8_t* dstY, int strideY,
+                           uint8_t* dstU, int strideU,
+                           uint8_t* dstV, int strideV,
+                           int dstW, int dstH) {
+    AVFrame* srcFrame = ToSystemMemory(src);
+    if (!srcFrame) return false;
 
     const auto tConv = std::chrono::steady_clock::now();
 
@@ -1167,11 +1235,21 @@ bool Decoder::CopyToYUV420(AVFrame* src,
         // кадр поменьше. И то и другое умеет swscale — но это по-прежнему
         // работа внутри YUV, без перевода в RGB, то есть заметно дешевле
         // прежнего пути.
+        // Тот же выбор по качеству, что и у пути в BGRA, и та же оговорка про
+        // sws_getCachedContext: флаги он не сверяет, сносить контекст надо самим
+        const int wantFlags = (scaling_ == Scaling::Fast) ? SWS_FAST_BILINEAR
+                                                          : SWS_BILINEAR;
+        if (swsYuvFlags_ != wantFlags) {
+            sws_freeContext(swsYuv_);
+            swsYuv_ = nullptr;
+            swsYuvFlags_ = wantFlags;
+        }
+
         swsYuv_ = sws_getCachedContext(swsYuv_,
                                        srcFrame->width, srcFrame->height,
                                        (AVPixelFormat)srcFrame->format,
                                        dstW, dstH, AV_PIX_FMT_YUV420P,
-                                       SWS_BILINEAR, nullptr, nullptr, nullptr);
+                                       wantFlags, nullptr, nullptr, nullptr);
         if (!swsYuv_) {
             SetError("cannot create plane converter");
             return false;
@@ -1187,6 +1265,70 @@ bool Decoder::CopyToYUV420(AVFrame* src,
         std::chrono::steady_clock::now() - tConv).count();
     ++stats_.frames;
     return true;
+}
+
+bool Decoder::CopyToP010(AVFrame* src,
+                         uint8_t* dstY,  int strideY,
+                         uint8_t* dstUV, int strideUV,
+                         int dstW, int dstH) {
+    AVFrame* srcFrame = ToSystemMemory(src);
+    if (!srcFrame) return false;
+
+    const auto tConv = std::chrono::steady_clock::now();
+
+    // Цветность вдвое меньше по обеим сторонам, с округлением ВВЕРХ: у кадра
+    // нечётной высоты строк цветности на одну больше, чем даёт деление нацело.
+    // В P010 одна «точка» цветности — это пара uint16, то есть четыре байта.
+    const int chromaH = (dstH + 1) / 2;
+    const int chromaWidthBytes = ((dstW + 1) / 2) * 2 * (int)sizeof(uint16_t);
+
+    // Ради чего всё. Аппаратные декодеры отдают десять бит СРАЗУ в P010 —
+    // ровно в той раскладке, которую ждёт хост. Тогда работы нет вообще:
+    // ни матрицы, ни интерполяции, ни свёртки, только перенос строк.
+    if (srcFrame->format == AV_PIX_FMT_P010LE &&
+        srcFrame->width == dstW && srcFrame->height == dstH) {
+        CopyPlane(dstY, strideY, srcFrame->data[0], srcFrame->linesize[0],
+                  dstW * (int)sizeof(uint16_t), dstH);
+        CopyPlane(dstUV, strideUV, srcFrame->data[1], srcFrame->linesize[1],
+                  chromaWidthBytes, chromaH);
+    } else {
+        // Программный декодер отдаёт yuv420p10le (три плоскости, десять бит
+        // в МЛАДШИХ разрядах), а хосту нужен P010 (две плоскости, десять бит
+        // в старших). Сдвиг и слияние плоскостей делает swscale — по замеру
+        // это 0.42 мс на 1440p против 14.77 у пути через BGRA64.
+        const int wantFlags = (scaling_ == Scaling::Fast) ? SWS_FAST_BILINEAR
+                                                          : SWS_BILINEAR;
+        if (swsP010Flags_ != wantFlags) {
+            sws_freeContext(swsP010_);
+            swsP010_ = nullptr;
+            swsP010Flags_ = wantFlags;
+        }
+
+        swsP010_ = sws_getCachedContext(swsP010_,
+                                        srcFrame->width, srcFrame->height,
+                                        (AVPixelFormat)srcFrame->format,
+                                        dstW, dstH, AV_PIX_FMT_P010LE,
+                                        wantFlags, nullptr, nullptr, nullptr);
+        if (!swsP010_) {
+            SetError("cannot create 10-bit plane converter");
+            return false;
+        }
+
+        uint8_t* dstData[4]     = { dstY, dstUV, nullptr, nullptr };
+        int      dstLinesize[4] = { strideY, strideUV, 0, 0 };
+        sws_scale(swsP010_, srcFrame->data, srcFrame->linesize, 0, srcFrame->height,
+                  dstData, dstLinesize);
+    }
+
+    stats_.convertMs += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - tConv).count();
+    ++stats_.frames;
+    return true;
+}
+
+void Decoder::SetScaling(Scaling how) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    scaling_ = how;
 }
 
 void Decoder::LimitCacheToFrames(int frames) {
@@ -1310,6 +1452,50 @@ bool Decoder::GetFrameYUV420(int64_t frameIndex,
                         dstWidth, dstHeight);
 }
 
+// Десять бит родными двумя плоскостями.
+//
+// Условия жёстче, чем у восьмибитного пути, и каждое по своей причине:
+//
+//   * ровно десять бит. Двенадцатибитных констант у Premiere нет вовсе,
+//     а отдать двенадцать под видом десяти значит потерять два разряда молча;
+//   * без прозрачности — в YUV её негде хранить, как и в восьми битах;
+//   * матрица BT.709 или BT.2020. Других десятибитных вариантов у Premiere
+//     нет, а назвать BT.601 семьсот девятой значит соврать о цвете.
+//
+// Кривая переноса тут НЕ ограничение: у BT.2020 Premiere различает обычную,
+// PQ и HLG отдельными константами, и все три мы умеем назвать.
+bool Decoder::CanDeliverP010() const {
+    if (!info_.hasVideo) return false;
+    if (info_.hasAlpha)  return false;
+    if (info_.bitDepth != 10) return false;
+
+    return info_.colourMatrix == AVCOL_SPC_BT709 ||
+           info_.colourMatrix == AVCOL_SPC_BT2020_NCL ||
+           info_.colourMatrix == AVCOL_SPC_BT2020_CL;
+}
+
+bool Decoder::GetFrameP010(int64_t frameIndex,
+                           uint8_t* dstY,  int strideY,
+                           uint8_t* dstUV, int strideUV,
+                           int dstWidth, int dstHeight) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!IsOpen() || !dstY || !dstUV) {
+        SetError("file is not open");
+        return false;
+    }
+    if (!info_.hasVideo || !codec_) {
+        SetError("this file has no video");
+        return false;
+    }
+
+    if (dstWidth  <= 0) dstWidth  = info_.width;
+    if (dstHeight <= 0) dstHeight = info_.height;
+
+    AVFrame* src = AcquireFrameLocked(frameIndex);
+    if (!src) return false;
+    return CopyToP010(src, dstY, strideY, dstUV, strideUV, dstWidth, dstHeight);
+}
+
 // ---------------------------------------------------------------------------
 // Звук
 // ---------------------------------------------------------------------------
@@ -1335,7 +1521,7 @@ bool Decoder::OpenAudio(int ordinal) {
     CloseAudioLocked();
 
     if (!fmt_) {
-        SetError("file is not open");
+        SetAudioError("file is not open");
         return false;
     }
 
@@ -1343,30 +1529,87 @@ bool Decoder::OpenAudio(int ordinal) {
     // пакетов двигает одну общую позицию, и перемотка видео сбивала бы звук.
     int err = avformat_open_input(&audioFmt_, fmt_->url, nullptr, nullptr);
     if (err < 0) {
-        SetError("cannot open file for audio", err);
+        SetAudioError("cannot open file for audio", err);
         return false;
     }
-    if ((err = avformat_find_stream_info(audioFmt_, nullptr)) < 0) {
-        SetError("cannot read audio stream info", err);
+
+    // Найти N-ю по счёту звуковую дорожку. Вынесено, потому что зовётся
+    // дважды: до полного разбора и, если тот понадобился, после.
+    auto findOrdinal = [this](int nth) -> int {
+        int seen = 0;
+        for (unsigned i = 0; i < audioFmt_->nb_streams; ++i) {
+            if (audioFmt_->streams[i]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+            if (seen++ == nth) return (int)i;
+        }
+        return -1;
+    };
+
+    // Полный разбор запускаем ТОЛЬКО если заголовка не хватило.
+    //
+    // Этот же файл уже открыт под видео, и там avformat_find_stream_info
+    // отработал полностью. Второй раз он нужен ради того, чего нет
+    // в заголовке, — а у MP4, MOV и Matroska кодек, число каналов и частота
+    // в заголовке есть. Проверяем это на самой дорожке, а не предполагаем
+    // по имени контейнера: не хватило — честно разбираем, как разбирали.
+    //
+    // Сколько это стоит на самом деле — замерено, потому что первая оценка
+    // была сильно завышена. «До пяти секунд» это ПРЕДЕЛ ffmpeg, а не цена:
+    //
+    //     файл                       open_input   find_stream_info
+    //     запись 42 ГБ, .mov            48.5 мс           2.6 мс
+    //     запись 16 ГБ, .mov            27.0 мс           1.8 мс
+    //     запись  3 ГБ, .mp4            20.2 мс           3.0 мс
+    //     проверочные файлы          0.2-0.5 мс       0.2-1.2 мс
+    //
+    // То есть выигрыш — единицы миллисекунд на открытие, и на записи
+    // с четырьмя дорожками это около двух десятков. Дорого стоит сам
+    // open_input, и с ним сделать нечего.
+    //
+    // ⚠ И вот что замер показал попутно, а это уже не про скорость.
+    // Длительность дорожки в заголовке и после разбора СОВПАДАЕТ НЕ ВСЕГДА:
+    // на записи ACBlackFlag заголовок говорит 14319616, разбор уточняет до
+    // 14320800 — разница около 25 мс звука. Поверь мы заголовку, дорожка
+    // приехала бы к Premiere короче, чем она есть, то есть с обрезанным
+    // хвостом. Поэтому длину ниже берём НЕ отсюда, а из видеоконтекста,
+    // который разобран полностью.
+    audioStreamIndex_ = findOrdinal(ordinal);
+    bool headerIsEnough = false;
+    if (audioStreamIndex_ >= 0) {
+        const AVCodecParameters* cp = audioFmt_->streams[audioStreamIndex_]->codecpar;
+        headerIsEnough = cp->codec_id != AV_CODEC_ID_NONE &&
+                         cp->sample_rate > 0 &&
+                         cp->ch_layout.nb_channels > 0;
+    }
+
+    if (!headerIsEnough) {
+        if ((err = avformat_find_stream_info(audioFmt_, nullptr)) < 0) {
+            SetAudioError("cannot read audio stream info", err);
+            CloseAudioLocked();
+            return false;
+        }
+        audioStreamIndex_ = findOrdinal(ordinal);
+    }
+
+    if (audioStreamIndex_ < 0) {
+        SetAudioError("no audio track with that index");
         CloseAudioLocked();
         return false;
     }
 
-    int seen = 0;
-    for (unsigned i = 0; i < audioFmt_->nb_streams; ++i) {
-        if (audioFmt_->streams[i]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
-        if (seen++ == ordinal) { audioStreamIndex_ = (int)i; break; }
-    }
-    if (audioStreamIndex_ < 0) {
-        SetError("no audio track with that index");
-        CloseAudioLocked();
-        return false;
-    }
+    // Тот же поток, но в полностью разобранном контексте видео. Порядок
+    // потоков в одном и том же файле у одного и того же демультиплексора
+    // один и тот же, поэтому номер подходит обоим; проверка на длину — на
+    // случай, если это когда-нибудь перестанет быть правдой.
+    const AVStream* analysed =
+        ((unsigned)audioStreamIndex_ < fmt_->nb_streams &&
+         fmt_->streams[audioStreamIndex_]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
+            ? fmt_->streams[audioStreamIndex_]
+            : nullptr;
 
     AVStream* st = audioFmt_->streams[audioStreamIndex_];
     const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
     if (!dec) {
-        SetError("no decoder for this audio track");
+        SetAudioError("no decoder for this audio track");
         CloseAudioLocked();
         return false;
     }
@@ -1375,15 +1618,21 @@ bool Decoder::OpenAudio(int ordinal) {
     if (!audioCodec_ ||
         avcodec_parameters_to_context(audioCodec_, st->codecpar) < 0 ||
         avcodec_open2(audioCodec_, dec, nullptr) < 0) {
-        SetError("cannot open audio decoder");
+        SetAudioError("cannot open audio decoder");
         CloseAudioLocked();
         return false;
     }
 
     info_.audioChannels    = audioCodec_->ch_layout.nb_channels;
     info_.audioSampleRate  = audioCodec_->sample_rate;
-    info_.audioSampleCount = st->duration != AV_NOPTS_VALUE
-        ? (int64_t)(st->duration * av_q2d(st->time_base) * info_.audioSampleRate + 0.5)
+
+    // Длину берём из разобранного контекста, а из своего — только если того
+    // почему-то нет. Разница между ними невелика (около 25 мс на проверенной
+    // записи), но она вся в конце дорожки: короче объявишь — короче и приедет.
+    const AVStream* forDuration = analysed ? analysed : st;
+    info_.audioSampleCount = forDuration->duration != AV_NOPTS_VALUE
+        ? (int64_t)(forDuration->duration * av_q2d(forDuration->time_base)
+                    * info_.audioSampleRate + 0.5)
         : (int64_t)(info_.durationSec * info_.audioSampleRate + 0.5);
 
     // Premiere работает только с 32-битными float по каналам, поэтому приводим
@@ -1395,7 +1644,7 @@ bool Decoder::OpenAudio(int ordinal) {
                               audioCodec_->sample_rate, 0, nullptr);
     av_channel_layout_uninit(&outLayout);
     if (err < 0 || swr_init(swr_) < 0) {
-        SetError("cannot set up audio conversion", err);
+        SetAudioError("cannot set up audio conversion", err);
         CloseAudioLocked();
         return false;
     }
@@ -1403,7 +1652,7 @@ bool Decoder::OpenAudio(int ordinal) {
     audioFrame_  = av_frame_alloc();
     audioPacket_ = av_packet_alloc();
     if (!audioFrame_ || !audioPacket_) {
-        SetError("out of memory for audio buffers");
+        SetAudioError("out of memory for audio buffers");
         CloseAudioLocked();
         return false;
     }
@@ -1433,7 +1682,7 @@ bool Decoder::DecodeMoreAudio() {
             const int channels = std::min<int>({ info_.audioChannels,
                                                  (int)pending_.size(), 64 });
             if (channels <= 0) {
-                SetError("audio buffers are not ready");
+                SetAudioError("audio buffers are not ready");
                 return false;
             }
 
@@ -1445,7 +1694,7 @@ bool Decoder::DecodeMoreAudio() {
             const int got = swr_convert(swr_, reinterpret_cast<uint8_t**>(out), n,
                                         const_cast<const uint8_t**>(audioFrame_->data), n);
             if (got < 0) {
-                SetError("audio conversion error", got);
+                SetAudioError("audio conversion error", got);
                 return false;
             }
 
@@ -1472,7 +1721,7 @@ bool Decoder::DecodeMoreAudio() {
         if (err == AVERROR_EOF) return false;
 
         if (err != AVERROR(EAGAIN)) {
-            SetError("audio decode error", err);
+            SetAudioError("audio decode error", err);
             return false;
         }
 
@@ -1483,32 +1732,47 @@ bool Decoder::DecodeMoreAudio() {
             continue;
         }
         if (rerr < 0) {
-            SetError("audio read error", rerr);
+            SetAudioError("audio read error", rerr);
             return false;
         }
         if (audioPacket_->stream_index != audioStreamIndex_) continue;
 
         if (avcodec_send_packet(audioCodec_, audioPacket_) < 0) {
-            SetError("audio decoder rejected packet");
+            SetAudioError("audio decoder rejected packet");
             return false;
         }
     }
 }
 
-bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* dst) {
+bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* dst,
+                       int dstChannels) {
     std::lock_guard<std::mutex> lock(audioMutex_);
     if (!audioCodec_ || !dst) {
-        SetError("audio is not open");
+        SetAudioError("audio is not open");
         return false;
     }
     if (startSample < 0) startSample = 0;
 
     // Столько каналов, сколько объявлено хосту: буферы под них выделил он,
     // и меньше писать нельзя — незаполненный канал останется мусором.
-    const int channels = info_.audioChannels;
+    int channels = info_.audioChannels;
     if (channels <= 0 || sampleCount <= 0) {
-        SetError("audio request makes no sense");
+        SetAudioError("audio request makes no sense");
         return false;
+    }
+
+    // Больше, чем выделил вызывающий, — тоже нельзя, и это не симметричная
+    // придирка: лишний канал пишется В ЧУЖУЮ ПАМЯТЬ. Расхождение само по себе
+    // означает поломку выше, поэтому о нём говорим вслух, а не молча
+    // подрезаем: тихая подрезка выглядела бы как пропавший канал, и искали
+    // бы её в декодере, где её нет.
+    if (dstChannels > 0 && dstChannels < channels) {
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "caller has %d channel buffers but the track has %d - writing %d",
+                 dstChannels, channels, dstChannels);
+        SetAudioError(msg);
+        channels = dstChannels;
     }
 
     // Тишина по умолчанию: если файл кончился раньше запроса, Premiere получит
@@ -1541,7 +1805,7 @@ bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* d
         const double seekSec = (double)seekSample / info_.audioSampleRate + startTimeSec_;
         int64_t ts = (int64_t)llround(seekSec / av_q2d(st->time_base));
         if (av_seek_frame(audioFmt_, audioStreamIndex_, ts, AVSEEK_FLAG_BACKWARD) < 0) {
-            SetError("audio seek failed");
+            SetAudioError("audio seek failed");
             return false;
         }
         avcodec_flush_buffers(audioCodec_);

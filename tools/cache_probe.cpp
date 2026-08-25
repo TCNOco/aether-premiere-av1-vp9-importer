@@ -15,6 +15,7 @@
 // видно в диспетчере задач, и есть та, на которую жалуется пользователь.
 
 #include "../src/AV1Decoder.h"
+#include "utf8_args.h"
 
 #include <windows.h>
 #include <psapi.h>
@@ -36,8 +37,13 @@ size_t PeakWorkingSetMB()
 
 } // namespace
 
-int main(int argc, char** argv)
+// wmain: узкий argv приходит в кодировке ANSI, а ядру нужен UTF-8 —
+// см. tools/utf8_args.h
+int wmain(int argc, wchar_t** wargv)
 {
+    tools::Utf8Args args(argc, wargv);
+    char** argv = args.Ptrs();
+
     if (argc < 2) {
         printf("usage: cache_probe <file> [clips]\n");
         return 2;

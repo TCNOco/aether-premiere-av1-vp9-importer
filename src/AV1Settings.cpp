@@ -218,6 +218,13 @@ bool EnabledUnlessTurnedOff(const wchar_t* envName, const char* key)
         while (*p == ' ' || *p == '\t') ++p;
         if (_strnicmp(p, key, keyLen) != 0) continue;
 
+        // Ключ обязан на этом кончиться. Сейчас в файле есть и `yuv`, и
+        // `yuv10`, и без этой проверки первый отвечал бы на строку второго.
+        // Спасало только то, что дальше идёт «10», а не «=», — то есть
+        // работало по случайности, а не по замыслу.
+        const char after = p[keyLen];
+        if (after != ' ' && after != '\t' && after != '=') continue;
+
         p += keyLen;
         while (*p == ' ' || *p == '\t') ++p;
         if (*p != '=') continue;
@@ -255,6 +262,72 @@ bool AsyncDeliveryEnabled()
 bool YuvEnabled()
 {
     return EnabledUnlessTurnedOff(L"AETHER_YUV", "yuv");
+}
+
+namespace {
+
+// Зеркало EnabledUnlessTurnedOff: выключено, пока явно не включили.
+//
+// Отдельная функция, а не флаг у прежней, потому что различаются они не
+// умолчанием, а СПИСКОМ СЛОВ: «выключено, пока не сказали off» и «включено,
+// только если сказали on» — это разные вопросы к одной и той же строке.
+// Свести их одним параметром значило бы гадать, что означает «yes» в файле,
+// где ждали «on».
+bool DisabledUnlessTurnedOn(const wchar_t* envName, const char* key)
+{
+    auto looksEnabled = [](const char* v) {
+        return _stricmp(v, "on")   == 0 || _stricmp(v, "1")    == 0 ||
+               _stricmp(v, "true") == 0 || _stricmp(v, "yes")  == 0;
+    };
+
+    wchar_t env[64] = {};
+    if (GetEnvironmentVariableW(envName, env, 64) > 0) {
+        char narrow[64] = {};
+        WideCharToMultiByte(CP_ACP, 0, env, -1, narrow, sizeof(narrow), nullptr, nullptr);
+        return looksEnabled(narrow);
+    }
+
+    const wchar_t* path = SettingsFilePath();
+    if (!path[0]) return false;
+
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"rt") != 0 || !f) return false;
+
+    const size_t keyLen = strlen(key);
+    bool enabled = false;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        char* p = line;
+        while (*p == ' ' || *p == '\t') ++p;
+        if (_strnicmp(p, key, keyLen) != 0) continue;
+
+        // Ключ должен кончиться здесь, а не просто начаться: иначе строка
+        // «yuv10 = on» отвечала бы и на вопрос про «yuv», и наоборот
+        const char after = p[keyLen];
+        if (after != ' ' && after != '\t' && after != '=') continue;
+
+        p += keyLen;
+        while (*p == ' ' || *p == '\t') ++p;
+        if (*p != '=') continue;
+        ++p;
+        while (*p == ' ' || *p == '\t') ++p;
+
+        char value[32] = {};
+        if (sscanf_s(p, "%31s", value, (unsigned)sizeof(value)) == 1) {
+            enabled = looksEnabled(value);
+        }
+    }
+    fclose(f);
+    return enabled;
+}
+
+} // namespace
+
+// Десятибитная выдача плоскостями. Единственный выключатель, у которого
+// умолчание «выключено», и причина измерена, а не предположена — см. заголовок.
+bool Yuv10Enabled()
+{
+    return DisabledUnlessTurnedOn(L"AETHER_YUV10", "yuv10");
 }
 
 } // namespace av1imp

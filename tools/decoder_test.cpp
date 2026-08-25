@@ -14,6 +14,7 @@
 // actually made.
 
 #include "../src/AV1Decoder.h"
+#include "utf8_args.h"
 
 #include <chrono>
 #include <cmath>
@@ -285,6 +286,122 @@ void CheckPlanesMatchBGRA(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
     Check(lumaOk && chromaOk, name);
     printf("      luma off by %.2f on average (worst %.0f), chroma by %.2f and %.2f\n",
            mean, worst, meanU, meanV);
+}
+
+// То же самое для десятибитной выдачи двумя плоскостями.
+//
+// Проверка нужна ровно по тем же причинам, что и восьмибитная, плюс двум
+// своим, которых у той не было:
+//
+//   * адрес второй плоскости плагин ВЫЧИСЛЯЕТ сам — набор PPix2 его не даёт.
+//     Ошибись он в смещении, цветность ляжет поверх яркости, и картинка
+//     испортится так, что в мелком окне это сойдёт за артефакт сжатия;
+//   * в P010 десять бит стоят в СТАРШИХ разрядах слова. Забудь мы сдвиг —
+//     всё станет в 64 раза темнее, а перепутай сторону — засветится.
+//
+// Обе ошибки ловятся тем же способом: обратным пересчётом из BGRA.
+void CheckP010MatchesBGRA(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
+{
+    const char* name = "10-bit planes carry the same picture as BGRA";
+    if (!dec.CanDeliverP010()) {
+        printf("  %-46s SKIP (no 10-bit native path for this file)\n", name);
+        return;
+    }
+
+    const int w = info.width, h = info.height;
+    const int chromaH = (h + 1) / 2;
+    const int strideY  = w * (int)sizeof(uint16_t);          // байты
+    const int strideUV = strideY;                            // цветность вдвое уже, но по два значения
+
+    std::vector<uint16_t> bgra((size_t)w * 4 * h);            // BGRA16, белое на 32768
+    std::vector<uint8_t>  p010((size_t)strideY * h + (size_t)strideUV * chromaH);
+
+    const int64_t at = 5;
+    if (!dec.GetFrameBGRA(at, reinterpret_cast<uint8_t*>(bgra.data()), w * 4 * 2, 0, 0,
+                          av1imp::FrameFormat::BGRA16) ||
+        !dec.GetFrameP010(at, p010.data(), strideY,
+                          p010.data() + (size_t)strideY * h, strideUV, 0, 0)) {
+        Check(false, name);
+        return;
+    }
+
+    const bool bt709 = (info.colourMatrix == 1);
+    const double kr = bt709 ? 0.2126 : 0.2627;   // 2020 — вторая пара
+    const double kb = bt709 ? 0.0722 : 0.0593;
+    const double kg = 1.0 - kr - kb;
+
+    // BGRA16 у нас в диапазоне Adobe: белое на 32768. Приводим к 0..1,
+    // а дальше считаем в десятибитных единицах.
+    const double kAdobeWhite = 32768.0;
+    const double peak  = 1023.0;
+    const double scale = info.fullRange ? peak : (940.0 - 64.0);
+    const double base  = info.fullRange ? 0.0  : 64.0;
+
+    double sumY = 0.0, worstY = 0.0;
+    for (int y = 0; y < h; ++y) {
+        const uint16_t* row  = bgra.data() + (size_t)y * w * 4;
+        const uint16_t* yrow = reinterpret_cast<const uint16_t*>(p010.data() + (size_t)y * strideY);
+        for (int x = 0; x < w; ++x) {
+            const double b = row[x * 4 + 0] / kAdobeWhite;
+            const double g = row[x * 4 + 1] / kAdobeWhite;
+            const double r = row[x * 4 + 2] / kAdobeWhite;
+            const double expect = base + scale * (kr * r + kg * g + kb * b);
+            // Десять бит стоят в старших разрядах — возвращаем их на место
+            const double got = (double)(yrow[x] >> 6);
+            const double diff = std::fabs(expect - got);
+            sumY += diff;
+            if (diff > worstY) worstY = diff;
+        }
+    }
+    const double meanY = sumY / ((double)w * h);
+
+    // Цветность попиксельно, по блокам 2x2 — по той же причине, по какой
+    // она попиксельна у восьмибитной проверки: среднее по кадру не замечает
+    // перестановки U и V.
+    const int chromaW = (w + 1) / 2;
+    double sumU = 0.0, sumV = 0.0;
+    for (int cy = 0; cy < chromaH; ++cy) {
+        const uint16_t* crow = reinterpret_cast<const uint16_t*>(
+            p010.data() + (size_t)strideY * h + (size_t)cy * strideUV);
+        for (int cx = 0; cx < chromaW; ++cx) {
+            double b = 0, g = 0, r = 0;
+            int n = 0;
+            for (int dy = 0; dy < 2; ++dy) {
+                const int yy = cy * 2 + dy;
+                if (yy >= h) break;
+                const uint16_t* row = bgra.data() + (size_t)yy * w * 4;
+                for (int dx = 0; dx < 2; ++dx) {
+                    const int xx = cx * 2 + dx;
+                    if (xx >= w) break;
+                    b += row[xx * 4 + 0]; g += row[xx * 4 + 1]; r += row[xx * 4 + 2];
+                    ++n;
+                }
+            }
+            if (!n) continue;
+            b /= n * kAdobeWhite; g /= n * kAdobeWhite; r /= n * kAdobeWhite;
+
+            const double luma = kr * r + kg * g + kb * b;
+            const double mid  = 512.0;
+            const double eU = mid + scale * 0.5 * (b - luma) / (1.0 - kb);
+            const double eV = mid + scale * 0.5 * (r - luma) / (1.0 - kr);
+            // U и V чередуются: U по чётным словам, V по нечётным
+            sumU += std::fabs(eU - (double)(crow[cx * 2 + 0] >> 6));
+            sumV += std::fabs(eV - (double)(crow[cx * 2 + 1] >> 6));
+        }
+    }
+    const double meanU = sumU / ((double)chromaW * chromaH);
+    const double meanV = sumV / ((double)chromaW * chromaH);
+
+    // Пороги вчетверо шире восьмибитных, и ровно потому, что единицы вчетверо
+    // мельче: десять бит против восьми — это множитель четыре на ту же
+    // погрешность интерполяции. Смысл тот же, что и там: втрое над настоящей
+    // погрешностью и сильно под настоящей поломкой (перестановка цветности
+    // или забытый сдвиг дают сотни, а не десятки).
+    const bool lumaOk   = (meanY < 24.0);
+    const bool chromaOk = (meanU < 80.0 && meanV < 80.0);
+    Check(lumaOk && chromaOk, name);
+    printf("      luma off by %.2f on average (worst %.0f), chroma by %.2f and %.2f\n",
+           meanY, worstY, meanU, meanV);
 }
 
 void CheckReadingPastTheEnd(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
@@ -654,8 +771,19 @@ void CheckAudioIsRepeatable(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 
 } // namespace
 
-int main(int argc, char** argv)
+// wmain, а не main, и это не косметика — см. tools/utf8_args.h.
+//
+// Короче: узкий argv приходит в кодировке ANSI, а ядро ждёт UTF-8. Пока все
+// проверочные файлы звались латиницей, разницы не было; на первом же пути
+// с кириллицей ядро получало недопустимую последовательность и отвечало
+// «cannot open file: Invalid argument». Ошибка была в приборе, не в плагине:
+// плагин получает от Premiere UTF-16 и переводит её правильно, а проверить
+// эту дорогу было нечем.
+int wmain(int argc, wchar_t** wargv)
 {
+    tools::Utf8Args args(argc, wargv);
+    char** argv = args.Ptrs();
+
     // Без буфера: при падении буферизованный вывод теряется целиком, и по
     // журналу кажется, будто программа упала в самом начале
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -704,6 +832,10 @@ int main(int argc, char** argv)
     } else {
     printf("resolution : %dx%d, %d bit%s\n", info.width, info.height, info.bitDepth,
            info.hasAlpha ? ", with alpha" : "");
+    // Поворот показываем всегда, а не только когда он есть: ноль здесь —
+    // тоже сведение, и по нему видно, что метку прочитали, а не пропустили
+    printf("rotation   : %d degrees%s\n", info.rotationDegrees,
+           info.rotationSwapsSides ? " (swaps width and height)" : "");
     printf("fps        : %.3f (%d/%d)\n", info.fps, info.fpsNum, info.fpsDen);
     printf("duration   : %.2f s\n", info.durationSec);
     printf("frames     : %lld\n", (long long)info.frameCount);
@@ -846,7 +978,7 @@ int main(int argc, char** argv)
 
     for (int track = 0; track < info.audioStreamCount; ++track) {
         if (!dec.OpenAudio(track)) {
-            printf("  track %d: FAILED - %s\n", track, dec.LastError().c_str());
+            printf("  track %d: FAILED - %s\n", track, dec.LastAudioError().c_str());
             continue;
         }
 
@@ -879,7 +1011,7 @@ int main(int argc, char** argv)
         // and inside the file however short it is
         const int64_t start = info.audioSampleCount / 3;
         if (!dec.GetAudio(start, want, ptrs.data())) {
-            printf("  track %d: FAILED - %s\n", track, dec.LastError().c_str());
+            printf("  track %d: FAILED - %s\n", track, dec.LastAudioError().c_str());
             continue;
         }
 
@@ -903,6 +1035,7 @@ int main(int argc, char** argv)
     printf("\nchecks:\n");
     CheckAlphaSurvives(dec, info);
     CheckPlanesMatchBGRA(dec, info);
+    CheckP010MatchesBGRA(dec, info);
     CheckReadingPastTheEnd(dec, info);
     CheckDeepColour(dec, info);
     CheckReducedSizeStaysInBuffer(dec, info);

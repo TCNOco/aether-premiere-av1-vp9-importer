@@ -14,7 +14,9 @@
 #include "AV1Settings.h"
 #include "ImporterMath.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <iterator>     // std::size — длина буфера пути берётся из него самого
 #include <mutex>
 #include <string>
 
@@ -23,21 +25,6 @@
 // ---------------------------------------------------------------------------
 
 namespace {
-
-// В raw-журнале нужен способ отличить два одновременно открытых файла, но не
-// нужен их полный путь: этот журнал прикладывают к публичным issue. Оставляем
-// только непрозрачный идентификатор; диагностический отчёт отдельно умеет
-// очищать пути, когда человеку действительно требуется их показать.
-uint64_t PathLogId(const prUTF16Char* path)
-{
-    uint64_t hash = 1469598103934665603ULL;  // FNV-1a, только идентификатор
-    if (!path) return hash;
-    while (*path) {
-        hash ^= static_cast<uint16_t>(*path++);
-        hash *= 1099511628211ULL;
-    }
-    return hash;
-}
 
 // Premiere отдаёт пути в UTF-16, ffmpeg ждёт UTF-8
 std::string Utf8FromUtf16(const prUTF16Char* path)
@@ -54,43 +41,71 @@ std::string Utf8FromUtf16(const prUTF16Char* path)
     return out;
 }
 
-void CopyUtf16(prUTF16Char* dst, size_t dstCount, const prUTF16Char* src)
+// Возвращает false, если путь не поместился целиком.
+//
+// Прежде обрезание было молчаливым, и это худший вид отказа: ffmpeg получал
+// осмысленный, но чужой путь — либо не открывал ничего, либо открывал не тот
+// файл, — а в журнале не было ни строчки о том, что путь вообще резали.
+bool CopyUtf16(prUTF16Char* dst, size_t dstCount, const prUTF16Char* src)
 {
     // Нулевой размер: писать некуда, даже завершающий нуль. Без этой строки
     // dstCount - 1 уходит в переполнение беззнакового и превращается в
     // «почти бесконечность», а dst[0] = 0 пишет мимо буфера.
-    if (!dst || dstCount == 0) return;
+    if (!dst || dstCount == 0) return false;
 
     size_t i = 0;
     if (src) {
         for (; src[i] && i < dstCount - 1; ++i) dst[i] = src[i];
     }
     dst[i] = 0;
+
+    // Не поместилось, если исходник на этом месте ещё не кончился
+    return !src || src[i] == 0;
 }
 
-// Замок на ленивое открытие — общий на весь плагин.
+// Замки на ленивое открытие — набор, а не один на всех.
 //
-// Один и тот же экземпляр импортёра Premiere зовёт из РАЗНЫХ потоков разом:
-// конформирование звука идёт в своём, показ клипа просит кадры в другом, и оба
-// приходят к потоку 0, где живут и видео, и первая дорожка. Обе функции ниже
-// проверяют «уже открыто?» и открывают, если нет, — то есть классическая
-// проверка-и-действие, а между ними успевает вклиниться сосед. Два потока
-// входят в открытие вместе, второй сносит построенное первым (Open и OpenAudio
-// начинают со сноса прежнего состояния), и запрос возвращает отказ. Для
-// пользователя это «An unspecified error occurred while performing a conform
-// action» и пропавшая дорожка звука, а при повторном импорте всё хорошо —
-// потому что совпасть по времени во второй раз не обязано.
+// Зачем замок вообще. Один и тот же экземпляр импортёра Premiere зовёт из
+// РАЗНЫХ потоков разом: конформирование звука идёт в своём, показ клипа просит
+// кадры в другом, и оба приходят к потоку 0, где живут и видео, и первая
+// дорожка. Обе функции ниже проверяют «уже открыто?» и открывают, если нет, —
+// то есть классическая проверка-и-действие, а между ними успевает вклиниться
+// сосед. Два потока входят в открытие вместе, второй сносит построенное первым
+// (Open и OpenAudio начинают со сноса прежнего состояния), и запрос возвращает
+// отказ. Для пользователя это «An unspecified error occurred while performing
+// a conform action» и пропавшая дорожка звука, а при повторном импорте всё
+// хорошо — потому что совпасть по времени во второй раз не обязано.
 //
-// Замок один на всех, а не по экземпляру: в ImporterLocalRec его не положить,
-// Premiere выдаёт под неё сырую память без вызова конструкторов. Цена нулевая —
-// сюда заходят один раз на файл, дальше срабатывает быстрая проверка внутри.
-std::mutex g_openMutex;
+// Почему НЕ один на весь плагин, как было. Замок держится всё время, пока идёт
+// Open(), а внутри него avformat_find_stream_info, который по умолчанию читает
+// и декодирует до пяти секунд материала. Прежний комментарий говорил «цена
+// нулевая, сюда заходят один раз на файл» — и это верно ровно для одного файла.
+// В журнале живого сеанса 45 вызовов imOpenFile8, и все их открытия вставали
+// в одну очередь. Плюс у записи с четырьмя дорожками звука экземпляров четыре,
+// и каждый разбирает контейнер.
+//
+// Защищать надо не «открытие вообще», а КОНКРЕТНУЮ структуру от самой себя.
+// Положить замок в ImporterLocalRec нельзя — Premiere выдаёт под неё сырую
+// память без вызова конструкторов, — поэтому берём набор замков и выбираем
+// по адресу структуры. Один и тот же ldata всегда попадает на один и тот же
+// замок (это и требовалось), разные почти всегда на разные. Совпадение адресов
+// по остатку стоит немного лишнего ожидания и ничего не ломает.
+std::mutex g_openMutexes[64];
+
+std::mutex& OpenMutexFor(const void* ldata)
+{
+    // Младшие биты адреса выделения почти всегда нули (выравнивание), поэтому
+    // сдвигаем, прежде чем брать остаток: иначе все структуры сели бы
+    // на несколько замков из шестидесяти четырёх.
+    const size_t bits = reinterpret_cast<size_t>(ldata) >> 5;
+    return g_openMutexes[bits % (sizeof(g_openMutexes) / sizeof(g_openMutexes[0]))];
+}
 
 // Premiere может спросить сведения о файле раньше, чем откроет его,
 // поэтому декодер создаём по требованию из сохранённого пути.
 bool EnsureDecoder(ImporterLocalRecPtr ldata)
 {
-    std::lock_guard<std::mutex> lock(g_openMutex);
+    std::lock_guard<std::mutex> lock(OpenMutexFor(ldata));
     if (ldata->decoder && ldata->decoder->IsOpen()) return true;
 
     if (!ldata->decoder) ldata->decoder = new av1imp::Decoder();
@@ -108,7 +123,9 @@ bool EnsureDecoder(ImporterLocalRecPtr ldata)
 // не у всех потоков и не сразу
 bool EnsureAudio(ImporterLocalRecPtr ldata)
 {
-    std::lock_guard<std::mutex> lock(g_openMutex);
+    // Тот же замок, что и у EnsureDecoder, и это обязательно: обе функции
+    // трогают одно и то же состояние одного и того же декодера
+    std::lock_guard<std::mutex> lock(OpenMutexFor(ldata));
     if (!ldata->decoder) return false;
 
     // Сравниваем НОМЕР дорожки, а не просто «звук уже открыт».
@@ -127,23 +144,10 @@ bool EnsureAudio(ImporterLocalRecPtr ldata)
     return ldata->decoder->OpenAudio(ldata->audioTrack);
 }
 
-// Хост может знать набор функций не той версии, что заголовки SDK. Adobe новые
-// функции дописывает в конец набора, поэтому берём самую свежую из тех, что хост
-// согласен отдать, а пользуемся только давно существующими. Без этого плагин,
-// собранный по свежему SDK, молча остаётся без кэша кадров на Premiere постарше.
-template <typename T>
-csSDK_int32 AcquireNewest(SPBasicSuite* basic, const char* name,
-                          csSDK_int32 newest, T** out)
-{
-    *out = nullptr;
-    for (csSDK_int32 version = newest; version >= 1; --version) {
-        if (basic->AcquireSuite(name, version, (const void**)out) == kSPNoError && *out) {
-            return version;
-        }
-        *out = nullptr;
-    }
-    return 0;
-}
+// Перебор версий набора переехал в заголовок: его теперь зовёт и асинхронный
+// импортёр, который берёт наборы себе, а не одалживает наши. Имя короче не
+// стало, зато копии больше нет.
+using av1imp::AcquireNewestSuite;
 
 // Плагин лежит в общей папке MediaCore, а значит попадает разом во все
 // установленные приложения Adobe и во все их версии. Что именно нас загрузило —
@@ -158,7 +162,7 @@ void LogHost(imStdParms* stdParms)
     if (!basic) return;
 
     PrSDKAppInfoSuite* appInfo = nullptr;
-    const csSDK_int32 version = AcquireNewest(basic, kPrSDKAppInfoSuite,
+    const csSDK_int32 version = AcquireNewestSuite(basic, kPrSDKAppInfoSuite,
                                               kPrSDKAppInfoSuiteVersion, &appInfo);
     if (!version) {
         av1imp::Log("host: app info suite unavailable");
@@ -260,7 +264,12 @@ static prMALError AV1OpenFile8(imStdParms* stdParms, imFileRef* fileRef,
     if (!ldataH) return imMemErr;
 
     ImporterLocalRecPtr ldata = *ldataH;
-    CopyUtf16(ldata->filePath, 2048, openRec->fileinfo.filepath);
+    if (!CopyUtf16(ldata->filePath, std::size(ldata->filePath),
+                   openRec->fileinfo.filepath)) {
+        av1imp::Log("imOpenFile8: path longer than %d characters - refusing rather than "
+                    "opening whatever the cut path points at", AV1_PATH_CHARS);
+        return imBadFile;
+    }
 
     // См. раскладку в AV1GetInfo8: поток 0 несёт видео и дорожку звука 0,
     // потоки 1..N — только звук соответствующей дорожки
@@ -339,16 +348,34 @@ static prMALError AV1CloseFile(imStdParms* stdParms, imFileRef* fileRef, void* p
         CloseHandle(ldata->fileRef);
         ldata->fileRef = imInvalidHandleValue;
     }
+    // Отдаём ровно те наборы, которые взяли, и той версией, какой брали.
+    // Ноль в версии означает «не выдали» — тогда и возвращать нечего.
     if (ldata->BasicSuite) {
-        ldata->BasicSuite->ReleaseSuite(kPrSDKPPixCreatorSuite, kPrSDKPPixCreatorSuiteVersion);
+        if (ldata->PPixCreatorSuiteVersion) {
+            ldata->BasicSuite->ReleaseSuite(kPrSDKPPixCreatorSuite, ldata->PPixCreatorSuiteVersion);
+        }
         if (ldata->PPixCacheSuiteVersion) {
             ldata->BasicSuite->ReleaseSuite(kPrSDKPPixCacheSuite, ldata->PPixCacheSuiteVersion);
         }
         if (ldata->PPix2SuiteVersion) {
             ldata->BasicSuite->ReleaseSuite(kPrSDKPPix2Suite, ldata->PPix2SuiteVersion);
         }
-        ldata->BasicSuite->ReleaseSuite(kPrSDKPPixSuite,        kPrSDKPPixSuiteVersion);
-        ldata->BasicSuite->ReleaseSuite(kPrSDKTimeSuite,        kPrSDKTimeSuiteVersion);
+        if (ldata->PPixSuiteVersion) {
+            ldata->BasicSuite->ReleaseSuite(kPrSDKPPixSuite, ldata->PPixSuiteVersion);
+        }
+        if (ldata->TimeSuiteVersion) {
+            ldata->BasicSuite->ReleaseSuite(kPrSDKTimeSuite, ldata->TimeSuiteVersion);
+        }
+        ldata->PPixCreatorSuite = nullptr;
+        ldata->PPixSuite        = nullptr;
+        ldata->PPix2Suite       = nullptr;
+        ldata->PPixCacheSuite   = nullptr;
+        ldata->TimeSuite        = nullptr;
+        ldata->PPixCreatorSuiteVersion = 0;
+        ldata->PPixSuiteVersion        = 0;
+        ldata->TimeSuiteVersion        = 0;
+        ldata->PPixCacheSuiteVersion   = 0;
+        ldata->PPix2SuiteVersion       = 0;
         ldata->BasicSuite = nullptr;
     }
 
@@ -370,11 +397,15 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     ImporterLocalRecPtr ldata = *ldataH;
 
     if (ldata->filePath[0] == 0) {
-        CopyUtf16(ldata->filePath, 2048, fileAccess->filepath);
+        if (!CopyUtf16(ldata->filePath, std::size(ldata->filePath), fileAccess->filepath)) {
+            av1imp::Log("imGetInfo8: path longer than %d characters", AV1_PATH_CHARS);
+            stdParms->piSuites->memFuncs->unlockHandle(reinterpret_cast<char**>(ldataH));
+            return imBadFile;
+        }
     }
 
-    av1imp::Log("imGetInfo8: asked about file %016llx (stream %d)",
-                static_cast<unsigned long long>(PathLogId(ldata->filePath)),
+    av1imp::Log("imGetInfo8: asked about %s (stream %d)",
+                av1imp::LogPath(reinterpret_cast<const wchar_t*>(ldata->filePath)).c_str(),
                 fileInfo->streamIdx);
 
     // Записать номер потока нужно до открытия: от него зависит,
@@ -403,20 +434,44 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     }
     if (ldata->BasicSuite && !ldata->PPixSuite) {
         // Эти три набора первой версии и есть во всех Premiere, где плагины
-        // вообще живут
-        ldata->BasicSuite->AcquireSuite(kPrSDKPPixCreatorSuite, kPrSDKPPixCreatorSuiteVersion,
-                                        (const void**)&ldata->PPixCreatorSuite);
-        ldata->BasicSuite->AcquireSuite(kPrSDKPPixSuite, kPrSDKPPixSuiteVersion,
-                                        (const void**)&ldata->PPixSuite);
-        ldata->BasicSuite->AcquireSuite(kPrSDKTimeSuite, kPrSDKTimeSuiteVersion,
-                                        (const void**)&ldata->TimeSuite);
+        // вообще живут — но «есть везде» не повод не проверять ответ.
+        //
+        // Прежде результат AcquireSuite не смотрели вовсе, а отдавали набор
+        // в imCloseFile безусловно. Не выдай хост набор — мы бы вернули
+        // ссылку, которой не брали, то есть уронили бы чужой счётчик ниже
+        // нуля. Для двух наборов с перебором версий это уже учитывалось
+        // (по ненулевой версии), для трёх остальных — нет, без всякой
+        // причины, кроме недосмотра. Теперь запоминаем версию и у них,
+        // и отдаём ровно то, что взяли.
+        ldata->PPixCreatorSuiteVersion =
+            (ldata->BasicSuite->AcquireSuite(kPrSDKPPixCreatorSuite,
+                                             kPrSDKPPixCreatorSuiteVersion,
+                                             (const void**)&ldata->PPixCreatorSuite) == kSPNoError
+             && ldata->PPixCreatorSuite) ? kPrSDKPPixCreatorSuiteVersion : 0;
+
+        ldata->PPixSuiteVersion =
+            (ldata->BasicSuite->AcquireSuite(kPrSDKPPixSuite, kPrSDKPPixSuiteVersion,
+                                             (const void**)&ldata->PPixSuite) == kSPNoError
+             && ldata->PPixSuite) ? kPrSDKPPixSuiteVersion : 0;
+
+        ldata->TimeSuiteVersion =
+            (ldata->BasicSuite->AcquireSuite(kPrSDKTimeSuite, kPrSDKTimeSuiteVersion,
+                                             (const void**)&ldata->TimeSuite) == kSPNoError
+             && ldata->TimeSuite) ? kPrSDKTimeSuiteVersion : 0;
+
+        if (!ldata->PPixCreatorSuiteVersion || !ldata->PPixSuiteVersion ||
+            !ldata->TimeSuiteVersion) {
+            av1imp::Log("suites: host refused a basic suite (creator %d, ppix %d, time %d)",
+                        ldata->PPixCreatorSuiteVersion, ldata->PPixSuiteVersion,
+                        ldata->TimeSuiteVersion);
+        }
 
         // А вот кэш кадров дорос до восьмой версии, и просить восьмую у Premiere
         // 2019 бессмысленно: набор не выдадут вовсе. Нужны нам только две первые
         // функции набора, а они есть с самой первой версии.
         ldata->PPixCacheSuiteVersion =
-            AcquireNewest(ldata->BasicSuite, kPrSDKPPixCacheSuite,
-                          kPrSDKPPixCacheSuiteVersion, &ldata->PPixCacheSuite);
+            AcquireNewestSuite(ldata->BasicSuite, kPrSDKPPixCacheSuite,
+                               kPrSDKPPixCacheSuiteVersion, &ldata->PPixCacheSuite);
         av1imp::Log("suites: frame cache version %d%s", ldata->PPixCacheSuiteVersion,
                     ldata->PPixCacheSuiteVersion ? "" : " - working without it");
 
@@ -424,8 +479,8 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
         // во второй версии набора, и на хосте, где есть только первая, родной
         // YUV предлагать нельзя — писать в него было бы некуда.
         ldata->PPix2SuiteVersion =
-            AcquireNewest(ldata->BasicSuite, kPrSDKPPix2Suite,
-                          kPrSDKPPix2SuiteVersion, &ldata->PPix2Suite);
+            AcquireNewestSuite(ldata->BasicSuite, kPrSDKPPix2Suite,
+                               kPrSDKPPix2SuiteVersion, &ldata->PPix2Suite);
         av1imp::Log("suites: PPix2 version %d%s", ldata->PPix2SuiteVersion,
                     (ldata->PPix2SuiteVersion >= kPrSDKPPix2SuiteVersion2)
                         ? "" : " - planar YUV unavailable");
@@ -452,6 +507,9 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     if (audioTracks > 0 && EnsureAudio(ldata)) {
         fileInfo->hasAudio            = kPrTrue;
         fileInfo->audInfo.numChannels = mi.audioChannels;
+        // Запоминаем ровно то, что сказали: по этому числу хост выделит
+        // буферы, и по нему же мы потом проверим, во что пишем
+        ldata->declaredAudioChannels  = mi.audioChannels;
         fileInfo->audInfo.sampleRate  = static_cast<float>(mi.audioSampleRate);
         fileInfo->audInfo.sampleType  = kPrAudioSampleType_32BitFloat;
         fileInfo->audDuration         = mi.audioSampleCount;
@@ -502,6 +560,17 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     // Частоту передаём дробью — иначе 59.94 превратится в 60 и картинка уедет
     fileInfo->vidScale      = mi.fpsNum > 0 ? mi.fpsNum : 30;
     fileInfo->vidSampleSize = mi.fpsDen > 0 ? mi.fpsDen : 1;
+    // Длительность в единицах видеовремени: считается в 64 битах и насыщается,
+    // а не переполняется.
+    //
+    // Раньше оба множителя были 32-битными, и умножение шло в 32 битах: при
+    // 59.94 кадра в секунду vidSampleSize равен 1001, значит потолок — 2 145 000
+    // кадров, то есть 9 часов 56 минут. Дальше длительность уходила в минус.
+    //
+    // ⚠ На нынешних Premiere это поле, скорее всего, не читают вовсе: в SDK про
+    // vidDurationInFrames сказано «vidDuration will be ignored if this is set»,
+    // а его мы заполняем 64-битным числом строкой ниже. Но «скорее всего, не
+    // читают» — не повод отдавать отрицательное число тому, кто всё-таки прочтёт.
     bool durationSaturated = false;
     fileInfo->vidDuration = av1imp::SaturatingFrameDuration(
         mi.frameCount, fileInfo->vidSampleSize, &durationSaturated);
@@ -527,6 +596,15 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
                 fileInfo->vidScale, fileInfo->vidSampleSize,
                 (long long)mi.frameCount);
 
+    // Поворот сообщаем в журнал, но кадр отдаём как есть — объявить его хосту
+    // нечем, в SDK импортёра такого поля нет. Строка нужна, чтобы «ролик
+    // приехал боком» перестало быть загадкой: причина видна сразу.
+    if (mi.rotationDegrees != 0) {
+        av1imp::Log("imGetInfo8: the file asks to be shown rotated %d degrees, and "
+                    "the importer SDK has no field to pass that on - delivering "
+                    "unrotated", mi.rotationDegrees);
+    }
+
     stdParms->piSuites->memFuncs->unlockHandle(reinterpret_cast<char**>(ldataH));
 
     // imIterateStreams — «спроси меня про следующий поток». Без этого Premiere
@@ -550,16 +628,19 @@ static prMALError AV1ImportAudio7(imStdParms* stdParms, imFileRef fileRef,
     if (!EnsureDecoder(ldata) || !EnsureAudio(ldata)) {
         av1imp::Log("imImportAudio7: track %d request %d at %lld - audio unavailable: %s",
                     ldata->audioTrack, nth, (long long)audioRec->position,
-                    ldata->decoder ? ldata->decoder->LastError().c_str() : "no decoder");
+                    ldata->decoder ? ldata->decoder->LastAudioError().c_str() : "no decoder");
         return imFileReadFailed;
     }
 
+    // Число каналов передаём то, которое сами и объявили: только оно
+    // описывает буферы, что выделил хост
     if (!ldata->decoder->GetAudio(audioRec->position,
                                   static_cast<int32_t>(audioRec->size),
-                                  audioRec->buffer)) {
+                                  audioRec->buffer,
+                                  ldata->declaredAudioChannels)) {
         av1imp::Log("imImportAudio7: track %d request %d at %lld, %u samples - FAILED: %s",
                     ldata->audioTrack, nth, (long long)audioRec->position,
-                    audioRec->size, ldata->decoder->LastError().c_str());
+                    audioRec->size, ldata->decoder->LastAudioError().c_str());
         return imFileReadFailed;
     }
 
@@ -616,6 +697,39 @@ static bool NativeYUVFormat(const av1imp::MediaInfo& mi, PrPixelFormat* out)
     return true;
 }
 
+// То же для десяти бит. Здесь у Premiere различается ещё и кривая переноса:
+// у BT.2020 отдельные константы для PQ и для HLG, и это не прихоть — по ним
+// хост понимает, что материал HDR, и не тащит его через тон-маппинг как SDR.
+//
+// Коды кривой те же, что в файле: 16 — PQ (SMPTE 2084), 18 — HLG.
+static bool NativeP010Format(const av1imp::MediaInfo& mi, PrPixelFormat* out)
+{
+    const int kMatrixBT709 = 1;
+    const int kTransferPQ  = 16;
+    const int kTransferHLG = 18;
+
+    const bool full = mi.fullRange;
+
+    if (mi.colourMatrix == kMatrixBT709) {
+        *out = full ? PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_709_FullRange
+                    : PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_709;
+        return true;
+    }
+
+    // Дальше только BT.2020 — CanDeliverP010 других сюда не пускает
+    if (mi.colourTransfer == kTransferPQ) {
+        *out = full ? PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_HDR_FullRange
+                    : PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_HDR;
+    } else if (mi.colourTransfer == kTransferHLG) {
+        *out = full ? PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_HDR_HLG_FullRange
+                    : PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_HDR_HLG;
+    } else {
+        *out = full ? PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_FullRange
+                    : PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020;
+    }
+    return true;
+}
+
 // Наш ли это родной формат. Восемь констант — все, какие Premiere знает для
 // восьмибитного YUV 4:2:0 кадром: две расстановки цветности × две матрицы ×
 // два размаха. Перечислены поимённо, а не диапазоном: числовые значения
@@ -636,6 +750,43 @@ bool av1imp::IsNativeYUV(PrPixelFormat f)
         default:
             return false;
     }
+}
+
+// Всё, во что мы умеем положить кадр: плоскости YUV, шестнадцать бит BGRA
+// и восемь бит BGRA. Больше ничего, и это честно перечислено, а не выведено
+// из «ну BGRA-то мы точно можем».
+bool av1imp::IsNativeP010(PrPixelFormat f)
+{
+    switch (f) {
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_709:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_709_FullRange:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_FullRange:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_HDR:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_HDR_FullRange:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_HDR_HLG:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_HDR_HLG_FullRange:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool av1imp::CanProduce(PrPixelFormat f)
+{
+    return av1imp::IsNativeYUV(f) ||
+           av1imp::IsNativeP010(f) ||
+           f == PrPixelFormat_BGRA_4444_16u ||
+           f == PrPixelFormat_BGRA_4444_8u;
+}
+
+int av1imp::PickFrameFormat(const imFrameFormat* formats, int count)
+{
+    if (!formats || count < 1) return -1;
+    for (int i = 0; i < count; ++i) {
+        if (av1imp::CanProduce(formats[i].inPixelFormat)) return i;
+    }
+    return -1;
 }
 
 bool av1imp::WriteFrameToBuffer(av1imp::Decoder& decoder, int64_t frameIndex,
@@ -675,6 +826,72 @@ bool av1imp::WriteFrameToBuffer(av1imp::Decoder& decoder, int64_t frameIndex,
     csSDK_int32 rowBytes = 0;
     ppixSuite->GetPixels(frame, PrPPixBufferAccess_ReadWrite, &buffer);
     ppixSuite->GetRowBytes(frame, &rowBytes);
+
+    // --- десять бит, две плоскости -----------------------------------------
+    //
+    // ⚠ ЧТО ЗДЕСЬ ВЫЯСНИЛОСЬ НА ЖИВОМ PREMIERE, и почему этот путь по
+    // умолчанию выключен.
+    //
+    // Способов добраться до пикселей у импортёра ровно два, и оба мимо:
+    // GetYUV420PlanarBuffers описан и работает только для ВОСЬМИБИТНЫХ ТРЁХ
+    // плоскостей, а GetPixels на двухплоскостном буфере не отдаёт ничего.
+    // Третьего в SDK нет — ни в PPixSuite, ни в PPix2Suite, ни в наборах
+    // создателя буферов.
+    //
+    // При этом CreatePPix формат ПРИНИМАЕТ. То есть Premiere 26 соглашается
+    // выдать двухплоскостной десятибитный кадр и не даёт в него писать:
+    // 11 214 строк журнала, каждый кадр «host gave no buffer», предпросмотр
+    // замирает на последнем удавшемся кадре.
+    //
+    // Проверка ниже стоит ДО общей проверки буфера, а не после, — иначе
+    // (как было в первой версии) до неё просто не доходило: общая проверка
+    // отвергала кадр раньше, и вся эта арифметика не выполнялась ни разу.
+    if (av1imp::IsNativeP010(pixelFormat)) {
+        if (!buffer || rowBytes <= 0) {
+            // Ровно тот случай, что мы поймали. Пишем ЧИСЛА, а не «не вышло»:
+            // без них не отличить «указателя нет» от «шага нет».
+            size_t probe = 0;
+            if (ppix2Suite && ppix2Suite->GetSize) ppix2Suite->GetSize(frame, &probe);
+            av1imp::Log("10-bit planes: host gave buffer=%p rowBytes=%d size=%zu "
+                        "for %dx%d - there is no way to address the second plane",
+                        (void*)buffer, (int)rowBytes, probe, width, height);
+            *outWhy = "host gives no buffer for a two-plane frame";
+            return false;
+        }
+
+        if (!ppix2Suite || !ppix2Suite->GetSize) {
+            *outWhy = "10-bit planes asked for without GetSize to confirm the layout";
+            return false;
+        }
+
+        const size_t strideY  = (size_t)rowBytes;
+        const size_t chromaH  = ((size_t)height + 1) / 2;
+        const size_t needed   = strideY * (size_t)height + strideY * chromaH;
+
+        size_t actual = 0;
+        if (ppix2Suite->GetSize(frame, &actual) != suiteError_NoError || actual == 0) {
+            *outWhy = "GetSize refused, cannot confirm the two-plane layout";
+            return false;
+        }
+        if (actual < needed) {
+            // Хост разложил буфер не так, как мы предположили. Молча писать
+            // в него нельзя ни в коем случае.
+            av1imp::Log("10-bit planes: buffer is %zu bytes, the two-plane layout needs "
+                        "%zu (%dx%d, row %d) - refusing and falling back",
+                        actual, needed, width, height, (int)rowBytes);
+            *outWhy = "buffer too small for two planes";
+            return false;
+        }
+
+        uint8_t* planeY  = reinterpret_cast<uint8_t*>(buffer);
+        uint8_t* planeUV = planeY + strideY * (size_t)height;
+
+        return decoder.GetFrameP010(frameIndex,
+                                    planeY,  (int)strideY,
+                                    planeUV, (int)strideY,
+                                    width, height);
+    }
+
     if (!buffer || rowBytes <= 0) { *outWhy = "host gave no buffer"; return false; }
 
     // Строка обязана вмещать кадр целиком. Буфер создаём мы сами и тем же
@@ -715,6 +932,23 @@ static bool PrefersNativeYUV(ImporterLocalRecPtr ldata)
     return av1imp::YuvEnabled() && ldata->decoder->CanDeliverYUV420();
 }
 
+// То же для десяти бит. Условие на версию набора здесь ДРУГОЕ, и это не
+// недосмотр: трёхплоскостному пути нужен GetYUV420PlanarBuffers, а он появился
+// во второй версии; двухплоскостному нужен только GetSize, а он есть с первой.
+static bool PrefersNativeP010(ImporterLocalRecPtr ldata)
+{
+    if (!ldata || !ldata->decoder || !ldata->decoder->IsOpen()) return false;
+    if (!ldata->PPix2Suite) return false;
+
+    // Свой выключатель, и по умолчанию он ВЫКЛЮЧЕН — единственный такой
+    // в плагине. Premiere 26 этот формат принимает, а буфер под него не
+    // выдаёт: писать некуда, каждый кадр отказывает, предпросмотр замирает.
+    // Проверено вживую, 11 214 строк журнала. Подробности и числа —
+    // в AV1Settings.h у Yuv10Enabled.
+    return av1imp::YuvEnabled() && av1imp::Yuv10Enabled() &&
+           ldata->decoder->CanDeliverP010();
+}
+
 // Premiere опрашивает форматы по одному, пока не получит imBadFormatIndex,
 // и порядок здесь означает предпочтение.
 //
@@ -737,7 +971,12 @@ static prMALError AV1GetIndPixelFormat(imStdParms* stdParms, csSDK_size_t idx,
         if (*ldataH && (*ldataH)->decoder && (*ldataH)->decoder->IsOpen()) {
             const av1imp::MediaInfo& mi = (*ldataH)->decoder->Info();
             deep = mi.bitDepth > 8;
-            if (PrefersNativeYUV(*ldataH)) {
+
+            // Десятибитный родной путь проверяем первым: он и есть тот случай,
+            // где выигрыш наибольший (15.95 мс против 0.42 на 1440p).
+            if (PrefersNativeP010(*ldataH)) {
+                native = NativeP010Format(mi, &nativeFormat);
+            } else if (PrefersNativeYUV(*ldataH)) {
                 native = NativeYUVFormat(mi, &nativeFormat);
             }
         }
@@ -811,7 +1050,10 @@ static prMALError AV1GetIndColorSpace(imStdParms* stdParms, csSDK_size_t index,
     // Отдавая плоскости, мы не переводим цвет — значит матрица никуда не делась
     // и размах остался тем, что в файле. Отдавая RGB, наоборот: матрица уже
     // применена, и объявлять её второй раз значит применить дважды.
-    const bool planar = PrefersNativeYUV(ldata);
+    // Оба родных пути — трёхплоскостной восьмибитный и двухплоскостной
+    // десятибитный — одинаковы в главном: цвет мы НЕ переводим. Значит
+    // и объявляются они одинаково.
+    const bool planar = PrefersNativeYUV(ldata) || PrefersNativeP010(ldata);
     if (planar) {
         sei.matrixEquationsCode = mi.colourMatrix;
         sei.isFullRange         = mi.fullRange ? kPrTrue : kPrFalse;
@@ -876,24 +1118,37 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
         return imOtherErr;
     }
 
+    // Берём из СПИСКА первый формат, который умеем, а не всегда нулевой.
+    // Список хост присылает в порядке предпочтения — см. PickFrameFormat.
+    const int pick = av1imp::PickFrameFormat(videoRec->inFrameFormats,
+                                             videoRec->inNumFrameFormats);
+    if (pick < 0 && videoRec->inNumFrameFormats > 0) {
+        av1imp::Log("imGetSourceVideo: host offered %d format(s), none of them ours "
+                    "(first is 0x%08X) - falling back to BGRA 8u",
+                    videoRec->inNumFrameFormats,
+                    (unsigned)videoRec->inFrameFormats[0].inPixelFormat);
+    }
+
     // Ноль означает «любой размер» — тогда отдаём как в файле. Ненулевой размер
     // Premiere просит при пониженном качестве воспроизведения, и кадр надо
     // масштабировать под него: буфер создаётся именно такой.
-    imFrameFormat* format = &videoRec->inFrameFormats[0];
+    imFrameFormat* format = &videoRec->inFrameFormats[pick >= 0 ? pick : 0];
     if (format->inFrameWidth <= 0)  format->inFrameWidth  = mi.width;
     if (format->inFrameHeight <= 0) format->inFrameHeight = mi.height;
 
     // Формат просит хост, а не мы: он выбирает из того списка, что мы дали
-    // в imGetIndPixelFormat. Всё, кроме явных шестнадцати бит и родного YUV,
-    // отдаём восемью битами BGRA.
-    const bool wantsNative = av1imp::IsNativeYUV(format->inPixelFormat);
+    // в imGetIndPixelFormat. Не нашлось ничего нашего — отдаём восемью
+    // битами BGRA, как и раньше.
     const PrPixelFormat pixelFormat =
-        wantsNative ? format->inPixelFormat
-                    : ((format->inPixelFormat == PrPixelFormat_BGRA_4444_16u)
-                           ? PrPixelFormat_BGRA_4444_16u : PrPixelFormat_BGRA_4444_8u);
+        (pick >= 0) ? format->inPixelFormat : PrPixelFormat_BGRA_4444_8u;
+    const bool wantsNative = av1imp::IsNativeYUV(pixelFormat);
     const av1imp::FrameFormat frameFormat =
         (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? av1imp::FrameFormat::BGRA16
                                                      : av1imp::FrameFormat::BGRA8;
+
+    // Качество, которое просит хост: при черновом кадр уменьшается дешевле.
+    // Поле приходило с каждым запросом и до сих пор не читалось вовсе.
+    ldata->decoder->SetScaling(av1imp::ScalingFor(videoRec->inQuality));
 
     prRect rect;
     prSetRect(&rect, 0, 0, format->inFrameWidth, format->inFrameHeight);

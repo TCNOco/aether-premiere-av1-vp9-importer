@@ -17,6 +17,7 @@
 // last line printed names the case that did it.
 
 #include "../src/AV1Decoder.h"
+#include "utf8_args.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -131,8 +132,13 @@ void RunCase(int number, const char* what, const std::string& path,
 
 } // namespace
 
-int main(int argc, char** argv)
+// wmain: узкий argv приходит в кодировке ANSI, а ядру нужен UTF-8 —
+// см. tools/utf8_args.h
+int wmain(int argc, wchar_t** wargv)
 {
+    tools::Utf8Args args(argc, wargv);
+    char** argv = args.Ptrs();
+
     // Без буфера: если процесс умрёт, последняя строка должна быть на экране,
     // а не в буфере, который никто уже не сольёт
     setvbuf(stdout, nullptr, _IONBF, 0);

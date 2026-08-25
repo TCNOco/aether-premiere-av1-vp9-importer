@@ -203,4 +203,45 @@ Make "h264.mp4" @(
     "-f","lavfi","-i","testsrc2=size=320x180:rate=30:duration=4",
     "-c:v","libopenh264","-b:v","300k","-pix_fmt","yuv420p")
 
+# A path that is not Latin, in a folder that is not Latin either.
+#
+# Not a new recording - a copy of one we already have. What is being checked
+# is not the picture but the PATH: UTF-16 from the host, UTF-8 into FFmpeg,
+# and the log line in between.
+#
+# Every other file here is named in ASCII, and that gap hid a real bug for
+# a long time. The log printed the path with %S, which MSVC converts through
+# the C locale - and that locale knows ASCII only. Measured: the line stops
+# at the first Cyrillic character, fprintf returns -1, and it does not even
+# write the newline, so the next entry is glued onto the stump:
+#
+#     1 ascii  [C:\Users\hadeg\file.mp4] end
+#     2 cyrill [F:\
+#
+# That is the one line worth having when a file will not open, and for anyone
+# whose footage does not live in Latin folders it was never there.
+# The name is built from character codes rather than typed in, and that is
+# not decoration. This file has no byte-order mark, and Windows PowerShell 5.1
+# reads a file without one in the system ANSI code page - so a Cyrillic
+# literal typed here would arrive as mojibake and create a file with the wrong
+# name. Wrong quietly: the check would still run, and still prove nothing.
+# Character codes are ASCII on disk and cannot be misread.
+#
+# U+043F U+0430 U+043F U+043A U+0430 = "papka" in Cyrillic, plus a space and
+# a Latin word, because a space in the path is worth exercising too.
+function Cyr([int[]]$codes) { -join ($codes | ForEach-Object { [char]$_ }) }
+
+$cyrDirName  = (Cyr @(0x043F,0x0430,0x043F,0x043A,0x0430)) + " test"
+$cyrFileName = (Cyr @(0x0432,0x0438,0x0434,0x0435,0x043E)) + "_av1.mp4"
+
+$cyrDir = Join-Path $OutDir $cyrDirName
+New-Item -ItemType Directory -Force $cyrDir | Out-Null
+$cyrFile = Join-Path $cyrDir $cyrFileName
+if (-not (Test-Path $cyrFile)) {
+    Write-Host "  make  $cyrDirName\$cyrFileName"
+    Copy-Item (Join-Path $OutDir "av1_8bit.mp4") $cyrFile -Force
+} else {
+    Write-Host "  have  $cyrDirName\$cyrFileName"
+}
+
 Write-Host "done"

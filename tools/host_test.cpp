@@ -94,7 +94,31 @@ struct FakeFrame
     int                  planeH   = 0;
     size_t               offsetU  = 0;
     size_t               offsetV  = 0;
+
+    // Десятибитный кадр лежит ДВУМЯ плоскостями: яркость из uint16, следом
+    // чересстрочная цветность. Адресов второй плоскости набор PPix2 не даёт
+    // вовсе — плагин обязан вычислить её сам и убедиться в раскладке через
+    // GetSize. Значит именно GetSize здесь и должен отвечать честно.
+    bool                 biplanar = false;
 };
+
+// Восемь констант десятибитного двухплоскостного YUV — те же, что в плагине.
+bool IsBiplanar10(PrPixelFormat f)
+{
+    switch (f) {
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_709:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_709_FullRange:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_FullRange:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_HDR:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_HDR_FullRange:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_HDR_HLG:
+        case PrPixelFormat_YUV_420_MPEG4_FRAME_PICTURE_BIPLANAR_10u_as16u_2020_HDR_HLG_FullRange:
+            return true;
+        default:
+            return false;
+    }
+}
 
 // Восемь констант родного YUV 4:2:0 — те же, что перечислены в плагине.
 bool IsPlanarYUV(PrPixelFormat f)
@@ -157,12 +181,16 @@ prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pix
     const int bytesPerPixel = (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? 8 : 4;
 
     if (g_benchMode) {
-        const bool planar  = IsPlanarYUV(pixelFormat);
+        const bool planar   = IsPlanarYUV(pixelFormat);
+        const bool biplanar = IsBiplanar10(pixelFormat);
         const int  chromaW = (width + 1) / 2;
         const int  chromaH = (height + 1) / 2;
+        const int  row10   = width * (int)sizeof(uint16_t);
         const size_t bytes = planar
             ? static_cast<size_t>(width) * height + 2u * chromaW * chromaH
-            : static_cast<size_t>(width) * bytesPerPixel * height;
+            : biplanar
+                ? static_cast<size_t>(row10) * height + static_cast<size_t>(row10) * chromaH
+                : static_cast<size_t>(width) * bytesPerPixel * height;
 
         if (!g_benchFrame) {
             g_benchFrame = new FakeFrame();
@@ -172,9 +200,12 @@ prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pix
 
         memset(&g_benchFrame->pix, 0, sizeof(g_benchFrame->pix));
         g_benchFrame->pix.bounds       = *rect;
-        g_benchFrame->pix.rowbytes     = planar ? width : width * bytesPerPixel;
+        g_benchFrame->pix.rowbytes     = planar   ? width
+                                       : biplanar ? row10
+                                                  : width * bytesPerPixel;
         g_benchFrame->pix.bitsperpixel = 32;
         g_benchFrame->pix.pix          = g_benchFrame->data.data();
+        g_benchFrame->biplanar         = biplanar;
 
         // Раскладка нужна и в замере: без неё набор с плоскостями откажет,
         // плагин отступит, и замер молча померил бы прежний путь под видом
@@ -212,6 +243,22 @@ prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pix
         f->offsetV = f->offsetU + static_cast<size_t>(chromaW) * chromaH;
         bytes      = f->offsetV + static_cast<size_t>(chromaW) * chromaH;
         f->pix.rowbytes = width;
+    }
+    // Десять бит: ДВЕ плоскости, обе из uint16. Шаг у обеих одинаковый —
+    // цветность вдвое уже, но в ней по два значения на точку.
+    //
+    // Ровно та раскладка, которую плагин вычисляет сам: адресов второй
+    // плоскости в наборе PPix2 нет вовсе. Здесь он поэтому и проверяется —
+    // ошибись он в смещении, он запишет цветность поверх яркости, и проверка
+    // «плоскости несут ту же картинку» это увидит.
+    else if (IsBiplanar10(pixelFormat)) {
+        const int chromaH = (height + 1) / 2;
+        f->biplanar = true;
+        f->planeW   = width;
+        f->planeH   = height;
+        f->pix.rowbytes = width * (int)sizeof(uint16_t);
+        bytes = static_cast<size_t>(f->pix.rowbytes) * height +
+                static_cast<size_t>(f->pix.rowbytes) * chromaH;
     }
 
     // Заполняем узнаваемым мусором: так видно, что плагин действительно записал
@@ -252,6 +299,20 @@ prSuiteError GetRowBytes(PPixHand hand, csSDK_int32* outRowBytes)
 }
 
 prSuiteError DisposePPix(PPixHand) { return suiteError_NoError; }
+
+// Размер буфера целиком. Для двухплоскостного десятибитного кадра это
+// единственное, чем плагин может подтвердить свою догадку о раскладке:
+// адресов второй плоскости набор не даёт, и вычисленное смещение остаётся
+// сверить только с общей длиной.
+//
+// Отвечаем настоящей длиной, а не «сколько плагин хотел бы»: пусть проверка
+// будет проверкой.
+prSuiteError GetSize(PPixHand hand, size_t* outSize)
+{
+    if (!hand || !outSize) return suiteError_Fail;
+    *outSize = FrameOf(hand)->data.size();
+    return suiteError_NoError;
+}
 
 // Адреса трёх плоскостей. Настоящий Premiere волен разложить их где угодно
 // и с любым шагом; мы кладём подряд — но отвечаем честными числами, чтобы
@@ -404,6 +465,7 @@ void BuildHostTables()
     g_ppixSuite.Dispose     = DisposePPix;
 
     g_ppix2Suite.GetYUV420PlanarBuffers = GetYUV420PlanarBuffers;
+    g_ppix2Suite.GetSize                = GetSize;
 
     g_cacheSuite.AddFrameToCache   = AddFrameToCache;
     g_cacheSuite.GetFrameFromCache = GetFrameFromCache;
@@ -831,8 +893,15 @@ int RunBench(ImportEntryProc entry, const wchar_t* mediaPath, int frames, bool r
     const int width  = fileInfo.vidInfo.imageWidth;
     const int height = fileInfo.vidInfo.imageHeight;
 
-    printf("%dx%d, %d frames per run, pixels %s\n\n", width, height, frames,
-           pixFmt.outPixelFormat == PrPixelFormat_BGRA_4444_16u ? "16u" : "8u");
+    // Формат называем по имени: «8u» на десятибитном файле, где хост на самом
+    // деле забрал P010, — это надпись, которая обманывает ровно того, кто
+    // читает замер, чтобы понять, какой путь он только что померил
+    const char* benchFmt =
+        IsBiplanar10(pixFmt.outPixelFormat) ? "10u planes (P010)"
+      : IsPlanarYUV(pixFmt.outPixelFormat)  ? "8u planes"
+      : pixFmt.outPixelFormat == PrPixelFormat_BGRA_4444_16u ? "BGRA 16u"
+                                                             : "BGRA 8u";
+    printf("%dx%d, %d frames per run, pixels %s\n\n", width, height, frames, benchFmt);
 
     printf("  host work   plain path   async path   difference\n");
     printf("  ---------   ----------   ----------   ----------\n");
@@ -1294,9 +1363,17 @@ int wmain(int argc, wchar_t** argv)
         const RunResult r = Run(entry, profile, argv[2]);
 
     if (r.hasVideo) {
+            // Формат называем по имени, а не «8u или 16u»: с появлением
+            // двух родных путей эта надпись перестала различать то, ради
+            // чего её читают. На 10-битном файле она говорила «8u», хотя
+            // хост забрал двухплоскостной десятибитный кадр.
+            const char* fmtName =
+                IsBiplanar10((PrPixelFormat)r.pixelFormat) ? "10u planes (P010)"
+              : IsPlanarYUV((PrPixelFormat)r.pixelFormat)  ? "8u planes"
+              : r.pixelFormat == PrPixelFormat_BGRA_4444_16u ? "BGRA 16u"
+                                                             : "BGRA 8u";
             printf("    accepted the file, %dx%d, frame cache suite %d, pixels %s\n",
-                   r.width, r.height, r.cacheVersion,
-                   r.pixelFormat == PrPixelFormat_BGRA_4444_16u ? "16u" : "8u");
+                   r.width, r.height, r.cacheVersion, fmtName);
         } else {
             printf("    accepted the file, no video, frame cache suite %d\n", r.cacheVersion);
         }
@@ -1333,7 +1410,12 @@ int wmain(int argc, wchar_t** argv)
             // и объявить её второй раз значит применить дважды. Отдавая
             // плоскости, наоборот — матрица не применялась, и назвать её
             // единичной значит не применить вовсе.
-            const bool planar = IsPlanarYUV((PrPixelFormat)r.pixelFormat);
+            // Плоскостей у нас теперь два вида: три восьмибитные и две
+            // десятибитные. Отличаются они всем, кроме главного — цвет
+            // не переводится ни в том, ни в другом, значит и объявляться
+            // должны одинаково.
+            const bool planar = IsPlanarYUV((PrPixelFormat)r.pixelFormat) ||
+                                IsBiplanar10((PrPixelFormat)r.pixelFormat);
             Check(r.colourIsRGB == !planar,
                   planar ? "declared as YUV, which is what we deliver"
                          : "declared as RGB, which is what we deliver");

@@ -52,6 +52,7 @@ bool PreloadFFmpeg()
     }
 
     bool ready = true;
+    bool anyElsewhere = false;
     for (const wchar_t* name : kFFmpegModules) {
         wchar_t full[MAX_PATH] = {};
         wcscpy_s(full, MAX_PATH, dir);
@@ -60,15 +61,46 @@ bool PreloadFFmpeg()
         // LOAD_WITH_ALTERED_SEARCH_PATH заставляет искать зависимости
         // этой библиотеки в её же папке, а не рядом с Premiere
         HMODULE m = LoadLibraryExW(full, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-        if (!m) {
-            av1imp::Log("ffmpeg: FAILED to load %ls (error %lu)", name, GetLastError());
-            ready = false;
+        if (m) continue;
+
+        const DWORD beside = GetLastError();
+
+        // Рядом с плагином не нашлось — пробуем обычным поиском, по имени.
+        //
+        // Это НЕ смягчение предохранителя, а исправление его ложного отказа.
+        // Проверяем мы одно: сможет ли отложенная загрузка найти библиотеку,
+        // когда до неё дойдёт дело. Она ищет по имени и обычным порядком, а
+        // не по нашему полному пути, — значит и проверять надо то же самое.
+        //
+        // Без этой ветки предохранитель глушил импортёр всякий раз, когда DLL
+        // лежат не в папке плагина: собранный .prm рядом с ffmpeg\bin, любая
+        // раскладка, где библиотеки общие. Поймано сразу — весь поддельный хост
+        // лёг на «accepted the file, 0x0», все проверки FAIL, в журнале пять
+        // строк «error 126».
+        m = LoadLibraryW(name);
+        if (m) {
+            anyElsewhere = true;
+            continue;
         }
+
+        // Имена модулей латинские, но пути в журнал всё равно идут через UTF-8:
+        // %ls обрывает строку на первом символе вне латиницы, а папка плагина
+        // при портабельной установке может лежать где угодно.
+        av1imp::Log("ffmpeg: FAILED to load %s (beside the plug-in: error %lu, "
+                    "by search path: error %lu)",
+                    av1imp::Utf8(name).c_str(), beside, GetLastError());
+        ready = false;
     }
-    if (ready) {
-        av1imp::Log("ffmpeg: loaded from %ls", dir);
-    } else {
+
+    if (!ready) {
         av1imp::Log("ffmpeg: runtime incomplete, importer disabled");
+    } else if (anyElsewhere) {
+        // Работать будет, но сказать об этом надо: раскладка не та, что даёт
+        // установщик, и при разборе чужой беды это первое, что стоит знать.
+        av1imp::Log("ffmpeg: loaded, but not all of it from %s",
+                    av1imp::Utf8(dir).c_str());
+    } else {
+        av1imp::Log("ffmpeg: loaded from %s", av1imp::Utf8(dir).c_str());
     }
     return ready;
 }

@@ -12,8 +12,8 @@
 #pragma once
 
 #define AETHER_VERSION_MAJOR 1
-#define AETHER_VERSION_MINOR 2
-#define AETHER_VERSION_PATCH 5
+#define AETHER_VERSION_MINOR 3
+#define AETHER_VERSION_PATCH 0
 
 // Для ресурса версии Windows: четыре числа через запятую
 #define AETHER_VERSION_COMMA AETHER_VERSION_MAJOR, AETHER_VERSION_MINOR, AETHER_VERSION_PATCH, 0

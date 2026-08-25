@@ -33,10 +33,27 @@ struct AsyncState {
     Decoder      decoder;
     std::string  path;
 
-    // Наборы функций хоста — копии указателей, не ссылка на чужую структуру
+    // Наборы функций хоста — ВЗЯТЫЕ СЕБЕ, а не одолженные у обычного импортёра.
+    //
+    // Копировать указатели было мало, и это ровно тот случай, когда правило
+    // из заголовка нарушалось буквой, соблюдённой на словах. Обычный импортёр
+    // в imCloseFile эти наборы ОСВОБОЖДАЕТ. Закройся он раньше нас — а SDK
+    // прямо говорит, что время жизни у нас развязано, — и мы продолжили бы
+    // звать CreatePPix и GetYUV420PlanarBuffers через ссылки, которых больше
+    // не держим. Живёт такое ровно до хоста, который считает ссылки честно.
+    //
+    // Поэтому здесь свои AcquireSuite при создании и свои ReleaseSuite
+    // в aiClose, как со всем остальным: путь свой, декодер свой, наборы свои.
+    SPBasicSuite*          BasicSuite       = nullptr;
     PrSDKPPixCreatorSuite* PPixCreatorSuite = nullptr;
     PrSDKPPixSuite*        PPixSuite        = nullptr;
     PrSDKPPix2Suite*       PPix2Suite       = nullptr;   // адреса плоскостей
+
+    // Версии, которыми наборы выданы: отдавать положено ровно ими, а ноль
+    // означает «не выдали, возвращать нечего»
+    csSDK_int32            PPixCreatorSuiteVersion = 0;
+    csSDK_int32            PPixSuiteVersion        = 0;
+    csSDK_int32            PPix2SuiteVersion       = 0;
 
     int   width  = 0;
     int   height = 0;
@@ -233,17 +250,20 @@ prMALError GetFrame(AsyncState* s, imSourceVideoRec* videoRec)
     // Дальше в любом случае идём в декодер: он либо возьмёт готовый кадр
     // из кэша, либо распакует сам. Второе медленнее, но всегда верно.
 
-    imFrameFormat* format = &videoRec->inFrameFormats[0];
+    // Выбор формата и качества — теми же функциями, что и у обычного пути.
+    // Своя копия этой логики тут однажды уже была, и именно она не узнала
+    // про выдачу плоскостями.
+    const int pick = av1imp::PickFrameFormat(videoRec->inFrameFormats,
+                                             videoRec->inNumFrameFormats);
+
+    imFrameFormat* format = &videoRec->inFrameFormats[pick >= 0 ? pick : 0];
     if (format->inFrameWidth  <= 0) format->inFrameWidth  = s->width;
     if (format->inFrameHeight <= 0) format->inFrameHeight = s->height;
 
-    // Формат берём тот, что просит хост, ничего не подменяя: подмена здесь
-    // и была бы расхождением с обычным путём.
     const PrPixelFormat pixelFormat =
-        av1imp::IsNativeYUV(format->inPixelFormat)
-            ? format->inPixelFormat
-            : ((format->inPixelFormat == PrPixelFormat_BGRA_4444_16u)
-                   ? PrPixelFormat_BGRA_4444_16u : PrPixelFormat_BGRA_4444_8u);
+        (pick >= 0) ? format->inPixelFormat : PrPixelFormat_BGRA_4444_8u;
+
+    s->decoder.SetScaling(av1imp::ScalingFor(videoRec->inQuality));
 
     prRect rect;
     prSetRect(&rect, 0, 0, format->inFrameWidth, format->inFrameHeight);
@@ -297,6 +317,20 @@ prMALError Close(AsyncState* s)
     }
 
     if (s->worker.joinable()) s->worker.join();
+
+    // Наборы отдаём после того, как работник встал и все вызовы вышли:
+    // пока внутри нас кто-то есть, он может ими пользоваться.
+    if (s->BasicSuite) {
+        if (s->PPixCreatorSuiteVersion) {
+            s->BasicSuite->ReleaseSuite(kPrSDKPPixCreatorSuite, s->PPixCreatorSuiteVersion);
+        }
+        if (s->PPixSuiteVersion) {
+            s->BasicSuite->ReleaseSuite(kPrSDKPPixSuite, s->PPixSuiteVersion);
+        }
+        if (s->PPix2SuiteVersion) {
+            s->BasicSuite->ReleaseSuite(kPrSDKPPix2Suite, s->PPix2SuiteVersion);
+        }
+    }
 
     Log("async: closed");
     delete s;
@@ -396,9 +430,51 @@ bool CreateAsyncImporter(ImporterLocalRecPtr source, imAsyncImporterCreationRec*
     // иначе второй декодер на клип удваивал бы расход памяти впустую
     s->decoder.LimitCacheToFrames(static_cast<int>(kReadyLimit) * 2);
 
-    s->PPixCreatorSuite = source->PPixCreatorSuite;
-    s->PPixSuite        = source->PPixSuite;
-    s->PPix2Suite       = source->PPix2Suite;
+    // Наборы берём себе. Без них выдавать кадры нечем, поэтому отказ здесь —
+    // отказ создать асинхронный импортёр вовсе: хост просто останется
+    // на обычном пути, и ничего страшного не случится.
+    s->BasicSuite = source->BasicSuite;
+    if (!s->BasicSuite) {
+        Log("async: no basic suite to take our own references from");
+        delete s;
+        return false;
+    }
+
+    s->PPixCreatorSuiteVersion =
+        (s->BasicSuite->AcquireSuite(kPrSDKPPixCreatorSuite, kPrSDKPPixCreatorSuiteVersion,
+                                     (const void**)&s->PPixCreatorSuite) == kSPNoError
+         && s->PPixCreatorSuite) ? kPrSDKPPixCreatorSuiteVersion : 0;
+
+    s->PPixSuiteVersion =
+        (s->BasicSuite->AcquireSuite(kPrSDKPPixSuite, kPrSDKPPixSuiteVersion,
+                                     (const void**)&s->PPixSuite) == kSPNoError
+         && s->PPixSuite) ? kPrSDKPPixSuiteVersion : 0;
+
+    // Плоскости — только со второй версии, как и у обычного пути. Первая
+    // версия не беда: тогда кадры просто поедут через BGRA.
+    s->PPix2SuiteVersion =
+        AcquireNewestSuite(s->BasicSuite, kPrSDKPPix2Suite,
+                           kPrSDKPPix2SuiteVersion, &s->PPix2Suite);
+    if (s->PPix2SuiteVersion < kPrSDKPPix2SuiteVersion2) {
+        s->PPix2Suite = nullptr;   // писать в плоскости всё равно нечем
+    }
+
+    if (!s->PPixCreatorSuiteVersion || !s->PPixSuiteVersion) {
+        Log("async: host refused a suite (creator %d, ppix %d) - staying on the plain path",
+            s->PPixCreatorSuiteVersion, s->PPixSuiteVersion);
+        if (s->PPixCreatorSuiteVersion) {
+            s->BasicSuite->ReleaseSuite(kPrSDKPPixCreatorSuite, s->PPixCreatorSuiteVersion);
+        }
+        if (s->PPixSuiteVersion) {
+            s->BasicSuite->ReleaseSuite(kPrSDKPPixSuite, s->PPixSuiteVersion);
+        }
+        if (s->PPix2SuiteVersion) {
+            s->BasicSuite->ReleaseSuite(kPrSDKPPix2Suite, s->PPix2SuiteVersion);
+        }
+        delete s;
+        return false;
+    }
+
     s->width            = mi.width;
     s->height           = mi.height;
     s->ticksPerFrame    = source->ticksPerFrame;

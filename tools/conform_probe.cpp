@@ -4,14 +4,20 @@
 //   conform_probe.exe <файл> [дорожка] [кусок в отсчётах]
 
 #include "../src/AV1Decoder.h"
+#include "utf8_args.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
 
-int main(int argc, char** argv)
+// wmain: узкий argv приходит в кодировке ANSI, а ядру нужен UTF-8 —
+// см. tools/utf8_args.h
+int wmain(int argc, wchar_t** wargv)
 {
+    tools::Utf8Args args(argc, wargv);
+    char** argv = args.Ptrs();
+
     if (argc < 2) {
         printf("usage: conform_probe <file> [track] [chunk]\n");
         return 2;
@@ -26,7 +32,7 @@ int main(int argc, char** argv)
         return 3;
     }
     if (!dec.OpenAudio(track)) {
-        printf("OPEN AUDIO FAILED: %s\n", dec.LastError().c_str());
+        printf("OPEN AUDIO FAILED: %s\n", dec.LastAudioError().c_str());
         return 3;
     }
 
@@ -54,7 +60,7 @@ int main(int argc, char** argv)
                 firstFail = pos;
                 printf("FIRST FAILURE at sample %lld (%.3f s of %.3f): %s\n",
                        (long long)pos, (double)pos / mi.audioSampleRate,
-                       (double)total / mi.audioSampleRate, dec.LastError().c_str());
+                       (double)total / mi.audioSampleRate, dec.LastAudioError().c_str());
             }
             ++failures;
         }
