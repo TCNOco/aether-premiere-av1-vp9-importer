@@ -43,11 +43,15 @@ const wchar_t* kFFmpegModules[] = {
     L"avformat-62.dll",
 };
 
-void PreloadFFmpeg()
+bool PreloadFFmpeg()
 {
     const wchar_t* dir = g_pluginDir;
-    if (dir[0] == 0) return;
+    if (dir[0] == 0) {
+        av1imp::Log("ffmpeg: FAILED - plug-in directory is unavailable");
+        return false;
+    }
 
+    bool ready = true;
     for (const wchar_t* name : kFFmpegModules) {
         wchar_t full[MAX_PATH] = {};
         wcscpy_s(full, MAX_PATH, dir);
@@ -58,9 +62,15 @@ void PreloadFFmpeg()
         HMODULE m = LoadLibraryExW(full, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (!m) {
             av1imp::Log("ffmpeg: FAILED to load %ls (error %lu)", name, GetLastError());
+            ready = false;
         }
     }
-    av1imp::Log("ffmpeg: loaded from %ls", dir);
+    if (ready) {
+        av1imp::Log("ffmpeg: loaded from %ls", dir);
+    } else {
+        av1imp::Log("ffmpeg: runtime incomplete, importer disabled");
+    }
+    return ready;
 }
 
 } // namespace
@@ -85,14 +95,16 @@ const wchar_t* PluginDirectory() { return g_pluginDir; }
 // одна: строчка «плагин загружен» появляется не в момент загрузки, а в момент
 // первого вопроса. На практике одно следует за другим сразу же, а пустой
 // журнал по-прежнему означает, что плагин не спросили вовсе.
-void EnsureRuntime()
+bool EnsureRuntime()
 {
     static std::once_flag once;
+    static bool ready = false;
     std::call_once(once, []() {
         LogReset();
         Log("Aether %s, plug-in ready in process", AETHER_VERSION_STR);
-        PreloadFFmpeg();
+        ready = PreloadFFmpeg();
     });
+    return ready;
 }
 
 } // namespace av1imp

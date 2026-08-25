@@ -911,7 +911,15 @@ PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
 {
     // Журнал и библиотеки ffmpeg готовятся здесь, а не при загрузке DLL:
     // из DllMain грузить библиотеки нельзя, там держится замок загрузчика.
-    av1imp::EnsureRuntime();
+    if (!av1imp::EnsureRuntime()) {
+        // Delay-load исключение на первом вызове ffmpeg завершило бы весь
+        // процесс Adobe. Отказываем ещё до dispatch: битая установка должна
+        // выглядеть как неработающий импортёр, а не как закрывшийся Premiere.
+        const prMALError result = (selector == imShutdown) ? malNoError : imOtherErr;
+        av1imp::Log("  selector %s -> %d (ffmpeg runtime unavailable)",
+                    av1imp::SelectorName(selector), result);
+        return result;
+    }
 
     prMALError result = imUnsupported;
 

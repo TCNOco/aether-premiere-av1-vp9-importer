@@ -62,6 +62,15 @@ for %%D in (avutil-60.dll swresample-6.dll swscale-9.dll avcodec-62.dll avformat
 build\plugin_test.exe "%STAGE%\Aether.prm"
 if errorlevel 1 exit /b 1
 
+REM A missing dependency must disable the importer without terminating the host.
+ren "%STAGE%\swscale-9.dll" "swscale-9.dll.missing"
+if errorlevel 1 exit /b 1
+build\plugin_test.exe "%STAGE%\Aether.prm" --expect-runtime-failure
+set "MISSING_RUNTIME_RESULT=%ERRORLEVEL%"
+ren "%STAGE%\swscale-9.dll.missing" "swscale-9.dll"
+if errorlevel 1 exit /b 1
+if not "%MISSING_RUNTIME_RESULT%"=="0" exit /b 1
+
 echo [6/6] Driving the plug-in through representative host scenarios
 for %%F in (
     av1_8bit.mp4

@@ -3,7 +3,8 @@
 
 // Проверка готового .prm без запуска Premiere.
 //
-//   plugin_test.exe <путь к AV1Importer.prm>
+//   plugin_test.exe <путь к Aether.prm>
+//   plugin_test.exe <путь к Aether.prm> --expect-runtime-failure
 //
 // Отвечает на три вопроса, из-за которых плагин чаще всего "просто не появляется"
 // в Premiere, причём молча:
@@ -84,9 +85,11 @@ bool ImportsMsvcRuntime(const wchar_t* path, std::string* found)
 int wmain(int argc, wchar_t** argv)
 {
     if (argc < 2) {
-        printf("Usage: plugin_test <path to AV1Importer.prm>\n");
+        printf("Usage: plugin_test <path to Aether.prm> [--expect-runtime-failure]\n");
         return 1;
     }
+    const bool expectRuntimeFailure =
+        argc >= 3 && wcscmp(argv[2], L"--expect-runtime-failure") == 0;
 
     HMODULE plugin = LoadLibraryExW(argv[1], nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!plugin) {
@@ -132,6 +135,7 @@ int wmain(int argc, wchar_t** argv)
     imImportInfoRec info = {};
     prMALError r = entry(imInit, &stdParms, &info, nullptr);
     printf("imInit     : result=%d, priority=%d\n", r, info.priority);
+    const bool initOk = r == imIsCacheable && info.priority == 100;
 
     // А вот теперь ffmpeg обязан быть в процессе: первый запрос уже прошёл.
     bool ffmpegOk = true;
@@ -143,6 +147,19 @@ int wmain(int argc, wchar_t** argv)
     }
     printf("ffmpeg     : %s\n", ffmpegOk ? "loaded from the plug-in folder on demand"
                                           : "NOT FOUND");
+
+    if (expectRuntimeFailure) {
+        const bool controlled = !ffmpegOk && r == imOtherErr;
+        printf("failure    : %s\n", controlled
+            ? "controlled importer error, host process survived"
+            : "WRONG result for an incomplete runtime");
+        FreeLibrary(plugin);
+        return controlled ? 0 : 8;
+    }
+
+    if (!initOk) {
+        printf("FAIL: imInit did not return imIsCacheable with priority 100\n");
+    }
 
     // imGetIndFormat: какие файлы плагин берёт на себя
     imIndFormatRec fmt = {};
@@ -179,6 +196,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     FreeLibrary(plugin);
+    if (!initOk) return 8;
     if (leaks) return 6;
     if (tooEarly) return 7;      // ffmpeg под замком загрузчика - это зависание в чужом процессе
     return ffmpegOk ? 0 : 5;
