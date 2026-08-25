@@ -422,8 +422,10 @@ void CheckFfmpeg(Section& s)
 // Середина важнее начала: первый кадр отдаётся почти всегда, потому что
 // он ключевой. Ломается обычно перемотка.
 void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
-                  bool verbose)
+                  bool verbose,
+                  const std::function<void(const std::wstring&)>& onStep)
 {
+    onStep(Tr(L"opening media", L"открытие файла"));
     av1imp::Decoder dec;
     if (!dec.Open(Narrow(path), av1imp::PreferHardware(), true)) {
         Add(s, label, State::Fail,
@@ -434,6 +436,7 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
     const av1imp::MediaInfo& mi = dec.Info();
 
     if (verbose) {
+        onStep(Tr(L"formatting media details", L"описание файла"));
         std::wostringstream contents;
         contents << Widen(mi.codecName) << L" " << mi.width << L"x" << mi.height
                  << L", " << mi.bitDepth << Tr(L"-bit, ", L" бит, ")
@@ -457,6 +460,7 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
 
         // Дорожку надо открыть: до этого число каналов и частота пустые,
         // и отчёт показывал бы «каналов 0, 0 Гц» у совершенно исправного файла.
+        onStep(Tr(L"checking audio", L"проверка звука"));
         if (mi.audioStreamCount > 0 && dec.OpenAudio(0)) {
             std::wostringstream audio;
             audio << mi.audioStreamCount << Tr(L" tracks, ", L" дорожек, ")
@@ -484,6 +488,7 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
     const int stride = mi.width * 4;
     std::vector<uint8_t> buf((size_t)stride * mi.height);
 
+    onStep(Tr(L"decoding first frame", L"первый кадр"));
     if (!dec.GetFrameBGRA(0, buf.data(), stride, mi.width, mi.height)) {
         Add(s, label, State::Fail,
             Tr(L"first frame was not delivered", L"первый кадр не отдался"));
@@ -491,6 +496,7 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
     }
 
     const int64_t middle = mi.frameCount > 2 ? mi.frameCount / 2 : 0;
+    onStep(Tr(L"seeking to middle", L"переход к середине"));
     if (middle && !dec.GetFrameBGRA(middle, buf.data(), stride, mi.width, mi.height)) {
         Add(s, label, State::Fail,
             Tr(L"frame ", L"кадр ") + std::to_wstring(middle) +
@@ -501,6 +507,7 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
 
     // Ещё раз первый: проверяем возврат назад, он идёт другим путём, чем
     // движение вперёд, и ломается отдельно.
+    onStep(Tr(L"returning to start", L"возврат к началу"));
     if (middle && !dec.GetFrameBGRA(0, buf.data(), stride, mi.width, mi.height)) {
         Add(s, label, State::Fail,
             Tr(L"returning to the start failed",
@@ -512,6 +519,7 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
     delivered << mi.width << L"x" << mi.height << L", " << mi.bitDepth
               << Tr(L"-bit, frames 0 and ", L" бит, кадры 0 и ") << middle;
     Add(s, label, State::Pass, delivered.str());
+    onStep(Tr(L"media check complete", L"проверка файла завершена"));
 }
 
 // Вшитые клипы лежат рядом с программой, в подпапке. Установщик кладёт их
@@ -542,7 +550,7 @@ void CheckBundled(Section& s, const std::function<void(const std::wstring&)>& on
             continue;
         }
         onStep(sm.label);
-        CheckOneFile(s, path, sm.label, false);
+        CheckOneFile(s, path, sm.label, false, onStep);
     }
 
     if (missing == (int)(sizeof(samples) / sizeof(samples[0]))) {
@@ -758,7 +766,7 @@ Report Run(const std::wstring& userFile,
         Section s;
         s.title = Tr(L"Your file", L"Ваш файл");
         Add(s, Tr(L"Path", L"Путь"), State::Info, userFile);
-        CheckOneFile(s, userFile, Tr(L"Check", L"Проверка"), true);
+        CheckOneFile(s, userFile, Tr(L"Check", L"Проверка"), true, onStep);
         r.sections.push_back(s);
     }
 
