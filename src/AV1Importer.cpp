@@ -14,6 +14,7 @@
 #include "AV1Settings.h"
 #include "ImporterMath.h"
 
+#include <cstdint>
 #include <mutex>
 #include <string>
 
@@ -22,6 +23,21 @@
 // ---------------------------------------------------------------------------
 
 namespace {
+
+// В raw-журнале нужен способ отличить два одновременно открытых файла, но не
+// нужен их полный путь: этот журнал прикладывают к публичным issue. Оставляем
+// только непрозрачный идентификатор; диагностический отчёт отдельно умеет
+// очищать пути, когда человеку действительно требуется их показать.
+uint64_t PathLogId(const prUTF16Char* path)
+{
+    uint64_t hash = 1469598103934665603ULL;  // FNV-1a, только идентификатор
+    if (!path) return hash;
+    while (*path) {
+        hash ^= static_cast<uint16_t>(*path++);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
 
 // Premiere отдаёт пути в UTF-16, ffmpeg ждёт UTF-8
 std::string Utf8FromUtf16(const prUTF16Char* path)
@@ -357,8 +373,9 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
         CopyUtf16(ldata->filePath, 2048, fileAccess->filepath);
     }
 
-    av1imp::Log("imGetInfo8: asked about %S (stream %d)",
-                ldata->filePath, fileInfo->streamIdx);
+    av1imp::Log("imGetInfo8: asked about file %016llx (stream %d)",
+                static_cast<unsigned long long>(PathLogId(ldata->filePath)),
+                fileInfo->streamIdx);
 
     // Записать номер потока нужно до открытия: от него зависит,
     // создавать ли декодер кадров
