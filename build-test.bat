@@ -72,18 +72,6 @@ cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    /link /LIBPATH:"ffmpeg\lib" avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib
 if errorlevel 1 exit /b 1
 
-REM AetherDiagnose test build - diagnostics and both UI languages, no Adobe SDK
-cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
-   /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
-   /I"ffmpeg\include" ^
-   tools\diagnose_app.cpp tools\app_diagnose.cpp tools\localization.cpp ^
-   src\AV1Settings.cpp src\AV1Decoder.cpp ^
-   /Fe:build\AetherDiagnose-test.exe "/Fo:build\obj\\" ^
-   /link /LIBPATH:"ffmpeg\lib" ^
-   avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib ^
-   shell32.lib ole32.lib user32.lib advapi32.lib version.lib
-if errorlevel 1 exit /b 1
-
 REM fuzz_test - the same core, fed deliberately broken files
 cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^

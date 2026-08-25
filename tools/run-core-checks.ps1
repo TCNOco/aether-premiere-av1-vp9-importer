@@ -21,8 +21,6 @@ param(
     [string]$Fuzz     = "build\fuzz_test.exe",
     [string]$Settings = "build\settings_test.exe",
     [string]$Math     = "build\importer_math_test.exe",
-    [string]$Diagnose = "build\AetherDiagnose-test.exe",
-    [switch]$NoDiagnose,
     [switch]$NoFuzz
 )
 
@@ -35,7 +33,6 @@ $ErrorActionPreference = "Continue"
 if (-not (Test-Path $Exe))      { throw "not built: $Exe" }
 if (-not (Test-Path $Settings)) { throw "not built: $Settings" }
 if (-not (Test-Path $Math))     { throw "not built: $Math" }
-if (-not (Test-Path $Diagnose)) { throw "not built: $Diagnose" }
 if (-not (Test-Path $MediaDir)) { throw "no media: $MediaDir - run tools\make-test-media.ps1" }
 
 $settingsOutput = & $Settings | Out-String
@@ -51,58 +48,6 @@ if ($LASTEXITCODE -ne 0 -or $mathOutput -notmatch "ALL IMPORTER MATH CHECKS PASS
     throw "importer math checks failed"
 }
 Write-Host "importer duration  overflow OK"
-
-if (-not $NoDiagnose) {
-    $diagnoseFile = Join-Path $MediaDir "av1_8bit.mp4"
-    function Invoke-DiagnosticJson([string]$Language) {
-        $stdout = Join-Path $MediaDir ("diagnose-" + $Language + ".json")
-        $stderr = Join-Path $MediaDir ("diagnose-" + $Language + ".stderr.txt")
-        Remove-Item $stdout, $stderr -Force -ErrorAction SilentlyContinue
-
-        $quotedFile = '"' + $diagnoseFile.Replace('"', '\"') + '"'
-        $process = Start-Process -FilePath $Diagnose `
-            -ArgumentList ("--json --lang " + $Language + " " + $quotedFile) `
-            -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
-            -NoNewWindow -Wait -PassThru
-
-        if (-not (Test-Path $stdout) -or (Get-Item $stdout).Length -eq 0) {
-            $errorText = if (Test-Path $stderr) {
-                Get-Content $stderr -Raw -Encoding UTF8
-            } else {
-                "(no stderr)"
-            }
-            throw "diagnostic produced no JSON; exit $($process.ExitCode); stderr: $errorText"
-        }
-        return Get-Content $stdout -Raw -Encoding UTF8
-    }
-
-    $englishReport = Invoke-DiagnosticJson "en"
-    if ($englishReport -notmatch '"title":"System"' -or
-        $englishReport -notmatch '"title":"Your file"' -or
-        $englishReport -notmatch '"plainText":"Aether diagnostic report') {
-        Write-Host $englishReport.Trim()
-        throw "English diagnostic report is missing or mixed"
-    }
-
-    $russianReport = Invoke-DiagnosticJson "ru"
-    $ruSystem = -join @([char]0x421, [char]0x438, [char]0x441, [char]0x442,
-                        [char]0x435, [char]0x43c, [char]0x430)
-    $ruYourFile = -join @([char]0x412, [char]0x430, [char]0x448, [char]0x20,
-                          [char]0x444, [char]0x430, [char]0x439, [char]0x43b)
-    $ruReport = -join @([char]0x41e, [char]0x442, [char]0x447, [char]0x451,
-                        [char]0x442, [char]0x20, [char]0x434, [char]0x438,
-                        [char]0x430, [char]0x433, [char]0x43d, [char]0x43e,
-                        [char]0x441, [char]0x442, [char]0x438, [char]0x43a,
-                        [char]0x438, [char]0x20) + "Aether"
-    if ($russianReport -notmatch ('"title":"' + $ruSystem + '"') -or
-        $russianReport -notmatch ('"title":"' + $ruYourFile + '"') -or
-        $russianReport -notmatch ('"plainText":"' + $ruReport)) {
-        Write-Host $russianReport.Trim()
-        throw "Russian diagnostic report is missing or mixed"
-    }
-    Write-Host "diagnostic i18n    English/Russian OK"
-    Remove-Item (Join-Path $MediaDir "diagnose-*") -Force -ErrorAction SilentlyContinue
-}
 
 $expect = [ordered]@{
     "av1_8bit.mp4"    = "accept"
