@@ -61,9 +61,18 @@ if ($englishReport -notmatch '"title":"System"' -or
 }
 
 $russianReport = & $Diagnose --json --lang ru $diagnoseFile 2>$null | Out-String
-if ($russianReport -notmatch '"title":"Система"' -or
-    $russianReport -notmatch '"title":"Ваш файл"' -or
-    $russianReport -notmatch '"plainText":"Отчёт диагностики Aether') {
+$ruSystem = -join @([char]0x421, [char]0x438, [char]0x441, [char]0x442,
+                    [char]0x435, [char]0x43c, [char]0x430)
+$ruYourFile = -join @([char]0x412, [char]0x430, [char]0x448, [char]0x20,
+                      [char]0x444, [char]0x430, [char]0x439, [char]0x43b)
+$ruReport = -join @([char]0x41e, [char]0x442, [char]0x447, [char]0x451,
+                    [char]0x442, [char]0x20, [char]0x434, [char]0x438,
+                    [char]0x430, [char]0x433, [char]0x43d, [char]0x43e,
+                    [char]0x441, [char]0x442, [char]0x438, [char]0x43a,
+                    [char]0x438, [char]0x20) + "Aether"
+if ($russianReport -notmatch ('"title":"' + $ruSystem + '"') -or
+    $russianReport -notmatch ('"title":"' + $ruYourFile + '"') -or
+    $russianReport -notmatch ('"plainText":"' + $ruReport)) {
     Write-Host $russianReport.Trim()
     throw "Russian diagnostic report is missing or mixed"
 }
