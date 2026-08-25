@@ -62,8 +62,8 @@ or by an automated check. Where nothing was tried, the table says so.
 | VP9 | **yes** |
 | everything else | **handed back** — Premiere opens it itself |
 | MP4, MOV, M4V | **yes** — with AV1 or VP9 inside |
-| MKV, WebM | **yes** — Premiere cannot open them at all |
-| Audio-only MKA, MKV, WebM | **yes** — for the same reason |
+| MKV, WebM | **yes** — with AV1 or VP9; newer Premiere versions open some H.264/AAC MKV themselves |
+| Audio-only MKA, MKV, WebM | **yes** — when Adobe's native importer cannot take them |
 | Audio-only MP4 and M4A | **no, deliberately** — Premiere opens those itself |
 | OGV, FLV, TS, VOB | **no** — those carry other codecs, not these two |
 
@@ -228,10 +228,12 @@ have created a second truth, and two truths drift apart.
 Files with any other codec are handed straight back to Premiere's own importer, so
 nothing about your existing footage changes.
 
-One caveat about MKV and WebM: Premiere has no native support for those containers
-at all, so the plug-in demuxes them itself. That works, but only for the codecs
-above. An MKV holding H.264 is refused by the plug-in and Premiere cannot open it
-either.
+One caveat about MKV and WebM: Premiere 25.2 added native import for some
+H.264/AAC MKV files. Aether does not take those away from it: the plug-in
+demuxes AV1/VP9 itself and refuses an MKV holding H.264. A recent Premiere can
+then open that file with its own importer; an older one may still be unable to.
+WebM and audio-only Matroska support likewise depends on what the host can
+handle after Aether has declined a file.
 
 ### After Effects gets it too
 
