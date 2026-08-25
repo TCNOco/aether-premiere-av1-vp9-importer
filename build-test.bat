@@ -31,6 +31,12 @@ cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
    /Fe:build\settings_test.exe /Fo:build\obj\
 if errorlevel 1 exit /b 1
 
+REM importer_math_test - overflow boundaries in Adobe's 32-bit duration field
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
+   tools\importer_math_test.cpp ^
+   /Fe:build\importer_math_test.exe /Fo:build\obj\
+if errorlevel 1 exit /b 1
+
 REM decoder_test - the decoding core, works on a file directly
 cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^

@@ -12,6 +12,7 @@
 #include "AV1Async.h"
 #include "AV1Log.h"
 #include "AV1Settings.h"
+#include "ImporterMath.h"
 
 #include <mutex>
 #include <string>
@@ -484,8 +485,15 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     // Частоту передаём дробью — иначе 59.94 превратится в 60 и картинка уедет
     fileInfo->vidScale      = mi.fpsNum > 0 ? mi.fpsNum : 30;
     fileInfo->vidSampleSize = mi.fpsDen > 0 ? mi.fpsDen : 1;
-    fileInfo->vidDuration   = static_cast<csSDK_int32>(mi.frameCount) * fileInfo->vidSampleSize;
+    bool durationSaturated = false;
+    fileInfo->vidDuration = av1imp::SaturatingFrameDuration(
+        mi.frameCount, fileInfo->vidSampleSize, &durationSaturated);
     fileInfo->vidDurationInFrames = mi.frameCount;
+    if (durationSaturated) {
+        av1imp::Log("imGetInfo8: vidDuration exceeds 32-bit field, clamped; "
+                    "%lld frames * sample size %d",
+                    (long long)mi.frameCount, fileInfo->vidSampleSize);
+    }
 
     ldata->importerID = fileInfo->vidInfo.importerID;
 

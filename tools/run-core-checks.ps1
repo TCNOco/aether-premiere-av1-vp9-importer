@@ -20,6 +20,7 @@ param(
     [string]$Exe      = "build\decoder_test.exe",
     [string]$Fuzz     = "build\fuzz_test.exe",
     [string]$Settings = "build\settings_test.exe",
+    [string]$Math     = "build\importer_math_test.exe",
     [switch]$NoFuzz
 )
 
@@ -31,6 +32,7 @@ $ErrorActionPreference = "Continue"
 
 if (-not (Test-Path $Exe))      { throw "not built: $Exe" }
 if (-not (Test-Path $Settings)) { throw "not built: $Settings" }
+if (-not (Test-Path $Math))     { throw "not built: $Math" }
 if (-not (Test-Path $MediaDir)) { throw "no media: $MediaDir - run tools\make-test-media.ps1" }
 
 $settingsOutput = & $Settings | Out-String
@@ -39,6 +41,13 @@ if ($LASTEXITCODE -ne 0 -or $settingsOutput -notmatch "ALL SETTINGS CHECKS PASSE
     throw "settings checks failed"
 }
 Write-Host "settings.ini       preserve OK"
+
+$mathOutput = & $Math | Out-String
+if ($LASTEXITCODE -ne 0 -or $mathOutput -notmatch "ALL IMPORTER MATH CHECKS PASSED") {
+    Write-Host $mathOutput.Trim()
+    throw "importer math checks failed"
+}
+Write-Host "importer duration  overflow OK"
 
 $expect = [ordered]@{
     "av1_8bit.mp4"    = "accept"
