@@ -425,9 +425,15 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
                   bool verbose,
                   const std::function<void(const std::wstring&)>& onStep)
 {
-    onStep(Tr(L"opening media", L"открытие файла"));
+    onStep(Tr(L"converting media path", L"преобразование пути"));
+    const std::string utf8Path = Narrow(path);
+
+    onStep(Tr(L"reading decoder settings", L"чтение настроек декодера"));
+    const bool preferHardware = av1imp::PreferHardware();
+
+    onStep(Tr(L"opening media decoder", L"открытие декодера"));
     av1imp::Decoder dec;
-    if (!dec.Open(Narrow(path), av1imp::PreferHardware(), true)) {
+    if (!dec.Open(utf8Path, preferHardware, true)) {
         Add(s, label, State::Fail,
             Tr(L"failed to open: ", L"не открылся: ") + Widen(dec.LastError()));
         return;
