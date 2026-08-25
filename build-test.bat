@@ -81,7 +81,7 @@ cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    /Fe:build\AetherDiagnose-test.exe "/Fo:build\obj\\" ^
    /link /LIBPATH:"ffmpeg\lib" ^
    avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib ^
-   shell32.lib ole32.lib advapi32.lib version.lib
+   shell32.lib ole32.lib user32.lib advapi32.lib version.lib
 if errorlevel 1 exit /b 1
 
 REM fuzz_test - the same core, fed deliberately broken files
