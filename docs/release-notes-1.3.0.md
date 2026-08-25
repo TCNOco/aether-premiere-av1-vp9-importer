@@ -156,3 +156,18 @@ Verified in Premiere Pro 26.0 on Windows 11.
 Download `AetherSetup-1.3.0.exe`, close Premiere Pro, After Effects and Media
 Encoder, run it. Administrator rights are required. Installs over any earlier
 version; no need to uninstall first.
+
+There is also **`Aether-1.3.0-portable.zip`**: `Aether` goes into
+`…\Adobe\Common\Plug-ins\7.0\MediaCore\`, and `com.nehade.aether` into
+`…\Common Files\Adobe\CEP\extensions\` if you want the panel. `INSTALL.txt` in
+the archive spells it out.
+
+The installer is not code-signed, so Windows will warn about an unknown
+publisher. Verify the download instead:
+
+```
+AetherSetup-1.3.0.exe        SHA256  4780981e49516e19eba0da780a345732f90d005a664949e0ea3feb78f0249ee6
+Aether-1.3.0-portable.zip    SHA256  d24d69a54bac6aaf7bb515141a46005e302128fac5d20f6c154ad4da418942db
+```
+
+The README has a section on what else there is to go on besides these numbers.
