@@ -14,7 +14,7 @@
 const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
-const { execFile, execFileSync } = require('child_process');
+const { execFile } = require('child_process');
 const { updateDecodeMode } = require('./settings');
 
 // ---------------------------------------------------------------------------
@@ -24,16 +24,22 @@ const { updateDecodeMode } = require('./settings');
 // Папку плагинов приложения Adobe сами записывают в реестр — оттуда её берёт
 // и установщик, и диагностика. Спрашиваем тем же способом, чтобы три места
 // не разошлись во мнениях.
-function mediaCoreFromRegistry() {
+function execText(command, args) {
+    return new Promise((resolve, reject) => {
+        execFile(command, args, { encoding: 'utf8', windowsHide: true },
+            (error, stdout) => error ? reject(error) : resolve(stdout));
+    });
+}
+
+async function mediaCoreFromRegistry() {
     const keys = [
         'HKLM\\SOFTWARE\\Adobe\\Premiere Pro\\CurrentVersion',
         'HKLM\\SOFTWARE\\Adobe\\After Effects\\CurrentVersion',
     ];
     for (const key of keys) {
         try {
-            const out = execFileSync(
-                'reg', ['query', key, '/v', 'CommonPluginInstallPath'],
-                { encoding: 'utf8', windowsHide: true });
+            const out = await execText(
+                'reg', ['query', key, '/v', 'CommonPluginInstallPath']);
             const m = out.match(/CommonPluginInstallPath\s+REG_\w+\s+(.+)/);
             if (m) return m[1].trim();
         } catch (e) { /* ключа нет — пробуем следующий */ }
@@ -41,9 +47,9 @@ function mediaCoreFromRegistry() {
     return null;
 }
 
-function pluginFolder() {
+async function pluginFolder() {
     const candidates = [];
-    const reg = mediaCoreFromRegistry();
+    const reg = await mediaCoreFromRegistry();
     if (reg) candidates.push(path.join(reg, 'Aether'));
 
     const pf = process.env['ProgramFiles'] || 'C:\\Program Files';
@@ -55,7 +61,7 @@ function pluginFolder() {
     return null;
 }
 
-const PLUGIN_DIR   = pluginFolder();
+let PLUGIN_DIR = null;
 const SETTINGS_DIR = path.join(process.env['LOCALAPPDATA'] || os.homedir(), 'Aether');
 const SETTINGS_INI = path.join(SETTINGS_DIR, 'settings.ini');
 
@@ -190,13 +196,23 @@ function render(report) {
         for (const check of section.checks) {
             const row = document.createElement('div');
             row.className = 'row';
+            row.setAttribute('role', 'listitem');
 
             const mark = document.createElement('span');
             mark.className = 'mark ' + check.state;
             mark.textContent = { pass: '\u2713', fail: '\u2715',
                                  warn: '!', skip: '\u2014' }[check.state] || '';
+            mark.setAttribute('aria-hidden', 'true');
 
-            const body = document.createElement('span');
+            const body = document.createElement('div');
+            const accessibleState = document.createElement('span');
+            accessibleState.className = 'sr-only';
+            accessibleState.textContent = 'Статус: ' + ({
+                pass: 'успех', fail: 'сбой', warn: 'предупреждение',
+                skip: 'пропущено', info: 'информация',
+            }[check.state] || check.state) + '. ';
+            body.appendChild(accessibleState);
+
             const what = document.createElement('div');
             what.className = 'what';
             what.textContent = check.name;
@@ -257,31 +273,58 @@ function setFile(file) {
     }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-    applyHostTheme();
-
-    // Версия берётся у самого плагина, а не пишется в панели: разъехаться
-    // им тогда негде, а разъехавшиеся версии мы уже проходили.
-    const version = document.getElementById('version');
-    if (PLUGIN_DIR) {
+async function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
         try {
-            const out = execFileSync('powershell', ['-NoProfile', '-Command',
-                `(Get-Item '${path.join(PLUGIN_DIR, 'Aether.prm')}').VersionInfo.ProductVersion`],
-                { encoding: 'utf8', windowsHide: true }).trim();
-            if (out) version.textContent = 'версия ' + out;
-        } catch (e) { /* оставим как есть */ }
-    } else {
-        version.textContent = 'плагин не найден';
+            await navigator.clipboard.writeText(text);
+            return;
+        } catch (e) {
+            // Старый CEP часто не считает панель secure context — fallback ниже.
+        }
     }
+
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('aria-hidden', 'true');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    const copied = document.execCommand('copy');
+    document.body.removeChild(area);
+    if (!copied) throw new Error('clipboard API недоступен');
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+    applyHostTheme();
 
     // Вкладки
     const pages = { settings: 'page-settings', diagnose: 'page-diagnose' };
-    for (const name of Object.keys(pages)) {
-        document.getElementById('tab-' + name).addEventListener('click', () => {
-            for (const other of Object.keys(pages)) {
-                document.getElementById('tab-' + other).classList.toggle('active', other === name);
-                document.getElementById(pages[other]).hidden = (other !== name);
-            }
+    const tabNames = Object.keys(pages);
+    const activateTab = (name, moveFocus) => {
+        for (const other of tabNames) {
+            const selected = other === name;
+            const tab = document.getElementById('tab-' + other);
+            tab.classList.toggle('active', selected);
+            tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+            tab.tabIndex = selected ? 0 : -1;
+            document.getElementById(pages[other]).hidden = !selected;
+        }
+        if (moveFocus) document.getElementById('tab-' + name).focus();
+    };
+    for (const name of tabNames) {
+        const tab = document.getElementById('tab-' + name);
+        tab.addEventListener('click', () => activateTab(name, false));
+        tab.addEventListener('keydown', (event) => {
+            const current = tabNames.indexOf(name);
+            let next = current;
+            if (event.key === 'ArrowRight') next = (current + 1) % tabNames.length;
+            else if (event.key === 'ArrowLeft') next = (current - 1 + tabNames.length) % tabNames.length;
+            else if (event.key === 'Home') next = 0;
+            else if (event.key === 'End') next = tabNames.length - 1;
+            else return;
+            event.preventDefault();
+            activateTab(tabNames[next], true);
         });
     }
 
@@ -313,19 +356,52 @@ document.addEventListener('DOMContentLoaded', () => {
         drop.classList.remove('over');
         if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0].path);
     });
+    const picker = document.getElementById('file-picker');
+    document.getElementById('browse').addEventListener('click', () => picker.click());
+    picker.addEventListener('change', () => {
+        if (picker.files.length) {
+            const selected = picker.files[0];
+            setFile(selected.path || selected.name);
+        }
+    });
     document.getElementById('forget').addEventListener('click', () => setFile(''));
 
     document.getElementById('run').addEventListener('click', runDiagnostics);
 
-    document.getElementById('copy').addEventListener('click', () => {
+    document.getElementById('copy').addEventListener('click', async () => {
         if (!lastReport) return;
-        const area = document.createElement('textarea');
-        area.value = reportText(lastReport);
-        document.body.appendChild(area);
-        area.select();
-        document.execCommand('copy');
-        document.body.removeChild(area);
-        document.getElementById('status').textContent =
-            'Отчёт скопирован — вставьте его в issue на GitHub.';
+        const status = document.getElementById('status');
+        try {
+            await copyText(reportText(lastReport));
+            status.textContent = 'Отчёт скопирован — вставьте его в issue на GitHub.';
+        } catch (e) {
+            status.textContent = 'Не удалось скопировать отчёт: ' + e.message;
+        }
     });
+
+    // Реестр и PowerShell читаются асинхронно: открытие панели не должно
+    // замораживаться из-за медленного диска, реестра или запуска процесса.
+    const version = document.getElementById('version');
+    const run = document.getElementById('run');
+    run.disabled = true;
+    version.textContent = 'ищем плагин...';
+    PLUGIN_DIR = await pluginFolder();
+    run.disabled = false;
+
+    if (!PLUGIN_DIR) {
+        version.textContent = 'плагин не найден';
+        return;
+    }
+
+    // Путь передаётся отдельным аргументом для -LiteralPath, а не вставляется
+    // в PowerShell-команду: кавычка в имени папки не должна менять скрипт.
+    try {
+        const script = '(Get-Item -LiteralPath $args[0]).VersionInfo.ProductVersion';
+        const out = (await execText('powershell', [
+            '-NoProfile', '-Command', script, path.join(PLUGIN_DIR, 'Aether.prm'),
+        ])).trim();
+        version.textContent = out ? 'версия ' + out : 'версия неизвестна';
+    } catch (e) {
+        version.textContent = 'версия неизвестна';
+    }
 });

@@ -9,16 +9,18 @@
 
   <header>
     <h1>Aether</h1>
-    <span id="version" class="note">версия неизвестна</span>
+    <span id="version" class="note" aria-live="polite">версия неизвестна</span>
   </header>
 
-  <nav>
-    <button id="tab-settings" class="tab active">Настройки</button>
-    <button id="tab-diagnose" class="tab">Диагностика</button>
+  <nav role="tablist" aria-label="Разделы Aether">
+    <button id="tab-settings" class="tab active" role="tab"
+      aria-selected="true" aria-controls="page-settings">Настройки</button>
+    <button id="tab-diagnose" class="tab" role="tab" tabindex="-1"
+      aria-selected="false" aria-controls="page-diagnose">Диагностика</button>
   </nav>
 
   <!-- ------------------------------------------------------- настройки -->
-  <section id="page-settings">
+  <section id="page-settings" role="tabpanel" aria-labelledby="tab-settings">
     <h2>Как распаковывать видео AV1 и VP9</h2>
 
     <label class="choice">
@@ -50,7 +52,7 @@
   </section>
 
   <!-- ------------------------------------------------------ диагностика -->
-  <section id="page-diagnose" hidden>
+  <section id="page-diagnose" role="tabpanel" aria-labelledby="tab-diagnose" hidden>
     <h2>Диагностика</h2>
     <p class="note">Проверяет систему, приложения Adobe и распаковку видео.
       Если какой-то файл не открывается — бросьте его сюда, и он будет
@@ -58,11 +60,13 @@
 
     <div id="drop" class="drop">
       <span id="drop-text">Перетащите сюда файл, который не открывается</span>
+      <button id="browse">Выбрать файл</button>
       <button id="forget" hidden>убрать</button>
+      <input id="file-picker" type="file" hidden>
     </div>
 
-    <div id="results" class="results"></div>
-    <p id="status" class="note"></p>
+    <div id="results" class="results" role="list"></div>
+    <p id="status" class="note" role="status" aria-live="polite"></p>
 
     <div class="bar">
       <button id="run" class="primary">Запустить проверку</button>
