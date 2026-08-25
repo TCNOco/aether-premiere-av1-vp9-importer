@@ -31,7 +31,12 @@ HMODULE g_selfModule = nullptr;
 
 // Путь к папке плагина со слэшем на конце. Считается один раз при загрузке:
 // рядом лежат и библиотеки ffmpeg, и файл настроек.
-wchar_t g_pluginDir[MAX_PATH] = {};
+//
+// Шире MAX_PATH: Premiere отдаёт медиа с приставкой \\?\, и портабельная
+// установка тоже может лежать глубже 260 символов. GetModuleFileNameW
+// принимает любой размер буфера.
+constexpr DWORD kPluginDirChars = 2048;
+wchar_t g_pluginDir[kPluginDirChars] = {};
 
 // Порядок важен ровно настолько, насколько мы хотим понятных ошибок:
 // зависимости всё равно подтянутся сами благодаря LOAD_WITH_ALTERED_SEARCH_PATH
@@ -52,53 +57,30 @@ bool PreloadFFmpeg()
     }
 
     bool ready = true;
-    bool anyElsewhere = false;
     for (const wchar_t* name : kFFmpegModules) {
-        wchar_t full[MAX_PATH] = {};
-        wcscpy_s(full, MAX_PATH, dir);
-        wcscat_s(full, MAX_PATH, name);
-
-        // LOAD_WITH_ALTERED_SEARCH_PATH заставляет искать зависимости
-        // этой библиотеки в её же папке, а не рядом с Premiere
-        HMODULE m = LoadLibraryExW(full, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-        if (m) continue;
-
-        const DWORD beside = GetLastError();
-
-        // Рядом с плагином не нашлось — пробуем обычным поиском, по имени.
-        //
-        // Это НЕ смягчение предохранителя, а исправление его ложного отказа.
-        // Проверяем мы одно: сможет ли отложенная загрузка найти библиотеку,
-        // когда до неё дойдёт дело. Она ищет по имени и обычным порядком, а
-        // не по нашему полному пути, — значит и проверять надо то же самое.
-        //
-        // Без этой ветки предохранитель глушил импортёр всякий раз, когда DLL
-        // лежат не в папке плагина: собранный .prm рядом с ffmpeg\bin, любая
-        // раскладка, где библиотеки общие. Поймано сразу — весь поддельный хост
-        // лёг на «accepted the file, 0x0», все проверки FAIL, в журнале пять
-        // строк «error 126».
-        m = LoadLibraryW(name);
-        if (m) {
-            anyElsewhere = true;
+        wchar_t full[kPluginDirChars + 64] = {};
+        if (swprintf_s(full, L"%s%s", dir, name) < 0) {
+            av1imp::Log("ffmpeg: FAILED to compose path for %s",
+                        av1imp::Utf8(name).c_str());
+            ready = false;
             continue;
         }
 
-        // Имена модулей латинские, но пути в журнал всё равно идут через UTF-8:
-        // %ls обрывает строку на первом символе вне латиницы, а папка плагина
-        // при портабельной установке может лежать где угодно.
-        av1imp::Log("ffmpeg: FAILED to load %s (beside the plug-in: error %lu, "
-                    "by search path: error %lu)",
-                    av1imp::Utf8(name).c_str(), beside, GetLastError());
+        // Только полный путь рядом с плагином. Поиск по имени (CWD, PATH,
+        // папка Premiere) — это подмена DLL внутри процесса Adobe.
+        // Стенд, где .prm собирается без DLL, должен копировать их сюда же,
+        // как делает установщик, а не учить плагин искать «где получится».
+        HMODULE m = LoadLibraryExW(full, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (m) continue;
+
+        av1imp::Log("ffmpeg: FAILED to load %s from %s (error %lu)",
+                    av1imp::Utf8(name).c_str(), av1imp::Utf8(dir).c_str(),
+                    GetLastError());
         ready = false;
     }
 
     if (!ready) {
         av1imp::Log("ffmpeg: runtime incomplete, importer disabled");
-    } else if (anyElsewhere) {
-        // Работать будет, но сказать об этом надо: раскладка не та, что даёт
-        // установщик, и при разборе чужой беды это первое, что стоит знать.
-        av1imp::Log("ffmpeg: loaded, but not all of it from %s",
-                    av1imp::Utf8(dir).c_str());
     } else {
         av1imp::Log("ffmpeg: loaded from %s", av1imp::Utf8(dir).c_str());
     }
@@ -149,14 +131,19 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 
         // Единственное, что здесь осталось: собственный путь. GetModuleFileNameW
         // замка загрузчика не трогает, а знать папку нужно и журналу, и ffmpeg.
-        if (GetModuleFileNameW(module, g_pluginDir, MAX_PATH) != 0) {
+        // n >= kPluginDirChars означает обрезку: такой путь для LoadLibrary
+        // врал бы, лучше отказаться и честно не найти ffmpeg.
+        const DWORD n = GetModuleFileNameW(module, g_pluginDir, kPluginDirChars);
+        if (n == 0 || n >= kPluginDirChars) {
+            g_pluginDir[0] = 0;
+        } else {
             wchar_t* lastSlash = wcsrchr(g_pluginDir, L'\\');
             if (lastSlash) *(lastSlash + 1) = 0;
             else g_pluginDir[0] = 0;
         }
     }
-    else if (reason == DLL_PROCESS_DETACH) {
-        av1imp::LogClose();
-    }
+    // PROCESS_DETACH нарочно ничего не закрывает. Журнал закрывает imShutdown:
+    // брать mutex лога из DllMain, пока другой поток пишет строку, — это
+    // взаимная блокировка внутри Premiere на выгрузке.
     return TRUE;
 }

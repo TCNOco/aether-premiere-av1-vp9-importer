@@ -256,17 +256,17 @@ prMALError GetFrame(AsyncState* s, imSourceVideoRec* videoRec)
     const int pick = av1imp::PickFrameFormat(videoRec->inFrameFormats,
                                              videoRec->inNumFrameFormats);
 
-    imFrameFormat* format = &videoRec->inFrameFormats[pick >= 0 ? pick : 0];
-    if (format->inFrameWidth  <= 0) format->inFrameWidth  = s->width;
-    if (format->inFrameHeight <= 0) format->inFrameHeight = s->height;
+    imFrameFormat* offered = &videoRec->inFrameFormats[pick >= 0 ? pick : 0];
+    const int frameW = (offered->inFrameWidth  > 0) ? offered->inFrameWidth  : s->width;
+    const int frameH = (offered->inFrameHeight > 0) ? offered->inFrameHeight : s->height;
 
     const PrPixelFormat pixelFormat =
-        (pick >= 0) ? format->inPixelFormat : PrPixelFormat_BGRA_4444_8u;
+        (pick >= 0) ? offered->inPixelFormat : PrPixelFormat_BGRA_4444_8u;
 
     s->decoder.SetScaling(av1imp::ScalingFor(videoRec->inQuality));
 
     prRect rect;
-    prSetRect(&rect, 0, 0, format->inFrameWidth, format->inFrameHeight);
+    prSetRect(&rect, 0, 0, frameW, frameH);
 
     prMALError result = s->PPixCreatorSuite->CreatePPix(
         videoRec->outFrame, PrPPixBufferAccess_ReadWrite, pixelFormat, &rect);
@@ -278,9 +278,10 @@ prMALError GetFrame(AsyncState* s, imSourceVideoRec* videoRec)
     if (!av1imp::WriteFrameToBuffer(s->decoder, frame,
                                     s->PPixSuite, s->PPix2Suite,
                                     *videoRec->outFrame, pixelFormat,
-                                    format->inFrameWidth, format->inFrameHeight, &why)) {
+                                    frameW, frameH, &why)) {
         Log("async frame %lld: FAILED - %s", (long long)frame,
             why ? why : s->decoder.LastError().c_str());
+        av1imp::DiscardHostFrame(s->PPixSuite, videoRec->outFrame);
         return aiFrameNotFound;
     }
 
@@ -290,7 +291,7 @@ prMALError GetFrame(AsyncState* s, imSourceVideoRec* videoRec)
     // YUV» оказалось нечем закрыть.
     if (frame < 3) {
         Log("async frame %lld delivered (%dx%d, %s)", (long long)frame,
-            format->inFrameWidth, format->inFrameHeight,
+            frameW, frameH,
             av1imp::IsNativeYUV(pixelFormat)
                 ? "planar YUV"
                 : (pixelFormat == PrPixelFormat_BGRA_4444_16u ? "BGRA 16u" : "BGRA 8u"));

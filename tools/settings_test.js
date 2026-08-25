@@ -5,8 +5,9 @@
 
 const assert = require('assert');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { updateDecodeMode } = require('../cep/client/settings');
+const { updateDecodeMode, writeFileAtomic } = require('../cep/client/settings');
 
 assert.strictEqual(updateDecodeMode('', 'auto'), 'decode=auto\n');
 
@@ -31,6 +32,15 @@ assert.strictEqual(
 
 assert.throws(() => updateDecodeMode('', 'surprise'), /invalid decode mode/);
 
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aether-settings-'));
+const target = path.join(tmpDir, 'settings.ini');
+fs.writeFileSync(target, 'decode=auto\nasync=off\n', 'utf8');
+writeFileAtomic(target, 'decode=hardware\nasync=off\n', 'utf8');
+assert.strictEqual(fs.readFileSync(target, 'utf8'), 'decode=hardware\nasync=off\n');
+assert.ok(!fs.existsSync(target + '.tmp'));
+fs.unlinkSync(target);
+fs.rmdirSync(tmpDir);
+
 const client = path.join(__dirname, '..', 'cep', 'client');
 const html = fs.readFileSync(path.join(client, 'index.html'), 'utf8');
 const main = fs.readFileSync(path.join(client, 'main.js'), 'utf8');
@@ -42,6 +52,8 @@ assert.match(html, /aria-live="polite"/);
 assert.match(html, /id="file-picker"/);
 assert.match(main, /ArrowRight/);
 assert.doesNotMatch(main, /execFileSync/);
+assert.match(main, /writeFileAtomic/);
+assert.doesNotMatch(main, /writeFileSync\(\s*SETTINGS_INI/);
 assert.match(css, /:focus-visible/);
 assert.match(css, /\.results[\s\S]*user-select:\s*text/);
 

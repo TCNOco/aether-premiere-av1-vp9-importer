@@ -12,6 +12,7 @@ extern "C" {
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 #include <libavutil/display.h>
+#include <libavutil/dict.h>
 }
 
 #include <algorithm>
@@ -188,6 +189,37 @@ const char* ForcedDecoder() {
     return value;
 }
 
+// Какие контейнеры вообще открываем. Имя в файле нам врёт: демультиплексор
+// ffmpeg выбирает по содержимому, и файл «.mp4» может оказаться списком
+// concat со ссылкой на соседний файл. Белый список — четыре наших формата
+// и ничего больше. protocol_whitelist=file закрывает http/concat-url на
+// будущее: в этой сборке ffmpeg оба пути и так выключены по умолчанию.
+AVDictionary* ContainerOpenOptions()
+{
+    AVDictionary* opts = nullptr;
+    av_dict_set(&opts, "protocol_whitelist", "file", 0);
+    av_dict_set(&opts, "format_whitelist",
+                "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm", 0);
+    return opts;
+}
+
+int OpenContainer(AVFormatContext** ctx, const char* path)
+{
+    AVDictionary* opts = ContainerOpenOptions();
+    const int err = avformat_open_input(ctx, path, nullptr, &opts);
+    av_dict_free(&opts);
+    return err;
+}
+
+// Потолок ребра кадра. 8K DCI — 8192 по ширине, поэтому равенство проходит.
+// Фаззер берёг себя тем же числом, продакшн — нет: width из заголовка шёл
+// в расчёт кэша и в вектор диагностики как есть.
+const int kMaxFrameEdge = 8192;
+
+// Сколько шагов демультиплексора на один запрос. Битый контейнер без EOF
+// иначе крутит поток хоста, пока Premiere не снимут.
+const int kMaxDemuxSteps = 65536;
+
 const SupportedCodec* FindCodec(int codecId) {
     for (const SupportedCodec& c : kSupportedCodecs) {
         if (c.id == codecId) return &c;
@@ -278,7 +310,7 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
     std::scoped_lock lock(mutex_, audioMutex_);
     CloseLocked();
 
-    int err = avformat_open_input(&fmt_, utf8Path.c_str(), nullptr, nullptr);
+    int err = OpenContainer(&fmt_, utf8Path.c_str());
     if (err < 0) {
         SetError("cannot open file", err);
         return false;
@@ -414,6 +446,15 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
         if (tag->value && atoi(tag->value) != 0) info_.hasAlpha = true;
     }
 
+    // Размер — из контейнера, до декодера и до любых векторов под кадр.
+    // Ноль или гигант из повреждённого заголовка раньше доходил до swscale.
+    if (st->codecpar->width <= 0 || st->codecpar->height <= 0 ||
+        st->codecpar->width > kMaxFrameEdge || st->codecpar->height > kMaxFrameEdge) {
+        SetError("frame size is not usable");
+        CloseLocked();
+        return false;
+    }
+
     // Дорожкам звука декодер кадров не нужен — проверки на AV1 выше достаточно
     if (needVideo && !OpenCodec(preferHardware)) {
         CloseLocked();
@@ -506,7 +547,7 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
     lastFrame_ = av_frame_alloc();
     aheadFrame_ = av_frame_alloc();
     packet_  = av_packet_alloc();
-    if (!frame_ || !swFrame_ || !packet_) {
+    if (!frame_ || !swFrame_ || !lastFrame_ || !aheadFrame_ || !packet_) {
         SetError("out of memory for frame buffers");
         CloseLocked();
         return false;
@@ -803,7 +844,6 @@ void Decoder::CloseLocked() {
     if (lastFrame_){ av_frame_free(&lastFrame_); }
     if (aheadFrame_){ av_frame_free(&aheadFrame_); }
     if (codec_)    { avcodec_free_context(&codec_); }
-    if (hwDevice_) { av_buffer_unref(&hwDevice_); }
     if (fmt_)      { avformat_close_input(&fmt_); }
 
     videoStream_      = -1;
@@ -904,7 +944,13 @@ bool Decoder::DecodeUntil(int64_t targetFrame) {
         eofReached_       = false;
     }
 
+    int steps = 0;
     while (true) {
+        if (++steps > kMaxDemuxSteps) {
+            SetError("too many packets without reaching the requested frame");
+            return false;
+        }
+
         // Сначала разбираемся с уже раскодированным кадром, если он есть
         if (aheadValid_) {
             if (aheadTs_ <= targetTs + toleranceTicks_) {
@@ -1513,6 +1559,7 @@ void Decoder::CloseAudioLocked() {
     pendingOffset_ = 0;
     pendingCount_  = 0;
     audioCursor_   = -1;
+    audioExpectSample_ = -1;
 }
 
 bool Decoder::OpenAudio(int ordinal) {
@@ -1527,7 +1574,7 @@ bool Decoder::OpenAudio(int ordinal) {
 
     // Свой разбор контейнера для звука. Общий с видео не годится: чтение
     // пакетов двигает одну общую позицию, и перемотка видео сбивала бы звук.
-    int err = avformat_open_input(&audioFmt_, fmt_->url, nullptr, nullptr);
+    int err = OpenContainer(&audioFmt_, fmt_->url);
     if (err < 0) {
         SetAudioError("cannot open file for audio", err);
         return false;
@@ -1665,7 +1712,13 @@ bool Decoder::OpenAudio(int ordinal) {
 
 // Декодировать очередной кадр звука в очередь готовых отсчётов
 bool Decoder::DecodeMoreAudio() {
+    int steps = 0;
     while (true) {
+        if (++steps > kMaxDemuxSteps) {
+            SetAudioError("too many packets without filling the audio request");
+            return false;
+        }
+
         int err = avcodec_receive_frame(audioCodec_, audioFrame_);
 
         if (err == 0) {
@@ -1705,6 +1758,10 @@ bool Decoder::DecodeMoreAudio() {
             // считаются кадры. Без вычитания startTimeSec_ файл, начинающийся
             // не с нуля, отдавал одну тишину: запрошенный отсчёт 0 оказывался
             // за сотни тысяч отсчётов до всего, что есть в файле.
+            //
+            // Мелкие налегания/дыры из‑за миллисекундной сетки Matroska на
+            // AAC сшивает GetAudio по audioExpectSample_ — здесь трогать
+            // нельзя: преролл после перемотки иначе сдвигает всю дорожку.
             if (audioFrame_->pts != AV_NOPTS_VALUE) {
                 AVStream* st = audioFmt_->streams[audioStreamIndex_];
                 const double sec = audioFrame_->pts * av_q2d(st->time_base) - startTimeSec_;
@@ -1812,6 +1869,7 @@ bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* d
         pendingCount_  = 0;
         pendingOffset_ = 0;
         audioCursor_   = -1;
+        audioExpectSample_ = -1;
     }
 
     int64_t written = 0;
@@ -1820,8 +1878,20 @@ bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* d
             if (!DecodeMoreAudio()) break;   // файл кончился — остаток останется тишиной
         }
 
-        const int64_t chunkStart = audioCursor_ + pendingOffset_;
-        const int64_t want       = startSample + written;
+        int64_t chunkStart = audioCursor_ + pendingOffset_;
+        const int64_t want = startSample + written;
+
+        // Стык AAC в Matroska: метка кадра чуть раньше или позже ожидаемой
+        // из‑за округления до 1 мс. Двигаем начало кадра к ожиданию — только
+        // если уже отдавали звук подряд. После перемотки expect = -1, и
+        // прероллу верим по меткам, иначе сдвинется вся дорожка.
+        if (audioExpectSample_ >= 0 && pendingOffset_ == 0 &&
+            want == audioExpectSample_) {
+            const int64_t delta = chunkStart - audioExpectSample_;
+            const int64_t slop = std::max<int64_t>(info_.audioSampleRate / 500, 48);
+            if (delta > 0 && delta <= slop)
+                chunkStart = audioExpectSample_;
+        }
 
         // Пропускаем всё, что лежит до запрошенной позиции: после перемотки
         // декодер начинает с ближайшего целого кадра, а не с нужного отсчёта
@@ -1833,6 +1903,7 @@ bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* d
             // Провал во времени (бывает в записях с разрывами) — оставляем тишину
             const int64_t gap = std::min<int64_t>(chunkStart - want, sampleCount - written);
             written += gap;
+            audioExpectSample_ = startSample + written;
             continue;
         }
 
@@ -1867,6 +1938,7 @@ bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* d
         written        += take;
         pendingOffset_ += skip + take;
         pendingCount_  -= skip + take;
+        audioExpectSample_ = startSample + written;
     }
 
     return true;

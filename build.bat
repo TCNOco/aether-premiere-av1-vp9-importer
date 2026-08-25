@@ -11,6 +11,15 @@ cd /d "%~dp0"
 msbuild src\AV1Importer.vcxproj /p:Configuration=Release /p:Platform=x64 /v:minimal /nologo
 if errorlevel 1 exit /b 1
 
+REM FFmpeg DLLs belong next to the .prm. The plug-in loads them by full path
+REM from its own folder and will not search PATH: that search is how a DLL
+REM next to Premiere or in CWD would execute inside Adobe.
+if not exist build\Release mkdir build\Release
+for %%D in (avutil-60.dll swresample-6.dll swscale-9.dll avcodec-62.dll avformat-62.dll) do (
+    copy /y "ffmpeg\bin\%%D" "build\Release\" >nul
+    if errorlevel 1 exit /b 1
+)
+
 REM cl does not create the intermediate directory itself - see build-test.bat
 if not exist build\obj mkdir build\obj
 

@@ -419,7 +419,6 @@ private:
     // последовательности, и кадр приезжает с «не указано».
     int              streamColourspace_ = 2;   // AVCOL_SPC_UNSPECIFIED
     int              streamColourRange_ = 0;   // AVCOL_RANGE_UNSPECIFIED
-    AVBufferRef*     hwDevice_   = nullptr;
 
     int      videoStream_ = -1;
     int      codecId_     = 0;   // AVCodecID открытого потока; таблица — в .cpp
@@ -496,6 +495,13 @@ private:
     int64_t pendingOffset_ = 0;
     int64_t pendingCount_  = 0;
     int64_t audioCursor_   = -1;   // номер следующего готового отсчёта
+
+    // Куда должен начаться следующий ОТДАННЫЙ отсчёт при непрерывном чтении.
+    // Matroska хранит метки AAC с шагом 1 мс, а кадр — 1024 семпла (~21.33 мс):
+    // на стыках выходят ложные налегания и дыры, Premiere слышит хрип.
+    // Сшиваем только уже отданный хвост (см. GetAudio); после seek здесь -1,
+    // чтобы преролл не сдвинул всю сетку.
+    int64_t audioExpectSample_ = -1;
 
     // Замки раздельные, и это важно. Видео и звук разбираются полностью
     // независимо (у каждого свой контекст контейнера), а Premiere читает их

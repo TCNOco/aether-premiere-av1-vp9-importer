@@ -280,7 +280,9 @@ static prMALError AV1OpenFile8(imStdParms* stdParms, imFileRef* fileRef,
     // открываем на чтение и разрешаем параллельное чтение другим.
     if (ldata->fileRef == nullptr || ldata->fileRef == imInvalidHandleValue) {
         ldata->fileRef = CreateFileW(reinterpret_cast<LPCWSTR>(openRec->fileinfo.filepath),
-                                     GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                     GENERIC_READ,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     nullptr,
                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     }
     if (ldata->fileRef == imInvalidHandleValue) {
@@ -899,7 +901,8 @@ bool av1imp::WriteFrameToBuffer(av1imp::Decoder& decoder, int64_t frameIndex,
     // цена проверки — одно умножение, цена ошибки — запись за пределы буфера
     // внутри чужого процесса.
     const int bytesPerPixel = (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? 8 : 4;
-    if (rowBytes < width * bytesPerPixel) {
+    if (width <= 0 || height <= 0 || rowBytes <= 0 ||
+        static_cast<int64_t>(rowBytes) < static_cast<int64_t>(width) * bytesPerPixel) {
         *outWhy = "row too small for the frame";
         return false;
     }
@@ -1132,15 +1135,15 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
     // Ноль означает «любой размер» — тогда отдаём как в файле. Ненулевой размер
     // Premiere просит при пониженном качестве воспроизведения, и кадр надо
     // масштабировать под него: буфер создаётся именно такой.
-    imFrameFormat* format = &videoRec->inFrameFormats[pick >= 0 ? pick : 0];
-    if (format->inFrameWidth <= 0)  format->inFrameWidth  = mi.width;
-    if (format->inFrameHeight <= 0) format->inFrameHeight = mi.height;
+    imFrameFormat* offered = &videoRec->inFrameFormats[pick >= 0 ? pick : 0];
+    const int frameW = (offered->inFrameWidth  > 0) ? offered->inFrameWidth  : mi.width;
+    const int frameH = (offered->inFrameHeight > 0) ? offered->inFrameHeight : mi.height;
 
     // Формат просит хост, а не мы: он выбирает из того списка, что мы дали
     // в imGetIndPixelFormat. Не нашлось ничего нашего — отдаём восемью
     // битами BGRA, как и раньше.
     const PrPixelFormat pixelFormat =
-        (pick >= 0) ? format->inPixelFormat : PrPixelFormat_BGRA_4444_8u;
+        (pick >= 0) ? offered->inPixelFormat : PrPixelFormat_BGRA_4444_8u;
     const bool wantsNative = av1imp::IsNativeYUV(pixelFormat);
     const av1imp::FrameFormat frameFormat =
         (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? av1imp::FrameFormat::BGRA16
@@ -1151,7 +1154,7 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
     ldata->decoder->SetScaling(av1imp::ScalingFor(videoRec->inQuality));
 
     prRect rect;
-    prSetRect(&rect, 0, 0, format->inFrameWidth, format->inFrameHeight);
+    prSetRect(&rect, 0, 0, frameW, frameH);
 
     result = ldata->PPixCreatorSuite->CreatePPix(videoRec->outFrame,
                                                  PrPPixBufferAccess_ReadWrite,
@@ -1162,14 +1165,15 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
     if (!av1imp::WriteFrameToBuffer(*ldata->decoder, frameIndex,
                                     ldata->PPixSuite, ldata->PPix2Suite,
                                     *videoRec->outFrame, pixelFormat,
-                                    format->inFrameWidth, format->inFrameHeight, &why)) {
+                                    frameW, frameH, &why)) {
         av1imp::Log("frame %d: FAILED - %s", frameIndex,
                     why ? why : ldata->decoder->LastError().c_str());
+        av1imp::DiscardHostFrame(ldata->PPixSuite, videoRec->outFrame);
         return why ? imOtherErr : imFileReadFailed;
     }
     if (frameIndex < 3) {
         av1imp::Log("frame %d delivered (%dx%d, %s)", frameIndex,
-                    format->inFrameWidth, format->inFrameHeight,
+                    frameW, frameH,
                     wantsNative ? "planar YUV"
                                 : (frameFormat == av1imp::FrameFormat::BGRA16 ? "BGRA 16u"
                                                                               : "BGRA 8u"));
@@ -1195,7 +1199,11 @@ PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
         // Delay-load исключение на первом вызове ffmpeg завершило бы весь
         // процесс Adobe. Отказываем ещё до dispatch: битая установка должна
         // выглядеть как неработающий импортёр, а не как закрывшийся Premiere.
-        const prMALError result = (selector == imShutdown) ? malNoError : imOtherErr;
+        if (selector == imShutdown) {
+            av1imp::LogClose();
+            return malNoError;
+        }
+        const prMALError result = imOtherErr;
         av1imp::Log("  selector %s -> %d (ffmpeg runtime unavailable)",
                     av1imp::SelectorName(selector), result);
         return result;
@@ -1285,6 +1293,7 @@ PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
             break;
 
         case imShutdown:
+            av1imp::LogClose();
             result = malNoError;
             break;
 

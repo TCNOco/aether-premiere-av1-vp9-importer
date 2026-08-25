@@ -15,7 +15,7 @@ const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
 const { execFile } = require('child_process');
-const { updateDecodeMode } = require('./settings');
+const { updateDecodeMode, writeFileAtomic } = require('./settings');
 
 // ---------------------------------------------------------------------------
 // Где живёт плагин
@@ -128,7 +128,7 @@ function writeMode(mode) {
         current = '; AV1 / VP9 Importer for Premiere Pro\r\n' +
                   '; decode = auto | software | hardware\r\n';
     }
-    fs.writeFileSync(SETTINGS_INI, updateDecodeMode(current, mode), 'utf8');
+    writeFileAtomic(SETTINGS_INI, updateDecodeMode(current, mode), 'utf8');
 }
 
 // ---------------------------------------------------------------------------

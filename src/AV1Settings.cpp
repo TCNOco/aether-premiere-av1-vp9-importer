@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <mutex>
 #include <string>
 
 namespace av1imp {
@@ -25,6 +26,79 @@ bool LooksDisabled(const wchar_t* v)
 {
     return _wcsicmp(v, L"0") == 0 || _wcsicmp(v, L"off") == 0 ||
            _wcsicmp(v, L"false") == 0 || _wcsicmp(v, L"no") == 0;
+}
+
+bool LooksEnabled(const wchar_t* v)
+{
+    return _wcsicmp(v, L"1") == 0 || _wcsicmp(v, L"on") == 0 ||
+           _wcsicmp(v, L"true") == 0 || _wcsicmp(v, L"yes") == 0;
+}
+
+bool LooksDisabledNarrow(const char* v)
+{
+    return _stricmp(v, "off") == 0 || _stricmp(v, "0") == 0 ||
+           _stricmp(v, "false") == 0 || _stricmp(v, "no") == 0;
+}
+
+bool LooksEnabledNarrow(const char* v)
+{
+    return _stricmp(v, "on") == 0 || _stricmp(v, "1") == 0 ||
+           _stricmp(v, "true") == 0 || _stricmp(v, "yes") == 0;
+}
+
+// Файл читается один раз на процесс: Premiere зовёт YuvEnabled с каждым
+// перечислением форматов, а настройка и так применяется после перезапуска.
+std::mutex g_iniMutex;
+bool g_iniLoaded = false;
+std::string g_iniText;
+
+std::string LoadIniText()
+{
+    std::lock_guard<std::mutex> lock(g_iniMutex);
+    if (g_iniLoaded) return g_iniText;
+    g_iniLoaded = true;
+
+    const wchar_t* path = SettingsFilePath();
+    if (!path[0]) return g_iniText;
+
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"rb") != 0 || !f) return g_iniText;
+
+    char chunk[4096];
+    size_t got = 0;
+    while ((got = fread(chunk, 1, sizeof(chunk), f)) > 0) {
+        g_iniText.append(chunk, got);
+    }
+    fclose(f);
+    return g_iniText;
+}
+
+void RememberIniText(std::string text)
+{
+    std::lock_guard<std::mutex> lock(g_iniMutex);
+    g_iniText = std::move(text);
+    g_iniLoaded = true;
+}
+
+bool MatchIniKey(const char* p, const char* key, size_t keyLen)
+{
+    if (_strnicmp(p, key, keyLen) != 0) return false;
+    // Ключ обязан на этом кончиться. В файле есть и `yuv`, и `yuv10`;
+    // без этой проверки первый отвечал бы на строку второго.
+    const char after = p[keyLen];
+    return after == ' ' || after == '\t' || after == '=' || after == '\0' ||
+           after == '\n' || after == '\r';
+}
+
+bool ReadIniValue(const char* p, const char* key, size_t keyLen, char* value, unsigned valueSize)
+{
+    if (!MatchIniKey(p, key, keyLen)) return false;
+    p += keyLen;
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p != '=') return false;
+    ++p;
+    while (*p == ' ' || *p == '\t') ++p;
+    return sscanf_s(p, "%31s", value, valueSize) == 1;
 }
 
 const wchar_t* SettingsFolder()
@@ -75,34 +149,27 @@ DecodeMode CurrentMode()
         return LooksDisabled(env) ? DecodeMode::Software : DecodeMode::Hardware;
     }
 
-    const wchar_t* path = SettingsFilePath();
-    if (!path[0]) return DecodeMode::Auto;
-
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"rt") != 0 || !f) return DecodeMode::Auto;
-
+    const std::string text = LoadIniText();
     DecodeMode mode = DecodeMode::Auto;
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
+    const char* cursor = text.c_str();
+    while (*cursor) {
+        const char* lineStart = cursor;
+        while (*cursor && *cursor != '\n' && *cursor != '\r') ++cursor;
+        char line[256];
+        size_t n = static_cast<size_t>(cursor - lineStart);
+        if (n >= sizeof(line)) n = sizeof(line) - 1;
+        memcpy(line, lineStart, n);
+        line[n] = '\0';
+        while (*cursor == '\n' || *cursor == '\r') ++cursor;
+
         char* p = line;
         while (*p == ' ' || *p == '\t') ++p;
-        if (_strnicmp(p, "decode", 6) != 0) continue;
-
-        p += 6;
-        while (*p == ' ' || *p == '\t') ++p;
-        if (*p != '=') continue;
-        ++p;
-        while (*p == ' ' || *p == '\t') ++p;
-
         char value[32] = {};
-        if (sscanf_s(p, "%31s", value, (unsigned)sizeof(value)) == 1) {
-            if (_stricmp(value, "software") == 0)      mode = DecodeMode::Software;
-            else if (_stricmp(value, "hardware") == 0) mode = DecodeMode::Hardware;
-        }
+        if (!ReadIniValue(p, "decode", 6, value, (unsigned)sizeof(value))) continue;
+        if (_stricmp(value, "software") == 0)      mode = DecodeMode::Software;
+        else if (_stricmp(value, "hardware") == 0) mode = DecodeMode::Hardware;
         break;
     }
-
-    fclose(f);
     return mode;
 }
 
@@ -172,6 +239,7 @@ bool SaveMode(DecodeMode mode)
         DeleteFileW(temporary.c_str());
         return false;
     }
+    RememberIniText(updated);
     return true;
 }
 
@@ -204,42 +272,26 @@ bool EnabledUnlessTurnedOff(const wchar_t* envName, const char* key)
         return !LooksDisabled(env);
     }
 
-    const wchar_t* path = SettingsFilePath();
-    if (!path[0]) return true;
-
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"rt") != 0 || !f) return true;
-
+    const std::string text = LoadIniText();
     const size_t keyLen = strlen(key);
     bool enabled = true;
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
+    const char* cursor = text.c_str();
+    while (*cursor) {
+        const char* lineStart = cursor;
+        while (*cursor && *cursor != '\n' && *cursor != '\r') ++cursor;
+        char line[256];
+        size_t n = static_cast<size_t>(cursor - lineStart);
+        if (n >= sizeof(line)) n = sizeof(line) - 1;
+        memcpy(line, lineStart, n);
+        line[n] = '\0';
+        while (*cursor == '\n' || *cursor == '\r') ++cursor;
+
         char* p = line;
         while (*p == ' ' || *p == '\t') ++p;
-        if (_strnicmp(p, key, keyLen) != 0) continue;
-
-        // Ключ обязан на этом кончиться. Сейчас в файле есть и `yuv`, и
-        // `yuv10`, и без этой проверки первый отвечал бы на строку второго.
-        // Спасало только то, что дальше идёт «10», а не «=», — то есть
-        // работало по случайности, а не по замыслу.
-        const char after = p[keyLen];
-        if (after != ' ' && after != '\t' && after != '=') continue;
-
-        p += keyLen;
-        while (*p == ' ' || *p == '\t') ++p;
-        if (*p != '=') continue;
-        ++p;
-        while (*p == ' ' || *p == '\t') ++p;
-
         char value[32] = {};
-        if (sscanf_s(p, "%31s", value, (unsigned)sizeof(value)) == 1) {
-            if (_stricmp(value, "off")   == 0 || _stricmp(value, "0")     == 0 ||
-                _stricmp(value, "false") == 0 || _stricmp(value, "no")    == 0) {
-                enabled = false;
-            }
-        }
+        if (!ReadIniValue(p, key, keyLen, value, (unsigned)sizeof(value))) continue;
+        if (LooksDisabledNarrow(value)) enabled = false;
     }
-    fclose(f);
     return enabled;
 }
 
@@ -275,49 +327,31 @@ namespace {
 // где ждали «on».
 bool DisabledUnlessTurnedOn(const wchar_t* envName, const char* key)
 {
-    auto looksEnabled = [](const char* v) {
-        return _stricmp(v, "on")   == 0 || _stricmp(v, "1")    == 0 ||
-               _stricmp(v, "true") == 0 || _stricmp(v, "yes")  == 0;
-    };
-
     wchar_t env[64] = {};
     if (GetEnvironmentVariableW(envName, env, 64) > 0) {
-        char narrow[64] = {};
-        WideCharToMultiByte(CP_ACP, 0, env, -1, narrow, sizeof(narrow), nullptr, nullptr);
-        return looksEnabled(narrow);
+        return LooksEnabled(env);
     }
 
-    const wchar_t* path = SettingsFilePath();
-    if (!path[0]) return false;
-
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"rt") != 0 || !f) return false;
-
+    const std::string text = LoadIniText();
     const size_t keyLen = strlen(key);
     bool enabled = false;
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
+    const char* cursor = text.c_str();
+    while (*cursor) {
+        const char* lineStart = cursor;
+        while (*cursor && *cursor != '\n' && *cursor != '\r') ++cursor;
+        char line[256];
+        size_t n = static_cast<size_t>(cursor - lineStart);
+        if (n >= sizeof(line)) n = sizeof(line) - 1;
+        memcpy(line, lineStart, n);
+        line[n] = '\0';
+        while (*cursor == '\n' || *cursor == '\r') ++cursor;
+
         char* p = line;
         while (*p == ' ' || *p == '\t') ++p;
-        if (_strnicmp(p, key, keyLen) != 0) continue;
-
-        // Ключ должен кончиться здесь, а не просто начаться: иначе строка
-        // «yuv10 = on» отвечала бы и на вопрос про «yuv», и наоборот
-        const char after = p[keyLen];
-        if (after != ' ' && after != '\t' && after != '=') continue;
-
-        p += keyLen;
-        while (*p == ' ' || *p == '\t') ++p;
-        if (*p != '=') continue;
-        ++p;
-        while (*p == ' ' || *p == '\t') ++p;
-
         char value[32] = {};
-        if (sscanf_s(p, "%31s", value, (unsigned)sizeof(value)) == 1) {
-            enabled = looksEnabled(value);
-        }
+        if (!ReadIniValue(p, key, keyLen, value, (unsigned)sizeof(value))) continue;
+        enabled = LooksEnabledNarrow(value);
     }
-    fclose(f);
     return enabled;
 }
 

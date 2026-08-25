@@ -203,6 +203,18 @@ Make "h264.mp4" @(
     "-f","lavfi","-i","testsrc2=size=320x180:rate=30:duration=4",
     "-c:v","libopenh264","-b:v","300k","-pix_fmt","yuv420p")
 
+# Named like MP4, body is an ffmpeg concat playlist pointing at a neighbour.
+# Without format_whitelist the demuxer would follow that line and decode
+# av1_8bit.mp4. The core must refuse this file, not take the neighbour.
+$concatName = "concat_disguise.mp4"
+$concatPath = Join-Path $OutDir $concatName
+if (-not (Test-Path $concatPath)) {
+    Write-Host "  make  $concatName"
+    Set-Content -LiteralPath $concatPath -Encoding Ascii -NoNewline -Value "ffconcat version 1.0`nfile av1_8bit.mp4`n"
+} else {
+    Write-Host "  have  $concatName"
+}
+
 # A path that is not Latin, in a folder that is not Latin either.
 #
 # Not a new recording - a copy of one we already have. What is being checked

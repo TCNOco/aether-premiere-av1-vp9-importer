@@ -182,6 +182,16 @@ bool CanProduce(PrPixelFormat f);
 // Список короткий (у Premiere это единицы), перебор стоит ничего.
 int PickFrameFormat(const imFrameFormat* formats, int count);
 
+// Кадр, который CreatePPix уже выдал, а записать в него не вышло.
+// Хост на ошибке не обязан забирать outFrame — без Dispose это утечка
+// его буфера, а иногда и полуживой указатель на следующем кадре.
+inline void DiscardHostFrame(PrSDKPPixSuite* suite, PPixHand* frame)
+{
+    if (!suite || !frame || !*frame) return;
+    suite->Dispose(*frame);
+    *frame = nullptr;
+}
+
 // Перевод качества хоста в наше. PrRenderQuality приходит с каждым запросом
 // кадра, и до сих пор мы его не читали.
 //

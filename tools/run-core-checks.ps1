@@ -63,6 +63,7 @@ $expect = [ordered]@{
     "audio_tracks_differ.mp4" = "accept"
     "audio_only.mp4"  = "refuse"
     "h264.mp4"        = "refuse"
+    "concat_disguise.mp4" = "refuse"
 }
 
 # У файлов со вспышкой и щелчком проверка синхронности обязана отработать,

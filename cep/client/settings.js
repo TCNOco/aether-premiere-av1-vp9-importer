@@ -3,6 +3,8 @@
 
 'use strict';
 
+const fs = require('fs');
+
 function updateDecodeMode(text, mode) {
     if (!['auto', 'software', 'hardware'].includes(mode)) {
         throw new Error('invalid decode mode');
@@ -30,4 +32,22 @@ function updateDecodeMode(text, mode) {
     return updated.join(newline) + newline;
 }
 
-module.exports = { updateDecodeMode };
+// Пишем рядом, потом подменяем. На Windows rename не перезаписывает
+// существующий файл, поэтому запасной путь — copy поверх + удалить tmp.
+// Так же делает C++ SaveMode: оборванная запись не должна оставить
+// наполовину пустой settings.ini.
+function writeFileAtomic(filePath, data, encoding) {
+    const tmp = filePath + '.tmp';
+    fs.writeFileSync(tmp, data, encoding);
+    try {
+        fs.renameSync(tmp, filePath);
+    } catch (error) {
+        try {
+            fs.copyFileSync(tmp, filePath);
+        } finally {
+            try { fs.unlinkSync(tmp); } catch (_) { /* leftover tmp is harmless */ }
+        }
+    }
+}
+
+module.exports = { updateDecodeMode, writeFileAtomic };
