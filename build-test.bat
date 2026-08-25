@@ -5,6 +5,7 @@ REM
 REM decoder_test needs nothing but FFmpeg, so it builds anywhere - including a
 REM build server. plugin_test and host_test need the Adobe SDK, which may not be
 REM redistributed; without it they are skipped rather than failing the build.
+REM Set AETHER_ASAN=1 to instrument the test programs with MSVC AddressSanitizer.
 
 setlocal
 cd /d "%~dp0"
@@ -25,20 +26,23 @@ REM server, which is the only machine that ever starts from an empty tree.
 if not exist build mkdir build
 if not exist build\obj mkdir build\obj
 
+set "EXTRA_CFLAGS="
+if /I "%AETHER_ASAN%"=="1" set "EXTRA_CFLAGS=/fsanitize=address /Zi"
+
 REM settings_test - pure INI update logic, no FFmpeg or Adobe SDK needed
-cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    tools\settings_test.cpp ^
    /Fe:build\settings_test.exe /Fo:build\obj\
 if errorlevel 1 exit /b 1
 
 REM importer_math_test - overflow boundaries in Adobe's 32-bit duration field
-cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    tools\importer_math_test.cpp ^
    /Fe:build\importer_math_test.exe /Fo:build\obj\
 if errorlevel 1 exit /b 1
 
 REM decoder_test - the decoding core, works on a file directly
-cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
    /I"ffmpeg\include" ^
    src\AV1Decoder.cpp tools\decoder_test.cpp ^
@@ -49,7 +53,7 @@ if errorlevel 1 exit /b 1
 REM cache_probe - how much memory the frame caches take with many clips open.
 REM The budget used to be per clip with no overall ceiling: ten 1440p clips
 REM reached 4.4 GB. Measured, not assumed - this is the instrument.
-cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
    /I"ffmpeg\include" ^
    src\AV1Decoder.cpp tools\cache_probe.cpp ^
@@ -60,7 +64,7 @@ if errorlevel 1 exit /b 1
 REM conform_probe - reads one audio track end to end, the way conforming does.
 REM Written while chasing "an unspecified error occurred while performing a
 REM conform action": the decoder had to be cleared before looking further up.
-cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
    /I"ffmpeg\include" ^
    src\AV1Decoder.cpp tools\conform_probe.cpp ^
@@ -69,7 +73,7 @@ cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
 if errorlevel 1 exit /b 1
 
 REM fuzz_test - the same core, fed deliberately broken files
-cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
    /I"ffmpeg\include" ^
    src\AV1Decoder.cpp tools\fuzz_test.cpp ^
@@ -86,7 +90,7 @@ if not exist "%SDK%" (
 )
 
 REM host_test - drives the .prm from a fake host that can pretend to be older
-cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    /DPRWIN_ENV ^
    /I"%SDK%" ^
    tools\host_test.cpp ^
@@ -94,7 +98,7 @@ cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
 if errorlevel 1 exit /b 1
 
 REM plugin_test - loads the built .prm the same way Premiere will
-cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    /DPRWIN_ENV ^
    /I"%SDK%" ^
    tools\plugin_test.cpp ^
