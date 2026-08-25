@@ -25,6 +25,12 @@ REM server, which is the only machine that ever starts from an empty tree.
 if not exist build mkdir build
 if not exist build\obj mkdir build\obj
 
+REM settings_test - pure INI update logic, no FFmpeg or Adobe SDK needed
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
+   tools\settings_test.cpp ^
+   /Fe:build\settings_test.exe /Fo:build\obj\
+if errorlevel 1 exit /b 1
+
 REM decoder_test - the decoding core, works on a file directly
 cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^

@@ -39,6 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      - name: Check panel settings
+        run: node tools/settings_test.js
+
       # The n8.1 line, the same one the plug-in links against: the DLL names it
       # loads (avcodec-62 and friends) belong to that major version, so a jump
       # to 9.0 would not be a newer build but a different one.

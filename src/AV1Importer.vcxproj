@@ -112,6 +112,7 @@
     <ClCompile Include="AV1Log.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="IniSettings.h" />
     <ClInclude Include="AV1Importer.h" />
     <ClInclude Include="AV1Async.h" />
     <ClInclude Include="AV1Decoder.h" />

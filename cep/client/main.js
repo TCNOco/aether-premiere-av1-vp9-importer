@@ -15,6 +15,7 @@ const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
 const { execFile, execFileSync } = require('child_process');
+const { updateDecodeMode } = require('./settings');
 
 // ---------------------------------------------------------------------------
 // Где живёт плагин
@@ -112,11 +113,16 @@ function readMode() {
 
 function writeMode(mode) {
     fs.mkdirSync(SETTINGS_DIR, { recursive: true });
-    fs.writeFileSync(SETTINGS_INI,
-        '; AV1 / VP9 Importer for Premiere Pro\r\n' +
-        '; decode = auto | software | hardware\r\n' +
-        'decode=' + mode + '\r\n',
-        'utf8');
+
+    let current = '';
+    try {
+        current = fs.readFileSync(SETTINGS_INI, 'utf8');
+    } catch (e) {
+        if (e.code !== 'ENOENT') throw e;
+        current = '; AV1 / VP9 Importer for Premiere Pro\r\n' +
+                  '; decode = auto | software | hardware\r\n';
+    }
+    fs.writeFileSync(SETTINGS_INI, updateDecodeMode(current, mode), 'utf8');
 }
 
 // ---------------------------------------------------------------------------

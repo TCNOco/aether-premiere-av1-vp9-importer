@@ -2,6 +2,7 @@
 // Copyright 2026 neoHaDe
 
 #include "AV1Settings.h"
+#include "IniSettings.h"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -9,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <string>
 
 namespace av1imp {
 
@@ -108,21 +110,68 @@ bool SaveMode(DecodeMode mode)
 {
     const wchar_t* folder = SettingsFolder();
     if (!folder[0]) return false;
-    CreateDirectoryW(folder, nullptr);   // если уже есть — не беда
+    if (!CreateDirectoryW(folder, nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        return false;
+    }
 
     const wchar_t* path = SettingsFilePath();
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"wt") != 0 || !f) return false;
-
     const char* value = mode == DecodeMode::Software ? "software"
                       : mode == DecodeMode::Hardware ? "hardware"
                                                      : "auto";
 
-    // Файл человекочитаемый: его могут править руками по совету из issue
-    fprintf(f, "; AV1 / VP9 Importer for Premiere Pro\n");
-    fprintf(f, "; decode = auto | software | hardware\n");
-    fprintf(f, "decode=%s\n", value);
-    fclose(f);
+    // Читаем файл целиком до открытия на запись: кроме decode в нём живут
+    // аварийные выключатели async/yuv и могут появиться будущие настройки.
+    // Сохранение одного переключателя не имеет права стирать остальные.
+    std::string existing;
+    FILE* input = nullptr;
+    const errno_t openResult = _wfopen_s(&input, path, L"rb");
+    if (openResult == 0 && input) {
+        char chunk[4096];
+        size_t got = 0;
+        while ((got = fread(chunk, 1, sizeof(chunk), input)) > 0) {
+            existing.append(chunk, got);
+        }
+        if (ferror(input)) {
+            fclose(input);
+            return false;
+        }
+        fclose(input);
+    } else {
+        const DWORD attributes = GetFileAttributesW(path);
+        const DWORD error = GetLastError();
+        if (attributes != INVALID_FILE_ATTRIBUTES ||
+            (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)) {
+            return false;
+        }
+    }
+
+    if (existing.empty()) {
+        existing = "; AV1 / VP9 Importer for Premiere Pro\r\n"
+                   "; decode = auto | software | hardware\r\n";
+    }
+    const std::string updated = SetIniValue(existing, "decode", value);
+
+    // Пишем сначала рядом, затем заменяем одним MoveFileEx: оборванная запись
+    // не должна оставить Premiere с наполовину пустым settings.ini.
+    std::wstring temporary = path;
+    temporary += L".tmp";
+
+    FILE* output = nullptr;
+    if (_wfopen_s(&output, temporary.c_str(), L"wb") != 0 || !output) return false;
+    const bool written =
+        fwrite(updated.data(), 1, updated.size(), output) == updated.size() &&
+        fflush(output) == 0;
+    const bool closed = fclose(output) == 0;
+    if (!written || !closed) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+
+    if (!MoveFileExW(temporary.c_str(), path,
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
     return true;
 }
 

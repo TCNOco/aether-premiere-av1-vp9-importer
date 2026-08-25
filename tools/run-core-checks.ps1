@@ -19,6 +19,7 @@ param(
     [string]$MediaDir = "build\media",
     [string]$Exe      = "build\decoder_test.exe",
     [string]$Fuzz     = "build\fuzz_test.exe",
+    [string]$Settings = "build\settings_test.exe",
     [switch]$NoFuzz
 )
 
@@ -29,7 +30,15 @@ param(
 $ErrorActionPreference = "Continue"
 
 if (-not (Test-Path $Exe))      { throw "not built: $Exe" }
+if (-not (Test-Path $Settings)) { throw "not built: $Settings" }
 if (-not (Test-Path $MediaDir)) { throw "no media: $MediaDir - run tools\make-test-media.ps1" }
+
+$settingsOutput = & $Settings | Out-String
+if ($LASTEXITCODE -ne 0 -or $settingsOutput -notmatch "ALL SETTINGS CHECKS PASSED") {
+    Write-Host $settingsOutput.Trim()
+    throw "settings checks failed"
+}
+Write-Host "settings.ini       preserve OK"
 
 $expect = [ordered]@{
     "av1_8bit.mp4"    = "accept"
