@@ -1,14 +1,29 @@
-# Aether — AV1 и VP9 в Premiere Pro
+<div align="center">
+
+<img src="docs/assets/aether.png" alt="Aether" width="128">
+
+# Aether
+
+**Нативный импортёр AV1 и VP9 для Premiere Pro.**
+
+Перетащил файл на таймлайн — и он играет. Без конвертации, без промежуточных
+форматов, без ожидания. Один установщик на Premiere Pro, After Effects
+и Media Encoder.
+
+Бесплатно, открытый код, Apache 2.0. Windows x64, **v1.3.2**.
 
 [![core checks](https://github.com/neoHaDe/aether-premiere-av1-vp9-importer/actions/workflows/core-checks.yml/badge.svg)](https://github.com/neoHaDe/aether-premiere-av1-vp9-importer/actions/workflows/core-checks.yml)
+[![C++](https://img.shields.io/badge/C++-17-00599C?logo=cplusplus&logoColor=white)](https://isocpp.org)
+[![FFmpeg](https://img.shields.io/badge/FFmpeg-LGPL-007808?logo=ffmpeg&logoColor=white)](https://ffmpeg.org)
+[![Premiere Pro](https://img.shields.io/badge/Premiere_Pro-2019--2026-EA77FF?logo=adobepremierepro&logoColor=white)](https://www.adobe.com/products/premiere.html)
+[![Лицензия: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Перетащил файл AV1 или VP9 на таймлайн — и он играет. Без конвертации,
-без промежуточных форматов, без ожидания.
+Windows · Premiere Pro, After Effects, Media Encoder ·
+[English version](README.md)
 
 ### → [Скачать последний выпуск](../../releases/latest)
 
-Windows · Premiere Pro, After Effects, Media Encoder · бесплатно, Apache 2.0 ·
-[English version](README.md)
+</div>
 
 ---
 

@@ -72,6 +72,12 @@
             <Size><Height>640</Height><Width>420</Width></Size>
             <MinSize><Height>360</Height><Width>320</Width></MinSize>
           </Geometry>
+          <Icons>
+            <Icon Type="Normal">./client/icons/icon.png</Icon>
+            <Icon Type="RollOver">./client/icons/icon.png</Icon>
+            <Icon Type="DarkNormal">./client/icons/icon.png</Icon>
+            <Icon Type="DarkRollOver">./client/icons/icon.png</Icon>
+          </Icons>
         </UI>
       </DispatchInfo>
     </Extension>

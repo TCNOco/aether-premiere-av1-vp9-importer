@@ -80,8 +80,8 @@ The installer is not code-signed, so Windows will warn about an unknown
 publisher. Verify the download instead:
 
 ```
-AetherSetup-1.3.2.exe        SHA256  41b8a9470b577db24e5fce96d41fc2e663687b61f184afb846def274b5fd042c
-Aether-1.3.2-portable.zip    SHA256  27bad008c24a57dcf63ebbd258e571afb291cec780470ba94682e4d63c789649
+AetherSetup-1.3.2.exe        SHA256  c45e4fb2fc6edd33737e6a90dab7e85789f2ac8c75da2053f6eecd3dd01ec7e8
+Aether-1.3.2-portable.zip    SHA256  8d55d2e782130a1100206753b5b2839cbcbd75c84fcaf922a6baac6a578c6ef0
 ```
 
 The README has a section on what else there is to go on besides these numbers.

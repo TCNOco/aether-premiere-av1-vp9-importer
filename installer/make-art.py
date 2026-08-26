@@ -3,15 +3,17 @@
 #
 #   python installer\make-art.py
 #
-# Рисуются кодом, а не лежат в репозитории неизвестно откуда: их видно, можно
-# поправить и пересобрать. Готовые файлы при этом лежат рядом — собрать
-# установщик должно быть можно и без Python.
+# Значок — готовый рисунок `docs/assets/aether.png`. Скрипт только
+# пересобирает из него .ico, BMP мастера и иконки панели, чтобы установщик
+# можно было собрать и без правок руками. Исходник править — править PNG.
 #
 # Нужен Pillow: pip install pillow
 import os
 from PIL import Image, ImageDraw, ImageFont
 
 OUT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(OUT)
+SRC = os.path.join(ROOT, 'docs', 'assets', 'aether.png')
 FONT = r'C:\Windows\Fonts\segoeuib.ttf'   # Segoe UI Bold
 FONT_R = r'C:\Windows\Fonts\segoeui.ttf'
 
@@ -33,28 +35,6 @@ def vgrad(size, top, bot):
     return img
 
 
-def play_badge(size, pad_ratio=0.14):
-    """Квадратный значок: скруглённый корпус и треугольник воспроизведения.
-    Текст на 16 пикселях не читается, а треугольник узнаётся всегда."""
-    s = size
-    img = Image.new('RGBA', (s, s), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-
-    pad = max(1, int(s * pad_ratio))
-    r = max(2, int(s * 0.22))
-    d.rounded_rectangle([pad, pad, s - pad - 1, s - pad - 1], radius=r,
-                        fill=(20, 24, 33, 255), outline=(58, 68, 86, 255),
-                        width=max(1, s // 64))
-
-    # треугольник по центру, слегка сдвинут вправо для оптического баланса
-    cx, cy = s * 0.52, s * 0.5
-    hh = s * 0.20
-    ww = s * 0.34
-    d.polygon([(cx - ww * 0.45, cy - hh), (cx - ww * 0.45, cy + hh), (cx + ww * 0.55, cy)],
-              fill=ACCENT + (255,))
-    return img
-
-
 def fit_font(path, text, target_w, start):
     size = start
     while size > 8:
@@ -65,8 +45,14 @@ def fit_font(path, text, target_w, start):
     return ImageFont.truetype(path, 8)
 
 
+def scaled(src, size):
+    return src.resize((size, size), Image.LANCZOS)
+
+
+master = Image.open(SRC).convert('RGBA')
+
 # ---------------------------------------------------------------- иконка
-icon = play_badge(256)
+icon = scaled(master, 256)
 icon.save(os.path.join(OUT, 'aether.ico'),
           sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
 print('ok aether.ico')
@@ -77,7 +63,7 @@ W, H = 164, 314
 big = vgrad((W, H), BG_TOP, BG_BOT)
 d = ImageDraw.Draw(big)
 
-badge = play_badge(64).resize((64, 64), Image.LANCZOS)
+badge = scaled(master, 64)
 big.paste(badge, (int((W - 64) / 2), 40), badge)
 
 f1 = fit_font(FONT, 'AV1', 110, 48)
@@ -102,7 +88,15 @@ print('ok wizard-large.bmp')
 # ------------------------------------------------- маленькая картинка мастера
 SW, SH = 55, 58
 small = vgrad((SW, SH), BG_TOP, BG_BOT)
-b = play_badge(44).resize((44, 44), Image.LANCZOS)
-small.paste(b, (int((SW - 44) / 2), int((SH - 44) / 2)), b)
+b = scaled(master, 40)
+small.paste(b, (int((SW - 40) / 2), int((SH - 40) / 2)), b)
 small.save(os.path.join(OUT, 'wizard-small.bmp'), 'BMP')
 print('ok wizard-small.bmp')
+
+# ------------------------------------------------- панель Premiere
+cep = os.path.join(ROOT, 'cep', 'client')
+os.makedirs(os.path.join(cep, 'icons'), exist_ok=True)
+scaled(master, 64).save(os.path.join(cep, 'icon.png'), 'PNG', optimize=True)
+print('ok cep/client/icon.png')
+scaled(master, 23).save(os.path.join(cep, 'icons', 'icon.png'), 'PNG', optimize=True)
+print('ok cep/client/icons/icon.png')

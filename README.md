@@ -1,14 +1,28 @@
-# Aether — AV1 and VP9 in Premiere Pro
+<div align="center">
+
+<img src="docs/assets/aether.png" alt="Aether" width="128">
+
+# Aether
+
+**Native AV1 and VP9 importer for Premiere Pro.**
+
+Drag a file onto the timeline and it plays. No transcoding, no proxies,
+no waiting. One installer covers Premiere Pro, After Effects and Media Encoder.
+
+Free, open source, Apache 2.0. Windows x64, **v1.3.2**.
 
 [![core checks](https://github.com/neoHaDe/aether-premiere-av1-vp9-importer/actions/workflows/core-checks.yml/badge.svg)](https://github.com/neoHaDe/aether-premiere-av1-vp9-importer/actions/workflows/core-checks.yml)
+[![C++](https://img.shields.io/badge/C++-17-00599C?logo=cplusplus&logoColor=white)](https://isocpp.org)
+[![FFmpeg](https://img.shields.io/badge/FFmpeg-LGPL-007808?logo=ffmpeg&logoColor=white)](https://ffmpeg.org)
+[![Premiere Pro](https://img.shields.io/badge/Premiere_Pro-2019--2026-EA77FF?logo=adobepremierepro&logoColor=white)](https://www.adobe.com/products/premiere.html)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Drag an AV1 or VP9 file onto the timeline and it plays. No transcoding, no
-proxies, no waiting.
+Windows · Premiere Pro, After Effects, Media Encoder ·
+[Русская версия](README.ru.md)
 
 ### → [Download the latest release](../../releases/latest)
 
-Windows · Premiere Pro, After Effects, Media Encoder · free, Apache 2.0 ·
-[Русская версия](README.ru.md)
+</div>
 
 ---
 
