@@ -1,0 +1,9 @@
+# SHA256 of the FFmpeg DLLs shipped next to Aether.prm.
+# BtbN autobuild-2026-08-22-12-58
+# ffmpeg-n8.1.2-44-g7c533d0f86-win64-lgpl-shared-8.1.zip
+# zip SHA256 e04fcdac8a27e0fcee986376cac0cb20fd0f17fe5896b42cbc5efcb895b82f87
+09f7a7f69f8f1e41482188b9c7c92219d4fd0c27802b8f09bcca802c1ee9971f  avutil-60.dll
+89c7cd058280b770bd616c99def315a099f085544fc1afc29a5c224a1b240c01  swresample-6.dll
+d5746f2a219b8da18f1fd07d2b583642265a972bc2e661ed210db1654b8c28c1  swscale-9.dll
+76a9a88c00967a4c56b30867aa234b798046085874572f5511f18760916803d1  avcodec-62.dll
+8e9b7e71e0c544e88bbb6cdaaa1716c8668c50b2ea678fa3a2993aabc6710c1a  avformat-62.dll

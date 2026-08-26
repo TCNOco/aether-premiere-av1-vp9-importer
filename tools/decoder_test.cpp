@@ -628,6 +628,42 @@ void CheckColourMatrix(av1imp::Decoder& dec, const av1imp::MediaInfo& info, bool
     Check(off <= 6, name);
 }
 
+void CheckTransferUnspecified(const av1imp::MediaInfo& info, bool required)
+{
+    const char* name = "unspecified transfer is left unspecified";
+    if (!required) return;
+
+    // ITU / AVCOL_TRC_UNSPECIFIED. Подстановка 1 (BT.709) — это ложь хосту.
+    printf("      transfer %d (want 2)\n", info.colourTransfer);
+    Check(info.colourTransfer == 2, name);
+}
+
+void CheckAudioChannelCap(av1imp::Decoder& dec, const av1imp::MediaInfo& info,
+                          bool requireRefuse)
+{
+    if (requireRefuse) {
+        const bool opened = dec.OpenAudio(0);
+        const std::string err = dec.LastAudioError();
+        const bool refused = !opened && err.find("channels") != std::string::npos;
+        printf("      OpenAudio %s (%s)\n", opened ? "accepted" : "refused",
+               err.empty() ? "no error" : err.c_str());
+        Check(refused, "audio with more than 64 channels is refused");
+        return;
+    }
+
+    if (info.audioStreamCount == 0) {
+        printf("  %-46s SKIP (no audio)\n", "open audio stays within 64 channels");
+        return;
+    }
+    if (!dec.OpenAudio(0)) {
+        printf("  %-46s SKIP (%s)\n", "open audio stays within 64 channels",
+               dec.LastAudioError().c_str());
+        return;
+    }
+    Check(info.audioChannels > 0 && info.audioChannels <= av1imp::kMaxAudioChannels,
+          "open audio stays within 64 channels");
+}
+
 void CheckReducedSizeStaysInBuffer(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
 {
     if (!info.hasVideo) {
@@ -796,6 +832,10 @@ int wmain(int argc, wchar_t** wargv)
         printf("          instant; fail unless they come out together\n");
         printf("  --colour  the file is a flat colour tagged BT.709; fail\n");
         printf("            unless it decodes to the colour it should\n");
+        printf("  --transfer-unspecified  the file has no transfer tag;\n");
+        printf("            fail if the core invents BT.709\n");
+        printf("  --audio-cap  the file has more than 64 audio channels;\n");
+        printf("            fail unless OpenAudio refuses it\n");
         return 1;
     }
 
@@ -810,12 +850,16 @@ int wmain(int argc, wchar_t** wargv)
     bool requireSync = false;
     // --colour: файл залит известным цветом с явной меткой BT.709
     bool requireColour = false;
+    bool requireTransferUnspecified = false;
+    bool requireAudioCap = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--sw")      preferHardware = false;
         else if (arg == "--16u") format = av1imp::FrameFormat::BGRA16;
         else if (arg == "--sync") requireSync = true;
         else if (arg == "--colour") requireColour = true;
+        else if (arg == "--transfer-unspecified") requireTransferUnspecified = true;
+        else if (arg == "--audio-cap") requireAudioCap = true;
         else if (path.empty())  path = arg;
         else                    wanted = _atoi64(arg.c_str());
     }
@@ -841,6 +885,9 @@ int wmain(int argc, wchar_t** wargv)
     printf("frames     : %lld\n", (long long)info.frameCount);
     printf("decoder    : %s (%s)\n", info.decoderName.c_str(),
            info.hardwareDecode ? "GPU" : "CPU");
+    printf("colour     : primaries %d, transfer %d, matrix %d%s\n",
+           info.colourPrimaries, info.colourTransfer, info.colourMatrix,
+           info.fullRange ? ", full range" : "");
 
     // Буфер по формату: в шестнадцати битах пиксель занимает вдвое больше
     const int stride = info.width * (format == av1imp::FrameFormat::BGRA16 ? 8 : 4);
@@ -978,7 +1025,10 @@ int wmain(int argc, wchar_t** wargv)
 
     for (int track = 0; track < info.audioStreamCount; ++track) {
         if (!dec.OpenAudio(track)) {
-            printf("  track %d: FAILED - %s\n", track, dec.LastAudioError().c_str());
+            const std::string err = dec.LastAudioError();
+            const bool cap = err.find("channels") != std::string::npos;
+            printf("  track %d: %s - %s\n", track, cap ? "REFUSED" : "FAILED",
+                   err.c_str());
             continue;
         }
 
@@ -1044,6 +1094,8 @@ int wmain(int argc, wchar_t** wargv)
     CheckTimelinePicksFrameByTime(dec, info);
     CheckSoundMatchesPicture(dec, info, requireSync);
     CheckColourMatrix(dec, info, requireColour);
+    CheckTransferUnspecified(info, requireTransferUnspecified);
+    CheckAudioChannelCap(dec, info, requireAudioCap);
 
     printf("\n%s\n", g_failures == 0 ? "ALL CHECKS PASSED"
                                      : "SOME CHECKS FAILED");

@@ -1,9 +1,11 @@
 # Builds the decoding core and runs it against generated media.
 #
 # What this cannot do, and why: the plug-in itself needs the Adobe Premiere Pro
-# C++ SDK, which may not be redistributed, so no build server can have it. What
-# is checked here is the layer that was deliberately kept free of any Adobe
-# dependency - which is most of the code and nearly all of the risk.
+# C++ SDK, which may not be redistributed, so no GitHub-hosted runner can have
+# it. plugin_test and host_test stay on a machine that already accepted Adobe's
+# terms and ran release-check.bat. What is checked here is the layer that was
+# deliberately kept free of any Adobe dependency - which is most of the code
+# and nearly all of the risk.
 #
 # The media is generated on the spot by FFmpeg from synthetic sources. No sample
 # files are committed, and none are downloaded from anywhere.
@@ -65,6 +67,7 @@ jobs:
           $inner = (Get-ChildItem ffmpeg-tmp -Directory | Select-Object -First 1).FullName
           Move-Item $inner ffmpeg
           .\ffmpeg\bin\ffmpeg.exe -hide_banner -version | Select-Object -First 1
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-ffmpeg-dlls.ps1
 
       - name: Build the core
         run: .\build-test.bat

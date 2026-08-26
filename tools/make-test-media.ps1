@@ -139,6 +139,55 @@ Make "colour_bt709.mp4" @(
     "-color_range","tv",
     "-c:v","libsvtav1","-preset","6","-crf","8")
 
+# No colour tags at all. Height 180 would guess BT.601 for the matrix; the
+# transfer must stay unspecified (ITU code 2). Inventing BT.709 here is a lie.
+Make "colour_unspecified.mp4" @(
+    "-f","lavfi","-i","color=c=0xE04030:s=320x180:r=30:d=1",
+    "-vf","format=yuv420p",
+    "-c:v","libsvtav1","-preset","6","-crf","8")
+
+# Wider than the decoder's channel cap. FFmpeg has no named 72-channel layout
+# and will not resample sine up to 72, so the WAV is written by hand and muxed.
+function MakeWidePcmWav($path, $channels, $rate, $samples) {
+    $blockAlign = $channels * 2
+    $dataBytes  = $samples * $blockAlign
+    $riffSize   = 36 + $dataBytes
+    $bytes      = New-Object byte[] (44 + $dataBytes)
+    $enc        = [Text.Encoding]::ASCII
+    [Array]::Copy($enc.GetBytes('RIFF'), 0, $bytes, 0, 4)
+    [BitConverter]::GetBytes([int]$riffSize).CopyTo($bytes, 4)
+    [Array]::Copy($enc.GetBytes('WAVE'), 0, $bytes, 8, 4)
+    [Array]::Copy($enc.GetBytes('fmt '), 0, $bytes, 12, 4)
+    [BitConverter]::GetBytes([int]16).CopyTo($bytes, 16)
+    [BitConverter]::GetBytes([int16]1).CopyTo($bytes, 20)
+    [BitConverter]::GetBytes([int16]$channels).CopyTo($bytes, 22)
+    [BitConverter]::GetBytes([int]$rate).CopyTo($bytes, 24)
+    [BitConverter]::GetBytes([int]($rate * $blockAlign)).CopyTo($bytes, 28)
+    [BitConverter]::GetBytes([int16]$blockAlign).CopyTo($bytes, 32)
+    [BitConverter]::GetBytes([int16]16).CopyTo($bytes, 34)
+    [Array]::Copy($enc.GetBytes('data'), 0, $bytes, 36, 4)
+    [BitConverter]::GetBytes([int]$dataBytes).CopyTo($bytes, 40)
+    [IO.File]::WriteAllBytes($path, $bytes)
+}
+
+$wideWav = Join-Path $OutDir "audio_65ch.wav"
+$wideMkv = Join-Path $OutDir "audio_65ch.mkv"
+if (-not (Test-Path $wideMkv)) {
+    Write-Host "  make  audio_65ch.mkv"
+    MakeWidePcmWav $wideWav 72 8000 800
+    & $FFmpeg -y -hide_banner -loglevel error `
+        -f lavfi -i "testsrc2=size=320x180:rate=30:duration=1" `
+        -i $wideWav `
+        -map 0:v -map 1:a `
+        -c:v libsvtav1 -preset 12 -crf 50 -g 30 `
+        -c:a pcm_s16le `
+        $wideMkv
+    if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed on audio_65ch.mkv" }
+    Remove-Item $wideWav -ErrorAction SilentlyContinue
+} else {
+    Write-Host "  have  audio_65ch.mkv"
+}
+
 # HDR: BT.2020 primaries with the PQ transfer curve, 10-bit.
 #
 # In Matroska rather than MP4, and that is not a preference. Written straight

@@ -59,8 +59,10 @@ $expect = [ordered]@{
     "sync.mp4"        = "accept"
     "sync_offset.mp4" = "accept"
     "colour_bt709.mp4" = "accept"
+    "colour_unspecified.mp4" = "accept"
     "hdr_pq.mkv"      = "accept"
     "audio_tracks_differ.mp4" = "accept"
+    "audio_65ch.mkv"  = "accept"
     "audio_only.mp4"  = "refuse"
     "h264.mp4"        = "refuse"
     "concat_disguise.mp4" = "refuse"
@@ -73,6 +75,8 @@ $extraArgs = @{
     "sync.mp4"        = @("--sync")
     "sync_offset.mp4" = @("--sync")
     "colour_bt709.mp4" = @("--colour")
+    "colour_unspecified.mp4" = @("--transfer-unspecified")
+    "audio_65ch.mkv"  = @("--audio-cap")
 }
 
 # A path that is not Latin, in a folder that is not Latin either, with a space

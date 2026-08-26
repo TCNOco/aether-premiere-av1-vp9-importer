@@ -165,9 +165,11 @@ matrix left, and nothing for the host to undo.
 Where the file carries no primaries, they are derived from the matrix rather
 than guessed separately from the frame height — declaring BT.601 primaries for
 a file with a BT.709 matrix is nonsense, and that is exactly what the first
-version did. The transfer curve is never guessed: the difference between
-ordinary gamma and PQ is the difference between a normal picture and a washed
-out one, and there is nothing to infer it from.
+version did. The transfer curve is never guessed: if the file does not name
+one, the ITU code for unspecified (2) is passed through. Inventing BT.709
+here used to tag HDR-without-metadata as SDR. The difference between ordinary
+gamma and PQ is the difference between a normal picture and a washed out one,
+and there is nothing to infer it from.
 
 Log curves travel the same way: Premiere knows the codes for S-Log, V-Log and
 C-Log, and if a file carries them they are passed on. That could not be tested

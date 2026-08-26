@@ -8,6 +8,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <cwctype>      // towlower — сверка пути без учёта регистра
 #include <share.h>      // _SH_DENYWR для _wfsopen
 #include <mutex>
@@ -35,6 +36,7 @@ std::wstring g_path;
 // при падении, ради которой всё затевалось, и стоит в двадцать четыре раза
 // дешевле открытия файла.
 FILE* g_file = nullptr;
+int g_unflushed = 0;
 
 // %LOCALAPPDATA%\Aether\log.txt — не в папке плагина: та лежит
 // в Program Files, а Premiere работает без прав администратора
@@ -74,6 +76,7 @@ void CloseLogFile()
         fclose(g_file);
         g_file = nullptr;
     }
+    g_unflushed = 0;
 }
 
 } // namespace
@@ -139,6 +142,7 @@ void LogReset()
         fprintf(g_file, "=== Aether, запуск %02d:%02d:%02d ===\n",
                 t.wHour, t.wMinute, t.wSecond);
         fflush(g_file);
+        g_unflushed = 0;
     }
 }
 
@@ -172,9 +176,17 @@ void Log(const char* format, ...)
 
     fputc('\n', g_file);
 
-    // Сброс на диск после каждой строки: при падении хоста журнал остаётся
-    // целым до последней записи, а это единственный инструмент разбора
-    fflush(g_file);
+    // Сброс на каждую строку стоил системного вызова в горячем пути.
+    // Ошибки и исключения — сразу: при падении хоста это последние слова.
+    // Остальное копится и уходит пачками; fclose в LogClose допишет хвост.
+    ++g_unflushed;
+    const bool urgent = std::strstr(format, "FAIL") != nullptr
+                     || std::strstr(format, "FAILED") != nullptr
+                     || std::strstr(format, "exception") != nullptr;
+    if (urgent || g_unflushed >= 16) {
+        fflush(g_file);
+        g_unflushed = 0;
+    }
 }
 
 } // namespace av1imp

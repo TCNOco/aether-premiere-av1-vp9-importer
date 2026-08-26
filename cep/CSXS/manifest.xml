@@ -54,7 +54,10 @@
             <!-- Node нужен по делу: панель читает файл настроек и запускает
                  AetherDiagnose.exe. Распаковывать видео на HTML нельзя ни
                  в каком виде, поэтому проверку делает та же программа, что
-                 и окно, а панель только показывает её ответ. -->
+                 и окно, а панель только показывает её ответ.
+                 mixed-context оставляем: без него require() в main.js не
+                 работает. Привилегия узкая — CSP в index.html режет чужие
+                 скрипты, а DOM собирается через textContent, не innerHTML. -->
             <Parameter>--enable-nodejs</Parameter>
             <Parameter>--mixed-context</Parameter>
           </CEFCommandLine>

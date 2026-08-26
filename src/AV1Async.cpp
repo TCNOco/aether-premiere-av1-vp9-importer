@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <map>
 #include <mutex>
 #include <string>
@@ -130,6 +131,7 @@ private:
 // хост занят своим.
 void WorkerLoop(AsyncState* s)
 {
+    try {
     for (;;) {
         int64_t frame = -1;
         {
@@ -156,6 +158,21 @@ void WorkerLoop(AsyncState* s)
             }
         }
         s->done.notify_all();
+    }
+    } catch (const std::exception& e) {
+        Log("async worker: exception: %s", e.what());
+        std::lock_guard<std::mutex> lock(s->mutex);
+        s->stopping = true;
+        s->busyWith = -1;
+        s->done.notify_all();
+        s->wake.notify_all();
+    } catch (...) {
+        Log("async worker: unknown exception");
+        std::lock_guard<std::mutex> lock(s->mutex);
+        s->stopping = true;
+        s->busyWith = -1;
+        s->done.notify_all();
+        s->wake.notify_all();
     }
 }
 
@@ -363,6 +380,7 @@ prMALError Close(AsyncState* s)
 // aiClose, — так сказано в SDK, и состояние под замком именно поэтому.
 PREMPLUGENTRY AsyncEntry(int selector, void* param)
 {
+    try {
     switch (selector) {
         case aiInitiateAsyncRead: {
             aiAsyncRequest* req = reinterpret_cast<aiAsyncRequest*>(param);
@@ -405,6 +423,13 @@ PREMPLUGENTRY AsyncEntry(int selector, void* param)
             // Остальное необязательно: подсказки про удобные точки перемотки
             // и про ожидание. Отказ здесь ничего не ломает.
             return aiUnsupported;
+    }
+    } catch (const std::exception& e) {
+        Log("async selector %d: exception: %s", selector, e.what());
+        return selector == aiClose ? aiNoError : aiUnknownError;
+    } catch (...) {
+        Log("async selector %d: unknown exception", selector);
+        return selector == aiClose ? aiNoError : aiUnknownError;
     }
 }
 
@@ -508,7 +533,25 @@ bool CreateAsyncImporter(ImporterLocalRecPtr source, imAsyncImporterCreationRec*
     s->height           = mi.height;
     s->ticksPerFrame    = source->ticksPerFrame;
 
-    s->worker = std::thread(WorkerLoop, s);
+    try {
+        s->worker = std::thread(WorkerLoop, s);
+    } catch (const std::exception& e) {
+        Log("async: cannot start worker - %s", e.what());
+        if (s->PPixCreatorSuiteVersion) {
+            s->BasicSuite->ReleaseSuite(kPrSDKPPixCreatorSuite, s->PPixCreatorSuiteVersion);
+        }
+        if (s->PPixCreator2SuiteVersion) {
+            s->BasicSuite->ReleaseSuite(kPrSDKPPixCreator2Suite, s->PPixCreator2SuiteVersion);
+        }
+        if (s->PPixSuiteVersion) {
+            s->BasicSuite->ReleaseSuite(kPrSDKPPixSuite, s->PPixSuiteVersion);
+        }
+        if (s->PPix2SuiteVersion) {
+            s->BasicSuite->ReleaseSuite(kPrSDKPPix2Suite, s->PPix2SuiteVersion);
+        }
+        delete s;
+        return false;
+    }
 
     rec->outAsyncEntry       = AsyncEntry;
     rec->outAsyncPrivateData = s;

@@ -371,8 +371,10 @@ build\host_test.exe    <Aether.prm> <file.mp4>        the whole import, from a f
 
 `build-test.bat` deliberately skips the SDK-dependent programs when the SDK is
 absent, which is useful for the public core CI but is not sufficient before a
-release. `release-check.bat` requires the SDK, builds and stages the actual
-plug-in with its FFmpeg DLLs, runs the core checks, verifies the `.prm`, and
+release. GitHub cannot run `plugin_test` / `host_test`: Adobe's SDK is not ours
+to put on a hosted runner. That gate is `release-check.bat` on a machine that
+already has the SDK. It requires the SDK, builds and stages the actual
+plug-in with its FFmpeg DLLs (hashed against `tools/ffmpeg-dll.sha256`), runs the core checks, verifies the `.prm`, and
 drives representative files through all fake-host profiles. Any skipped layer
 is a failure.
 

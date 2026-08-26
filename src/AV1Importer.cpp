@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <iterator>     // std::size — длина буфера пути берётся из него самого
 #include <mutex>
 #include <string>
@@ -765,6 +766,10 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
         fileInfo->audInfo.sampleRate  = static_cast<float>(mi.audioSampleRate);
         fileInfo->audInfo.sampleType  = kPrAudioSampleType_32BitFloat;
         fileInfo->audDuration         = mi.audioSampleCount;
+    } else if (audioTracks > 0) {
+        av1imp::Log("imGetInfo8: stream %d has audio, but it is not usable: %s",
+                    fileInfo->streamIdx,
+                    ldata->decoder->LastAudioError().c_str());
     }
 
     if (!fileInfo->hasVideo) {
@@ -1299,6 +1304,12 @@ static prMALError AV1GetIndColorSpace(imStdParms* stdParms, csSDK_size_t index,
     sei.colorPrimariesCode        = mi.colourPrimaries;
     sei.transferCharacteristicCode = mi.colourTransfer;
 
+    // ITU «unspecified» = 2. Раньше сюда подставляли BT.709, и хост
+    // получал чужую кривую. Честнее отдать «не указано».
+    if (mi.colourTransfer == 2) {
+        av1imp::Log("imGetIndColorSpace: transfer is unspecified in the file - not guessing BT.709");
+    }
+
     // Описание обязано совпадать с тем, что мы на самом деле кладём в буфер.
     // Отдавая плоскости, мы не переводим цвет — значит матрица никуда не делась
     // и размах остался тем, что в файле. Отдавая RGB, наоборот: матрица уже
@@ -1458,8 +1469,8 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
 // Точка входа
 // ---------------------------------------------------------------------------
 
-PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
-                                     void* param1, void* param2)
+static prMALError DispatchImport(csSDK_int32 selector, imStdParms* stdParms,
+                                 void* param1, void* param2)
 {
     // Журнал и библиотеки ffmpeg готовятся здесь, а не при загрузке DLL:
     // из DllMain грузить библиотеки нельзя, там держится замок загрузчика.
@@ -1570,9 +1581,40 @@ PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
             break;
     }
 
-    // Пишем ВСЕ запросы, включая отвергнутые. Первая версия журнала их прятала
-    // ради чистоты — и спрятала как раз то, что нужно: отказ на нужном запросе
+    // Кадровые и звуковые запросы идут тысячами; отказ на них всё равно
+    // пишем. Остальное — включая отвергнутое: отказ на нужном запросе
     // выглядит для Premiere так же, как отсутствие плагина.
-    av1imp::Log("  selector %s -> %d", av1imp::SelectorName(selector), result);
+    const bool hot = selector == imGetSourceVideo
+                  || selector == imImportAudio7
+                  || selector == 65   // imSelectClipFrameDescriptor
+                  || selector == 83;  // imSelectClipFrameDescriptor2
+    if (!hot || result != malNoError) {
+        av1imp::Log("  selector %s -> %d", av1imp::SelectorName(selector), result);
+    }
     return result;
+}
+
+PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
+                                     void* param1, void* param2)
+{
+    // Исключение через C ABI Adobe = terminate всего Premiere.
+    try {
+        return DispatchImport(selector, stdParms, param1, param2);
+    } catch (const std::exception& e) {
+        av1imp::Log("xImportEntry %s: exception: %s",
+                    av1imp::SelectorName(selector), e.what());
+        if (selector == imShutdown) {
+            av1imp::LogClose();
+            return malNoError;
+        }
+        return imOtherErr;
+    } catch (...) {
+        av1imp::Log("xImportEntry %s: unknown exception",
+                    av1imp::SelectorName(selector));
+        if (selector == imShutdown) {
+            av1imp::LogClose();
+            return malNoError;
+        }
+        return imOtherErr;
+    }
 }

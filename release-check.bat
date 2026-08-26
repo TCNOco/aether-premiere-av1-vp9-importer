@@ -21,6 +21,8 @@ if not exist "ffmpeg\bin\ffmpeg.exe" (
     echo FAIL: FFmpeg shared build is required in ffmpeg\.
     exit /b 1
 )
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-ffmpeg-dlls.ps1
+if errorlevel 1 exit /b 1
 
 echo [1/6] Building the Release plug-in and diagnostics
 call build.bat

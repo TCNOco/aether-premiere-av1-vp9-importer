@@ -17,6 +17,16 @@ const os   = require('os');
 const { execFile } = require('child_process');
 const { updateDecodeMode, writeFileAtomic } = require('./settings');
 
+function system32(name) {
+    const root = process.env.SystemRoot || 'C:\\Windows';
+    return path.join(root, 'System32', name);
+}
+
+function powershellExe() {
+    const root = process.env.SystemRoot || 'C:\\Windows';
+    return path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+}
+
 // ---------------------------------------------------------------------------
 // Где живёт плагин
 // ---------------------------------------------------------------------------
@@ -39,7 +49,7 @@ async function mediaCoreFromRegistry() {
     for (const key of keys) {
         try {
             const out = await execText(
-                'reg', ['query', key, '/v', 'CommonPluginInstallPath']);
+                system32('reg.exe'), ['query', key, '/v', 'CommonPluginInstallPath']);
             const m = out.match(/CommonPluginInstallPath\s+REG_\w+\s+(.+)/);
             if (m) return m[1].trim();
         } catch (e) { /* ключа нет — пробуем следующий */ }
@@ -397,7 +407,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // в PowerShell-команду: кавычка в имени папки не должна менять скрипт.
     try {
         const script = '(Get-Item -LiteralPath $args[0]).VersionInfo.ProductVersion';
-        const out = (await execText('powershell', [
+        const out = (await execText(powershellExe(), [
             '-NoProfile', '-Command', script, path.join(PLUGIN_DIR, 'Aether.prm'),
         ])).trim();
         version.textContent = out ? 'версия ' + out : 'версия неизвестна';

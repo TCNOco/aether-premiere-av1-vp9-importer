@@ -18,6 +18,7 @@ extern "C" {
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <emmintrin.h>
@@ -412,9 +413,11 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
     // Кривая переноса: только то, что записано. Угадать её нельзя — разница
     // между обычной гаммой и PQ это разница между нормальной картинкой и
     // выцветшей, а по разрешению или матрице такое не выводится.
-    info_.colourTransfer = (st->codecpar->color_trc != AVCOL_TRC_UNSPECIFIED)
-                           ? st->codecpar->color_trc
-                           : AVCOL_TRC_BT709;
+    //
+    // Не указано — так и оставляем (ITU / AVCOL_TRC_UNSPECIFIED = 2).
+    // Подставлять BT.709 здесь значит солгать хосту: файл без метки приедет
+    // как SDR 709, даже если по факту PQ или лог.
+    info_.colourTransfer = st->codecpar->color_trc;
 
     info_.fullRange = (st->codecpar->color_range == AVCOL_RANGE_JPEG);
 
@@ -763,14 +766,12 @@ size_t Decoder::Budget() const {
     if (kCeiling == 0) return cacheBudget_;      // потолок отключён намеренно
 
     const int live = videoDecoders_.load(std::memory_order_relaxed);
-    size_t share = kCeiling / (live > 0 ? (size_t)live : 1u);
+    const size_t share = kCeiling / (live > 0 ? (size_t)live : 1u);
 
-    // Нижняя граница: кэш меньше нескольких кадров бесполезен — он не покроет
-    // даже один шаг назад, зато будет тратить время на вытеснение.
-    const size_t bytesPerFrame = (size_t)info_.width * info_.height * 3 / 2;
-    const size_t floor = bytesPerFrame * 4;
-    if (share < floor) share = floor;
-
+    // Пол «четыре кадра» раньше поднимал долю сверх потолка: на 8K это
+    // около 200 МБ на клип, и десять клипов снова уезжали в гигабайты —
+    // ровно то, ради чего общий предел и заводили. Лучше кэш из одного
+    // кадра, чем снова без потолка.
     return (cacheBudget_ < share) ? cacheBudget_ : share;
 }
 
@@ -1678,8 +1679,20 @@ bool Decoder::OpenAudio(int ordinal) {
         return false;
     }
 
-    info_.audioChannels    = audioCodec_->ch_layout.nb_channels;
-    info_.audioSampleRate  = audioCodec_->sample_rate;
+    const int channels = audioCodec_->ch_layout.nb_channels;
+    const int rate     = audioCodec_->sample_rate;
+    if (channels <= 0 || channels > kMaxAudioChannels || rate <= 0) {
+        char msg[160];
+        snprintf(msg, sizeof(msg),
+                 "audio layout is not usable (%d channels at %d Hz; more than %d channels is refused)",
+                 channels, rate, kMaxAudioChannels);
+        SetAudioError(msg);
+        CloseAudioLocked();
+        return false;
+    }
+
+    info_.audioChannels    = channels;
+    info_.audioSampleRate  = rate;
 
     // Длину берём из разобранного контекста, а из своего — только если того
     // почему-то нет. Разница между ними невелика (около 25 мс на проверенной
@@ -1741,7 +1754,8 @@ bool Decoder::DecodeMoreAudio() {
             // означает падение всего Premiere с нарушением доступа, а не
             // ошибку импорта. Цена проверки — одно сравнение на кадр.
             const int channels = std::min<int>({ info_.audioChannels,
-                                                 (int)pending_.size(), 64 });
+                                                 (int)pending_.size(),
+                                                 kMaxAudioChannels });
             if (channels <= 0) {
                 SetAudioError("audio buffers are not ready");
                 return false;
@@ -1749,7 +1763,7 @@ bool Decoder::DecodeMoreAudio() {
 
             for (int c = 0; c < channels; ++c) pending_[c].resize(n);
 
-            float* out[64] = {};
+            float* out[kMaxAudioChannels] = {};
             for (int c = 0; c < channels; ++c) out[c] = pending_[c].data();
 
             const int got = swr_convert(swr_, reinterpret_cast<uint8_t**>(out), n,
@@ -1821,7 +1835,7 @@ bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* d
     // Столько каналов, сколько объявлено хосту: буферы под них выделил он,
     // и меньше писать нельзя — незаполненный канал останется мусором.
     int channels = info_.audioChannels;
-    if (channels <= 0 || sampleCount <= 0) {
+    if (channels <= 0 || channels > kMaxAudioChannels || sampleCount <= 0) {
         SetAudioError("audio request makes no sense");
         return false;
     }
@@ -1848,7 +1862,8 @@ bool Decoder::GetAudio(int64_t startSample, int32_t sampleCount, float* const* d
 
     // А вот ЧИТАТЬ можно только оттуда, где есть буферы. Разойтись эти два
     // числа не должны, но если разойдутся — пусть будет тишина, а не падение.
-    const int readable = std::min<int>(channels, (int)pending_.size());
+    const int readable = std::min<int>({ channels, (int)pending_.size(),
+                                         kMaxAudioChannels });
 
     // Назад или далеко вперёд — перематываем. Небольшой прыжок вперёд дешевле
     // домотать декодированием, как и с видео.
