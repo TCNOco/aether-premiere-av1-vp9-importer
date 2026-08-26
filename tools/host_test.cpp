@@ -32,6 +32,7 @@
 #include "PrSDKImport.h"
 #include "PrSDKMALErrors.h"
 #include "PrSDKPPixCreatorSuite.h"
+#include "PrSDKPPixCreator2Suite.h"
 #include "PrSDKPPixCacheSuite.h"
 #include "PrSDKPPixSuite.h"
 #include "PrSDKPPix2Suite.h"
@@ -224,15 +225,10 @@ prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pix
     FakeFrame* f = new FakeFrame();
     f->pixPtr = &f->pix;
     memset(&f->pix, 0, sizeof(f->pix));
-    f->pix.bounds       = *rect;
-    f->pix.rowbytes     = width * bytesPerPixel;
+    f->pix.bounds = *rect;
     f->pix.bitsperpixel = 32;
 
-    size_t bytes = static_cast<size_t>(f->pix.rowbytes) * height;
-
-    // Родной YUV лежит иначе: яркость целиком, за ней две плоскости цветности
-    // вполовину меньше по каждой стороне. Всего полтора байта на пиксель против
-    // четырёх — и это, помимо скорости, вторая выгода от такой выдачи.
+    size_t bytes = 0;
     if (IsPlanarYUV(pixelFormat)) {
         const int chromaW = (width + 1) / 2;
         const int chromaH = (height + 1) / 2;
@@ -241,12 +237,9 @@ prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pix
         f->planeH  = height;
         f->offsetU = static_cast<size_t>(width) * height;
         f->offsetV = f->offsetU + static_cast<size_t>(chromaW) * chromaH;
-        bytes      = f->offsetV + static_cast<size_t>(chromaW) * chromaH;
         f->pix.rowbytes = width;
+        bytes = f->offsetV + static_cast<size_t>(chromaW) * chromaH;
     }
-    // Десять бит: ДВЕ плоскости, обе из uint16. Шаг у обеих одинаковый —
-    // цветность вдвое уже, но в ней по два значения на точку.
-    //
     // Ровно та раскладка, которую плагин вычисляет сам: адресов второй
     // плоскости в наборе PPix2 нет вовсе. Здесь он поэтому и проверяется —
     // ошибись он в смещении, он запишет цветность поверх яркости, и проверка
@@ -259,6 +252,9 @@ prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pix
         f->pix.rowbytes = width * (int)sizeof(uint16_t);
         bytes = static_cast<size_t>(f->pix.rowbytes) * height +
                 static_cast<size_t>(f->pix.rowbytes) * chromaH;
+    } else {
+        f->pix.rowbytes = width * bytesPerPixel;
+        bytes = static_cast<size_t>(f->pix.rowbytes) * height;
     }
 
     // Заполняем узнаваемым мусором: так видно, что плагин действительно записал
@@ -279,6 +275,34 @@ prSuiteError CreatePPix(PPixHand* outHand, PrPPixBufferAccess, PrPixelFormat pix
         g_frames.push_back(f);
     }
     *outHand = reinterpret_cast<PPixHand>(f);
+    return suiteError_NoError;
+}
+
+// CreateCustomPPix — тот путь, которым плагин теперь берёт P010. Размер
+// приходит снаружи; мы его уважаем и выставляем шаг строки как у biplanar.
+prSuiteError CreateCustomPPix(PPixHand* outHand, PrPPixBufferAccess,
+                              PrPixelFormat pixelFormat,
+                              int width, int height,
+                              int /*parN*/, int /*parD*/,
+                              int dataBufferSize)
+{
+    if (!outHand || width <= 0 || height <= 0 || dataBufferSize <= 0) {
+        return suiteError_Fail;
+    }
+    prRect rect;
+    prSetRect(&rect, 0, 0, width, height);
+
+    // Переиспользуем ту же раскладку, что и CreatePPix для biplanar, но
+    // удлиняем буфер до запрошенного размера (плагин даёт запас выравнивания).
+    const prSuiteError err = CreatePPix(outHand, PrPPixBufferAccess_ReadWrite,
+                                        pixelFormat, &rect);
+    if (err != suiteError_NoError || !*outHand) return err;
+
+    FakeFrame* f = reinterpret_cast<FakeFrame*>(*outHand);
+    if ((int)f->data.size() < dataBufferSize) {
+        f->data.resize(static_cast<size_t>(dataBufferSize), 0xCD);
+        f->pix.pix = f->data.data();
+    }
     return suiteError_NoError;
 }
 
@@ -383,12 +407,13 @@ prSuiteError GetAppInfo(int selector, void* out)
     return suiteError_Fail;
 }
 
-PrSDKPPixCreatorSuite g_creatorSuite = {};
-PrSDKPPixSuite        g_ppixSuite    = {};
-PrSDKPPixCacheSuite   g_cacheSuite   = {};
-PrSDKTimeSuite        g_timeSuite    = {};
-PrSDKAppInfoSuite     g_appInfoSuite = {};
-PrSDKPPix2Suite       g_ppix2Suite   = {};
+PrSDKPPixCreatorSuite  g_creatorSuite  = {};
+PrSDKPPixCreator2Suite g_creator2Suite = {};
+PrSDKPPixSuite         g_ppixSuite     = {};
+PrSDKPPixCacheSuite    g_cacheSuite    = {};
+PrSDKTimeSuite         g_timeSuite     = {};
+PrSDKAppInfoSuite      g_appInfoSuite  = {};
+PrSDKPPix2Suite        g_ppix2Suite    = {};
 
 // ---------------------------------------------------------------------------
 // SPBasicSuite — здесь и живёт вся имитация возраста хоста
@@ -402,6 +427,7 @@ SPErr AcquireSuite(const char* name, int version, const void** suite)
     if (version > g_host->maxSuiteVersion) return kSPBadParameterError;
 
     if (strcmp(name, kPrSDKPPixCreatorSuite) == 0) { *suite = &g_creatorSuite; return kSPNoError; }
+    if (strcmp(name, kPrSDKPPixCreator2Suite) == 0) { *suite = &g_creator2Suite; return kSPNoError; }
     if (strcmp(name, kPrSDKPPixSuite) == 0)        { *suite = &g_ppixSuite;    return kSPNoError; }
     if (strcmp(name, kPrSDKTimeSuite) == 0)        { *suite = &g_timeSuite;    return kSPNoError; }
     if (strcmp(name, kPrSDKAppInfoSuite) == 0)     { *suite = &g_appInfoSuite; return kSPNoError; }
@@ -459,6 +485,7 @@ piSuites        g_piSuites = {};
 void BuildHostTables()
 {
     g_creatorSuite.CreatePPix = CreatePPix;
+    g_creator2Suite.CreateCustomPPix = CreateCustomPPix;
 
     g_ppixSuite.GetPixels   = GetPixels;
     g_ppixSuite.GetRowBytes = GetRowBytes;

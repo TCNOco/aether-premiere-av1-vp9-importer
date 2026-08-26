@@ -21,6 +21,7 @@
 #include "PrSDKImport.h"
 #include "PrSDKMALErrors.h"
 #include "PrSDKPPixCreatorSuite.h"
+#include "PrSDKPPixCreator2Suite.h"
 #include "PrSDKPPixCacheSuite.h"
 #include "PrSDKPPixSuite.h"
 #include "PrSDKPPix2Suite.h"
@@ -90,6 +91,7 @@ typedef struct
     PlugMemoryFuncsPtr      memFuncs;
     SPBasicSuite*           BasicSuite;
     PrSDKPPixCreatorSuite*  PPixCreatorSuite;
+    PrSDKPPixCreator2Suite* PPixCreator2Suite; // CreateCustomPPix для P010
     PrSDKPPixCacheSuite*    PPixCacheSuite;
     PrSDKPPixSuite*         PPixSuite;
     PrSDKPPix2Suite*        PPix2Suite;     // адреса плоскостей; может не быть
@@ -105,7 +107,7 @@ typedef struct
     // мы просто не предлагаем и идём прежним путём.
     csSDK_int32             PPix2SuiteVersion;
 
-    // И для остальных трёх — не ради перебора версий, а ради учёта.
+    // И для остальных — не ради перебора версий, а ради учёта.
     //
     // Ноль здесь значит «хост набор НЕ выдал». Раньше результат AcquireSuite
     // не смотрели вовсе, а ReleaseSuite звали безусловно: на хосте, который
@@ -113,6 +115,7 @@ typedef struct
     // чужой, и уронить его ниже нуля — испортить набор всем остальным
     // плагинам в процессе, а не себе.
     csSDK_int32             PPixCreatorSuiteVersion;
+    csSDK_int32             PPixCreator2SuiteVersion;
     csSDK_int32             PPixSuiteVersion;
     csSDK_int32             TimeSuiteVersion;
 } ImporterLocalRec, *ImporterLocalRecPtr, **ImporterLocalRecH;
@@ -180,7 +183,22 @@ bool CanProduce(PrPixelFormat f);
 //
 // Возвращает индекс выбранного или -1, если ничего из списка мы не умеем.
 // Список короткий (у Premiere это единицы), перебор стоит ничего.
-int PickFrameFormat(const imFrameFormat* formats, int count);
+// startFrom — с какого индекса смотреть дальше (после отказа P010).
+int PickFrameFormat(const imFrameFormat* formats, int count, int startFrom = 0);
+
+// Хост не дал буфер под P010 — до перезапуска процесса больше не предлагаем.
+void MarkP010Unavailable();
+bool IsP010Unavailable();
+
+// Создать буфер кадра. Для P010 пробуем несколько способов подряд и
+// пишем в журнал код отказа — иначе снова гадаем вслепую.
+prMALError CreateVideoPPix(PrSDKPPixCreatorSuite* creator,
+                           PrSDKPPixCreator2Suite* creator2,
+                           PrSDKPPixSuite* ppixSuite,
+                           PrSDKPPix2Suite* ppix2Suite,
+                           PPixHand* outFrame,
+                           PrPixelFormat pixelFormat,
+                           int width, int height);
 
 // Кадр, который CreatePPix уже выдал, а записать в него не вышло.
 // Хост на ошибке не обязан забирать outFrame — без Dispose это утечка

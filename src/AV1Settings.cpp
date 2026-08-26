@@ -28,22 +28,10 @@ bool LooksDisabled(const wchar_t* v)
            _wcsicmp(v, L"false") == 0 || _wcsicmp(v, L"no") == 0;
 }
 
-bool LooksEnabled(const wchar_t* v)
-{
-    return _wcsicmp(v, L"1") == 0 || _wcsicmp(v, L"on") == 0 ||
-           _wcsicmp(v, L"true") == 0 || _wcsicmp(v, L"yes") == 0;
-}
-
 bool LooksDisabledNarrow(const char* v)
 {
     return _stricmp(v, "off") == 0 || _stricmp(v, "0") == 0 ||
            _stricmp(v, "false") == 0 || _stricmp(v, "no") == 0;
-}
-
-bool LooksEnabledNarrow(const char* v)
-{
-    return _stricmp(v, "on") == 0 || _stricmp(v, "1") == 0 ||
-           _stricmp(v, "true") == 0 || _stricmp(v, "yes") == 0;
 }
 
 // Файл читается один раз на процесс: Premiere зовёт YuvEnabled с каждым
@@ -316,52 +304,11 @@ bool YuvEnabled()
     return EnabledUnlessTurnedOff(L"AETHER_YUV", "yuv");
 }
 
-namespace {
-
-// Зеркало EnabledUnlessTurnedOff: выключено, пока явно не включили.
-//
-// Отдельная функция, а не флаг у прежней, потому что различаются они не
-// умолчанием, а СПИСКОМ СЛОВ: «выключено, пока не сказали off» и «включено,
-// только если сказали on» — это разные вопросы к одной и той же строке.
-// Свести их одним параметром значило бы гадать, что означает «yes» в файле,
-// где ждали «on».
-bool DisabledUnlessTurnedOn(const wchar_t* envName, const char* key)
-{
-    wchar_t env[64] = {};
-    if (GetEnvironmentVariableW(envName, env, 64) > 0) {
-        return LooksEnabled(env);
-    }
-
-    const std::string text = LoadIniText();
-    const size_t keyLen = strlen(key);
-    bool enabled = false;
-    const char* cursor = text.c_str();
-    while (*cursor) {
-        const char* lineStart = cursor;
-        while (*cursor && *cursor != '\n' && *cursor != '\r') ++cursor;
-        char line[256];
-        size_t n = static_cast<size_t>(cursor - lineStart);
-        if (n >= sizeof(line)) n = sizeof(line) - 1;
-        memcpy(line, lineStart, n);
-        line[n] = '\0';
-        while (*cursor == '\n' || *cursor == '\r') ++cursor;
-
-        char* p = line;
-        while (*p == ' ' || *p == '\t') ++p;
-        char value[32] = {};
-        if (!ReadIniValue(p, key, keyLen, value, (unsigned)sizeof(value))) continue;
-        enabled = LooksEnabledNarrow(value);
-    }
-    return enabled;
-}
-
-} // namespace
-
-// Десятибитная выдача плоскостями. Единственный выключатель, у которого
-// умолчание «выключено», и причина измерена, а не предположена — см. заголовок.
+// Десятибитная выдача плоскостями. По умолчанию включена: CreateCustomPPix
+// даёт плоский буфер, а при отказе хоста тот же запрос уходит в BGRA16.
 bool Yuv10Enabled()
 {
-    return DisabledUnlessTurnedOn(L"AETHER_YUV10", "yuv10");
+    return EnabledUnlessTurnedOff(L"AETHER_YUV10", "yuv10");
 }
 
 } // namespace av1imp

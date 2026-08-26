@@ -15,7 +15,9 @@
 #include "ImporterMath.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <iterator>     // std::size — длина буфера пути берётся из него самого
 #include <mutex>
 #include <string>
@@ -40,6 +42,240 @@ std::string Utf8FromUtf16(const prUTF16Char* path)
                         &out[0], need, nullptr, nullptr);
     return out;
 }
+
+// Хост один раз отказал в буфере P010 — до конца процесса не дразним его этим
+// форматом снова (иначе каждый кадр отказывает и предпросмотр замирает).
+std::atomic<bool> g_p010Unavailable{false};
+
+// Удачный рецепт создания P010: после первого кадра не гоняем весь перебор
+// и не спамим журнал на каждый кадр скраба.
+std::atomic<int> g_p010Recipe{-1};   // -1 неизвестно, >=0 индекс в таблице попыток
+std::atomic<int> g_p010ProbeLogs{0}; // сколько подробных строк уже написали
+
+} // namespace
+
+void av1imp::MarkP010Unavailable()
+{
+    bool expected = false;
+    if (g_p010Unavailable.compare_exchange_strong(expected, true)) {
+        av1imp::Log("10-bit planes: host refused a writable buffer - falling back to BGRA 16u for this session");
+    }
+}
+
+bool av1imp::IsP010Unavailable()
+{
+    return g_p010Unavailable.load(std::memory_order_relaxed);
+}
+
+static const char* AccessName(PrPPixBufferAccess a)
+{
+    switch (a) {
+        case PrPPixBufferAccess_ReadOnly:  return "RO";
+        case PrPPixBufferAccess_WriteOnly: return "WO";
+        case PrPPixBufferAccess_ReadWrite: return "RW";
+        default: return "?";
+    }
+}
+
+// Пробуем достать указатель всеми режимами доступа.
+//
+// На Premiere 26 CreatePPix для P010 отдаёт живой buf и нормальный size,
+// но GetRowBytes врёт нулём. Раньше мы из-за row==0 сами выкидывали кадр,
+// хотя писать было куда. Шаг тогда берём как width*2 (P010), сверяя с size.
+static bool ProbeP010Pixels(PrSDKPPixSuite* ppix, PrSDKPPix2Suite* ppix2,
+                            PPixHand frame, int width, int height,
+                            const char* howCreated,
+                            csSDK_int32* outRowBytes,
+                            bool verbose)
+{
+    if (!ppix || !frame) return false;
+    if (outRowBytes) *outRowBytes = 0;
+
+    size_t size = 0;
+    if (ppix2 && ppix2->GetSize) ppix2->GetSize(frame, &size);
+
+    csSDK_int32 rowBytes = 0;
+    ppix->GetRowBytes(frame, &rowBytes);
+
+    const PrPPixBufferAccess modes[] = {
+        PrPPixBufferAccess_WriteOnly,
+        PrPPixBufferAccess_ReadWrite,
+        PrPPixBufferAccess_ReadOnly,
+    };
+    for (PrPPixBufferAccess mode : modes) {
+        char* buffer = nullptr;
+        const prSuiteError err = ppix->GetPixels(frame, mode, &buffer);
+        if (verbose) {
+            av1imp::Log("10-bit planes: create=%s GetPixels(%s) err=0x%08X buf=%p "
+                        "row=%d size=%zu %dx%d",
+                        howCreated, AccessName(mode), (unsigned)err, (void*)buffer,
+                        (int)rowBytes, size, width, height);
+        }
+        if (err != suiteError_NoError || !buffer) continue;
+
+        csSDK_int32 stride = rowBytes;
+        if (stride <= 0 && width > 0) {
+            const int guess = width * (int)sizeof(uint16_t);
+            const size_t chromaH = ((size_t)height + 1) / 2;
+            const size_t need = (size_t)guess * (size_t)height + (size_t)guess * chromaH;
+            if (size == 0 || size >= need) {
+                stride = guess;
+                if (verbose) {
+                    av1imp::Log("10-bit planes: GetRowBytes was %d, using stride %d from width "
+                                "(size %zu, need %zu)",
+                                (int)rowBytes, stride, size, need);
+                }
+            }
+        }
+        if (stride <= 0) continue;
+
+        if (size > 0) {
+            const size_t chromaH = ((size_t)height + 1) / 2;
+            const size_t need = (size_t)stride * (size_t)height + (size_t)stride * chromaH;
+            if (size < need) {
+                if (verbose) {
+                    av1imp::Log("10-bit planes: size %zu < need %zu at stride %d - skip",
+                                size, need, (int)stride);
+                }
+                continue;
+            }
+        }
+
+        if (outRowBytes) *outRowBytes = stride;
+        return true;
+    }
+    return false;
+}
+
+// Шаг строки, которым реально писать в P010-кадр: либо то, что сказал хост,
+// либо width*2, если он врёт нулём при живом буфере.
+static csSDK_int32 ResolveP010Stride(PrSDKPPixSuite* ppix, PrSDKPPix2Suite* ppix2,
+                                     PPixHand frame, int width, int height,
+                                     csSDK_int32 reportedRow)
+{
+    if (reportedRow > 0) return reportedRow;
+    if (width <= 0) return 0;
+
+    size_t size = 0;
+    if (ppix2 && ppix2->GetSize) ppix2->GetSize(frame, &size);
+
+    const int guess = width * (int)sizeof(uint16_t);
+    const size_t chromaH = ((size_t)height + 1) / 2;
+    const size_t need = (size_t)guess * (size_t)height + (size_t)guess * chromaH;
+    if (size == 0 || size >= need) return guess;
+    return 0;
+}
+
+prMALError av1imp::CreateVideoPPix(PrSDKPPixCreatorSuite* creator,
+                                   PrSDKPPixCreator2Suite* creator2,
+                                   PrSDKPPixSuite* ppixSuite,
+                                   PrSDKPPix2Suite* ppix2Suite,
+                                   PPixHand* outFrame,
+                                   PrPixelFormat pixelFormat,
+                                   int width, int height)
+{
+    if (!outFrame || width <= 0 || height <= 0) return imOtherErr;
+    *outFrame = nullptr;
+
+    if (!av1imp::IsNativeP010(pixelFormat)) {
+        if (!creator || !creator->CreatePPix) return imOtherErr;
+        prRect rect;
+        prSetRect(&rect, 0, 0, width, height);
+        const prSuiteError err = creator->CreatePPix(outFrame, PrPPixBufferAccess_ReadWrite,
+                                                     pixelFormat, &rect);
+        return (err == suiteError_NoError && *outFrame) ? malNoError : imOtherErr;
+    }
+
+    // --- P010 ----------------------------------------------------------------
+    // CreateCustomPPix — только для своих opaque FourCC (InvalidParms на BIPLANAR).
+    // Штатный CreatePPix + WriteOnly работает; GetRowBytes на 26 врёт нулём.
+
+    struct Recipe {
+        const char* tag;
+        int which; // 0 C2 WO, 1 C2 RW, 2 C1 WO, 3 C1 RW
+    };
+    static const Recipe kRecipes[] = {
+        { "C2.CreatePPix(WO)", 0 },
+        { "C2.CreatePPix(RW)", 1 },
+        { "C1.CreatePPix(WO)", 2 },
+        { "C1.CreatePPix(RW)", 3 },
+    };
+
+    auto runRecipe = [&](int which) -> prSuiteError {
+        *outFrame = nullptr;
+        switch (which) {
+            case 0:
+                if (!creator2 || !creator2->CreatePPix) return suiteError_NotImplemented;
+                return creator2->CreatePPix(outFrame, PrPPixBufferAccess_WriteOnly,
+                                            pixelFormat, width, height, false, 0, 1, 1);
+            case 1:
+                if (!creator2 || !creator2->CreatePPix) return suiteError_NotImplemented;
+                return creator2->CreatePPix(outFrame, PrPPixBufferAccess_ReadWrite,
+                                            pixelFormat, width, height, false, 0, 1, 1);
+            case 2: {
+                if (!creator || !creator->CreatePPix) return suiteError_NotImplemented;
+                prRect rect; prSetRect(&rect, 0, 0, width, height);
+                return creator->CreatePPix(outFrame, PrPPixBufferAccess_WriteOnly,
+                                           pixelFormat, &rect);
+            }
+            case 3: {
+                if (!creator || !creator->CreatePPix) return suiteError_NotImplemented;
+                prRect rect; prSetRect(&rect, 0, 0, width, height);
+                return creator->CreatePPix(outFrame, PrPPixBufferAccess_ReadWrite,
+                                           pixelFormat, &rect);
+            }
+            default:
+                return suiteError_NotImplemented;
+        }
+    };
+
+    const bool verbose = g_p010ProbeLogs.load(std::memory_order_relaxed) < 3;
+    const int known = g_p010Recipe.load(std::memory_order_relaxed);
+
+    auto tryOne = [&](int index) -> bool {
+        const Recipe& r = kRecipes[index];
+        const prSuiteError err = runRecipe(r.which);
+        if (err != suiteError_NoError || !*outFrame) {
+            if (verbose) {
+                av1imp::Log("10-bit planes: %s -> err=0x%08X hand=%p",
+                            r.tag, (unsigned)err, (void*)*outFrame);
+            }
+            *outFrame = nullptr;
+            return false;
+        }
+        csSDK_int32 stride = 0;
+        if (!ProbeP010Pixels(ppixSuite, ppix2Suite, *outFrame, width, height,
+                             r.tag, &stride, verbose)) {
+            if (ppixSuite) ppixSuite->Dispose(*outFrame);
+            *outFrame = nullptr;
+            return false;
+        }
+        if (verbose) {
+            av1imp::Log("10-bit planes: WRITABLE via %s (stride %d)", r.tag, (int)stride);
+            g_p010ProbeLogs.fetch_add(1, std::memory_order_relaxed);
+        }
+        g_p010Recipe.store(index, std::memory_order_relaxed);
+        return true;
+    };
+
+    if (known >= 0 && known < (int)(sizeof(kRecipes) / sizeof(kRecipes[0]))) {
+        if (tryOne(known)) return malNoError;
+        g_p010Recipe.store(-1, std::memory_order_relaxed);
+    }
+
+    for (int i = 0; i < (int)(sizeof(kRecipes) / sizeof(kRecipes[0])); ++i) {
+        if (tryOne(i)) return malNoError;
+    }
+
+    if (verbose) {
+        av1imp::Log("10-bit planes: all create paths failed for %dx%d fmt=0x%08X",
+                    width, height, (unsigned)pixelFormat);
+        g_p010ProbeLogs.fetch_add(1, std::memory_order_relaxed);
+    }
+    return imOtherErr;
+}
+
+namespace {
 
 // Возвращает false, если путь не поместился целиком.
 //
@@ -356,6 +592,9 @@ static prMALError AV1CloseFile(imStdParms* stdParms, imFileRef* fileRef, void* p
         if (ldata->PPixCreatorSuiteVersion) {
             ldata->BasicSuite->ReleaseSuite(kPrSDKPPixCreatorSuite, ldata->PPixCreatorSuiteVersion);
         }
+        if (ldata->PPixCreator2SuiteVersion) {
+            ldata->BasicSuite->ReleaseSuite(kPrSDKPPixCreator2Suite, ldata->PPixCreator2SuiteVersion);
+        }
         if (ldata->PPixCacheSuiteVersion) {
             ldata->BasicSuite->ReleaseSuite(kPrSDKPPixCacheSuite, ldata->PPixCacheSuiteVersion);
         }
@@ -369,15 +608,17 @@ static prMALError AV1CloseFile(imStdParms* stdParms, imFileRef* fileRef, void* p
             ldata->BasicSuite->ReleaseSuite(kPrSDKTimeSuite, ldata->TimeSuiteVersion);
         }
         ldata->PPixCreatorSuite = nullptr;
+        ldata->PPixCreator2Suite = nullptr;
         ldata->PPixSuite        = nullptr;
         ldata->PPix2Suite       = nullptr;
         ldata->PPixCacheSuite   = nullptr;
         ldata->TimeSuite        = nullptr;
-        ldata->PPixCreatorSuiteVersion = 0;
-        ldata->PPixSuiteVersion        = 0;
-        ldata->TimeSuiteVersion        = 0;
-        ldata->PPixCacheSuiteVersion   = 0;
-        ldata->PPix2SuiteVersion       = 0;
+        ldata->PPixCreatorSuiteVersion  = 0;
+        ldata->PPixCreator2SuiteVersion = 0;
+        ldata->PPixSuiteVersion         = 0;
+        ldata->TimeSuiteVersion         = 0;
+        ldata->PPixCacheSuiteVersion    = 0;
+        ldata->PPix2SuiteVersion        = 0;
         ldata->BasicSuite = nullptr;
     }
 
@@ -451,6 +692,13 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
                                              (const void**)&ldata->PPixCreatorSuite) == kSPNoError
              && ldata->PPixCreatorSuite) ? kPrSDKPPixCreatorSuiteVersion : 0;
 
+        // CreateCustomPPix — единственный способ получить ПИСАЕМЫЙ буфер под
+        // P010 на Premiere 26. Без этого набора десятибитный родной путь
+        // предлагать нельзя: обычный CreatePPix формат принимает и молчит.
+        ldata->PPixCreator2SuiteVersion =
+            AcquireNewestSuite(ldata->BasicSuite, kPrSDKPPixCreator2Suite,
+                               kPrSDKPPixCreator2SuiteVersion, &ldata->PPixCreator2Suite);
+
         ldata->PPixSuiteVersion =
             (ldata->BasicSuite->AcquireSuite(kPrSDKPPixSuite, kPrSDKPPixSuiteVersion,
                                              (const void**)&ldata->PPixSuite) == kSPNoError
@@ -467,6 +715,8 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
                         ldata->PPixCreatorSuiteVersion, ldata->PPixSuiteVersion,
                         ldata->TimeSuiteVersion);
         }
+        av1imp::Log("suites: PPixCreator2 version %d%s", ldata->PPixCreator2SuiteVersion,
+                    ldata->PPixCreator2SuiteVersion ? "" : " - 10-bit planes unavailable");
 
         // А вот кэш кадров дорос до восьмой версии, и просить восьмую у Premiere
         // 2019 бессмысленно: набор не выдадут вовсе. Нужны нам только две первые
@@ -782,11 +1032,13 @@ bool av1imp::CanProduce(PrPixelFormat f)
            f == PrPixelFormat_BGRA_4444_8u;
 }
 
-int av1imp::PickFrameFormat(const imFrameFormat* formats, int count)
+int av1imp::PickFrameFormat(const imFrameFormat* formats, int count, int startFrom)
 {
-    if (!formats || count < 1) return -1;
-    for (int i = 0; i < count; ++i) {
-        if (av1imp::CanProduce(formats[i].inPixelFormat)) return i;
+    if (!formats || count < 1 || startFrom < 0) return -1;
+    for (int i = startFrom; i < count; ++i) {
+        const PrPixelFormat f = formats[i].inPixelFormat;
+        if (av1imp::IsNativeP010(f) && av1imp::IsP010Unavailable()) continue;
+        if (av1imp::CanProduce(f)) return i;
     }
     return -1;
 }
@@ -826,38 +1078,39 @@ bool av1imp::WriteFrameToBuffer(av1imp::Decoder& decoder, int64_t frameIndex,
 
     char* buffer = nullptr;
     csSDK_int32 rowBytes = 0;
-    ppixSuite->GetPixels(frame, PrPPixBufferAccess_ReadWrite, &buffer);
+    // Для P010 сначала WriteOnly — так пишут сэмплы Adobe и OpenEXR.
+    // ReadWrite оставляем запасным и для обычных форматов.
+    if (av1imp::IsNativeP010(pixelFormat)) {
+        if (ppixSuite->GetPixels(frame, PrPPixBufferAccess_WriteOnly, &buffer) != suiteError_NoError
+            || !buffer) {
+            buffer = nullptr;
+            ppixSuite->GetPixels(frame, PrPPixBufferAccess_ReadWrite, &buffer);
+        }
+    } else {
+        ppixSuite->GetPixels(frame, PrPPixBufferAccess_ReadWrite, &buffer);
+    }
     ppixSuite->GetRowBytes(frame, &rowBytes);
 
     // --- десять бит, две плоскости -----------------------------------------
     //
-    // ⚠ ЧТО ЗДЕСЬ ВЫЯСНИЛОСЬ НА ЖИВОМ PREMIERE, и почему этот путь по
-    // умолчанию выключен.
-    //
-    // Способов добраться до пикселей у импортёра ровно два, и оба мимо:
-    // GetYUV420PlanarBuffers описан и работает только для ВОСЬМИБИТНЫХ ТРЁХ
-    // плоскостей, а GetPixels на двухплоскостном буфере не отдаёт ничего.
-    // Третьего в SDK нет — ни в PPixSuite, ни в PPix2Suite, ни в наборах
-    // создателя буферов.
-    //
-    // При этом CreatePPix формат ПРИНИМАЕТ. То есть Premiere 26 соглашается
-    // выдать двухплоскостной десятибитный кадр и не даёт в него писать:
-    // 11 214 строк журнала, каждый кадр «host gave no buffer», предпросмотр
-    // замирает на последнем удавшемся кадре.
-    //
-    // Проверка ниже стоит ДО общей проверки буфера, а не после, — иначе
-    // (как было в первой версии) до неё просто не доходило: общая проверка
-    // отвергала кадр раньше, и вся эта арифметика не выполнялась ни разу.
+    // Premiere 26: CreatePPix принимает P010, GetPixels отдаёт указатель,
+    // а GetRowBytes врёт нулём. Шаг тогда считаем сами (width*2), сверяя
+    // с GetSize. GetYUV420PlanarBuffers для двух плоскостей не существует.
     if (av1imp::IsNativeP010(pixelFormat)) {
-        if (!buffer || rowBytes <= 0) {
-            // Ровно тот случай, что мы поймали. Пишем ЧИСЛА, а не «не вышло»:
-            // без них не отличить «указателя нет» от «шага нет».
+        if (!buffer) {
             size_t probe = 0;
             if (ppix2Suite && ppix2Suite->GetSize) ppix2Suite->GetSize(frame, &probe);
             av1imp::Log("10-bit planes: host gave buffer=%p rowBytes=%d size=%zu "
-                        "for %dx%d - there is no way to address the second plane",
+                        "for %dx%d - no pixel pointer",
                         (void*)buffer, (int)rowBytes, probe, width, height);
             *outWhy = "host gives no buffer for a two-plane frame";
+            return false;
+        }
+
+        const csSDK_int32 stride = ResolveP010Stride(ppixSuite, ppix2Suite, frame,
+                                                     width, height, rowBytes);
+        if (stride <= 0) {
+            *outWhy = "cannot resolve P010 row stride";
             return false;
         }
 
@@ -866,7 +1119,7 @@ bool av1imp::WriteFrameToBuffer(av1imp::Decoder& decoder, int64_t frameIndex,
             return false;
         }
 
-        const size_t strideY  = (size_t)rowBytes;
+        const size_t strideY  = (size_t)stride;
         const size_t chromaH  = ((size_t)height + 1) / 2;
         const size_t needed   = strideY * (size_t)height + strideY * chromaH;
 
@@ -876,11 +1129,9 @@ bool av1imp::WriteFrameToBuffer(av1imp::Decoder& decoder, int64_t frameIndex,
             return false;
         }
         if (actual < needed) {
-            // Хост разложил буфер не так, как мы предположили. Молча писать
-            // в него нельзя ни в коем случае.
             av1imp::Log("10-bit planes: buffer is %zu bytes, the two-plane layout needs "
                         "%zu (%dx%d, row %d) - refusing and falling back",
-                        actual, needed, width, height, (int)rowBytes);
+                        actual, needed, width, height, (int)stride);
             *outWhy = "buffer too small for two planes";
             return false;
         }
@@ -942,12 +1193,11 @@ static bool PrefersNativeP010(ImporterLocalRecPtr ldata)
 {
     if (!ldata || !ldata->decoder || !ldata->decoder->IsOpen()) return false;
     if (!ldata->PPix2Suite) return false;
+    // Без Creator2 нет CreateCustomPPix — а обычный CreatePPix на Premiere 26
+    // под P010 буфер не отдаёт. Предлагать формат в таком случае нельзя.
+    if (!ldata->PPixCreator2Suite || !ldata->PPixCreator2Suite->CreateCustomPPix) return false;
+    if (av1imp::IsP010Unavailable()) return false;
 
-    // Свой выключатель, и по умолчанию он ВЫКЛЮЧЕН — единственный такой
-    // в плагине. Premiere 26 этот формат принимает, а буфер под него не
-    // выдаёт: писать некуда, каждый кадр отказывает, предпросмотр замирает.
-    // Проверено вживую, 11 214 строк журнала. Подробности и числа —
-    // в AV1Settings.h у Yuv10Enabled.
     return av1imp::YuvEnabled() && av1imp::Yuv10Enabled() &&
            ldata->decoder->CanDeliverP010();
 }
@@ -1123,8 +1373,9 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
 
     // Берём из СПИСКА первый формат, который умеем, а не всегда нулевой.
     // Список хост присылает в порядке предпочтения — см. PickFrameFormat.
-    const int pick = av1imp::PickFrameFormat(videoRec->inFrameFormats,
-                                             videoRec->inNumFrameFormats);
+    // При отказе P010 (нет буфера) пробуем следующий формат в том же запросе.
+    int pick = av1imp::PickFrameFormat(videoRec->inFrameFormats,
+                                       videoRec->inNumFrameFormats);
     if (pick < 0 && videoRec->inNumFrameFormats > 0) {
         av1imp::Log("imGetSourceVideo: host offered %d format(s), none of them ours "
                     "(first is 0x%08X) - falling back to BGRA 8u",
@@ -1132,58 +1383,75 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
                     (unsigned)videoRec->inFrameFormats[0].inPixelFormat);
     }
 
-    // Ноль означает «любой размер» — тогда отдаём как в файле. Ненулевой размер
-    // Premiere просит при пониженном качестве воспроизведения, и кадр надо
-    // масштабировать под него: буфер создаётся именно такой.
-    imFrameFormat* offered = &videoRec->inFrameFormats[pick >= 0 ? pick : 0];
-    const int frameW = (offered->inFrameWidth  > 0) ? offered->inFrameWidth  : mi.width;
-    const int frameH = (offered->inFrameHeight > 0) ? offered->inFrameHeight : mi.height;
-
-    // Формат просит хост, а не мы: он выбирает из того списка, что мы дали
-    // в imGetIndPixelFormat. Не нашлось ничего нашего — отдаём восемью
-    // битами BGRA, как и раньше.
-    const PrPixelFormat pixelFormat =
-        (pick >= 0) ? offered->inPixelFormat : PrPixelFormat_BGRA_4444_8u;
-    const bool wantsNative = av1imp::IsNativeYUV(pixelFormat);
-    const av1imp::FrameFormat frameFormat =
-        (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? av1imp::FrameFormat::BGRA16
-                                                     : av1imp::FrameFormat::BGRA8;
-
     // Качество, которое просит хост: при черновом кадр уменьшается дешевле.
-    // Поле приходило с каждым запросом и до сих пор не читалось вовсе.
     ldata->decoder->SetScaling(av1imp::ScalingFor(videoRec->inQuality));
 
-    prRect rect;
-    prSetRect(&rect, 0, 0, frameW, frameH);
+    for (;;) {
+        imFrameFormat* offered = &videoRec->inFrameFormats[pick >= 0 ? pick : 0];
+        const int frameW = (offered->inFrameWidth  > 0) ? offered->inFrameWidth  : mi.width;
+        const int frameH = (offered->inFrameHeight > 0) ? offered->inFrameHeight : mi.height;
 
-    result = ldata->PPixCreatorSuite->CreatePPix(videoRec->outFrame,
-                                                 PrPPixBufferAccess_ReadWrite,
-                                                 pixelFormat, &rect);
-    if (result != malNoError) return result;
+        const PrPixelFormat pixelFormat =
+            (pick >= 0) ? offered->inPixelFormat : PrPixelFormat_BGRA_4444_8u;
+        const bool wantsNative = av1imp::IsNativeYUV(pixelFormat) ||
+                                 av1imp::IsNativeP010(pixelFormat);
+        const av1imp::FrameFormat frameFormat =
+            (pixelFormat == PrPixelFormat_BGRA_4444_16u) ? av1imp::FrameFormat::BGRA16
+                                                         : av1imp::FrameFormat::BGRA8;
 
-    const char* why = nullptr;
-    if (!av1imp::WriteFrameToBuffer(*ldata->decoder, frameIndex,
-                                    ldata->PPixSuite, ldata->PPix2Suite,
-                                    *videoRec->outFrame, pixelFormat,
-                                    frameW, frameH, &why)) {
-        av1imp::Log("frame %d: FAILED - %s", frameIndex,
-                    why ? why : ldata->decoder->LastError().c_str());
-        av1imp::DiscardHostFrame(ldata->PPixSuite, videoRec->outFrame);
-        return why ? imOtherErr : imFileReadFailed;
-    }
-    if (frameIndex < 3) {
-        av1imp::Log("frame %d delivered (%dx%d, %s)", frameIndex,
-                    frameW, frameH,
-                    wantsNative ? "planar YUV"
-                                : (frameFormat == av1imp::FrameFormat::BGRA16 ? "BGRA 16u"
-                                                                              : "BGRA 8u"));
-    }
+        result = av1imp::CreateVideoPPix(ldata->PPixCreatorSuite,
+                                         ldata->PPixCreator2Suite,
+                                         ldata->PPixSuite,
+                                         ldata->PPix2Suite,
+                                         videoRec->outFrame,
+                                         pixelFormat, frameW, frameH);
+        if (result != malNoError) {
+            if (av1imp::IsNativeP010(pixelFormat)) {
+                av1imp::MarkP010Unavailable();
+                av1imp::DiscardHostFrame(ldata->PPixSuite, videoRec->outFrame);
+                pick = av1imp::PickFrameFormat(videoRec->inFrameFormats,
+                                               videoRec->inNumFrameFormats,
+                                               pick + 1);
+                if (pick >= 0) continue;
+            }
+            return result;
+        }
 
-    if (ldata->PPixCacheSuite) {
-        ldata->PPixCacheSuite->AddFrameToCache(ldata->importerID, 0, *videoRec->outFrame,
-                                               frameIndex, nullptr, 0);
+        const char* why = nullptr;
+        if (!av1imp::WriteFrameToBuffer(*ldata->decoder, frameIndex,
+                                        ldata->PPixSuite, ldata->PPix2Suite,
+                                        *videoRec->outFrame, pixelFormat,
+                                        frameW, frameH, &why)) {
+            const bool p010NoBuf = av1imp::IsNativeP010(pixelFormat) && why &&
+                (strstr(why, "no buffer") != nullptr ||
+                 strstr(why, "buffer too small") != nullptr);
+            av1imp::DiscardHostFrame(ldata->PPixSuite, videoRec->outFrame);
+            if (p010NoBuf) {
+                av1imp::MarkP010Unavailable();
+                pick = av1imp::PickFrameFormat(videoRec->inFrameFormats,
+                                               videoRec->inNumFrameFormats,
+                                               pick + 1);
+                if (pick >= 0) continue;
+            }
+            av1imp::Log("frame %d: FAILED - %s", frameIndex,
+                        why ? why : ldata->decoder->LastError().c_str());
+            return why ? imOtherErr : imFileReadFailed;
+        }
+        if (frameIndex < 3) {
+            av1imp::Log("frame %d delivered (%dx%d, %s)", frameIndex,
+                        frameW, frameH,
+                        av1imp::IsNativeP010(pixelFormat) ? "10u planes (P010)"
+                        : wantsNative ? "planar YUV"
+                        : (frameFormat == av1imp::FrameFormat::BGRA16 ? "BGRA 16u"
+                                                                      : "BGRA 8u"));
+        }
+
+        if (ldata->PPixCacheSuite) {
+            ldata->PPixCacheSuite->AddFrameToCache(ldata->importerID, 0, *videoRec->outFrame,
+                                                   frameIndex, nullptr, 0);
+        }
+        return malNoError;
     }
-    return malNoError;
 }
 
 // ---------------------------------------------------------------------------

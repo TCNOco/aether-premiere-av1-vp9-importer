@@ -4,10 +4,13 @@
 #include "AV1Async.h"
 #include "AV1Log.h"
 #include "AV1Settings.h"
+#include "AV1Importer.h"
 
 #include <PrSDKAsyncImporter.h>
+#include <PrSDKPPixCreator2Suite.h>
 
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -46,14 +49,16 @@ struct AsyncState {
     // в aiClose, как со всем остальным: путь свой, декодер свой, наборы свои.
     SPBasicSuite*          BasicSuite       = nullptr;
     PrSDKPPixCreatorSuite* PPixCreatorSuite = nullptr;
+    PrSDKPPixCreator2Suite* PPixCreator2Suite = nullptr;
     PrSDKPPixSuite*        PPixSuite        = nullptr;
     PrSDKPPix2Suite*       PPix2Suite       = nullptr;   // адреса плоскостей
 
     // Версии, которыми наборы выданы: отдавать положено ровно ими, а ноль
     // означает «не выдали, возвращать нечего»
-    csSDK_int32            PPixCreatorSuiteVersion = 0;
-    csSDK_int32            PPixSuiteVersion        = 0;
-    csSDK_int32            PPix2SuiteVersion       = 0;
+    csSDK_int32            PPixCreatorSuiteVersion  = 0;
+    csSDK_int32            PPixCreator2SuiteVersion = 0;
+    csSDK_int32            PPixSuiteVersion         = 0;
+    csSDK_int32            PPix2SuiteVersion        = 0;
 
     int   width  = 0;
     int   height = 0;
@@ -251,55 +256,68 @@ prMALError GetFrame(AsyncState* s, imSourceVideoRec* videoRec)
     // из кэша, либо распакует сам. Второе медленнее, но всегда верно.
 
     // Выбор формата и качества — теми же функциями, что и у обычного пути.
-    // Своя копия этой логики тут однажды уже была, и именно она не узнала
-    // про выдачу плоскостями.
-    const int pick = av1imp::PickFrameFormat(videoRec->inFrameFormats,
-                                             videoRec->inNumFrameFormats);
-
-    imFrameFormat* offered = &videoRec->inFrameFormats[pick >= 0 ? pick : 0];
-    const int frameW = (offered->inFrameWidth  > 0) ? offered->inFrameWidth  : s->width;
-    const int frameH = (offered->inFrameHeight > 0) ? offered->inFrameHeight : s->height;
-
-    const PrPixelFormat pixelFormat =
-        (pick >= 0) ? offered->inPixelFormat : PrPixelFormat_BGRA_4444_8u;
+    int pick = av1imp::PickFrameFormat(videoRec->inFrameFormats,
+                                       videoRec->inNumFrameFormats);
 
     s->decoder.SetScaling(av1imp::ScalingFor(videoRec->inQuality));
 
-    prRect rect;
-    prSetRect(&rect, 0, 0, frameW, frameH);
+    for (;;) {
+        imFrameFormat* offered = &videoRec->inFrameFormats[pick >= 0 ? pick : 0];
+        const int frameW = (offered->inFrameWidth  > 0) ? offered->inFrameWidth  : s->width;
+        const int frameH = (offered->inFrameHeight > 0) ? offered->inFrameHeight : s->height;
 
-    prMALError result = s->PPixCreatorSuite->CreatePPix(
-        videoRec->outFrame, PrPPixBufferAccess_ReadWrite, pixelFormat, &rect);
-    if (result != malNoError) return aiUnknownError;
+        const PrPixelFormat pixelFormat =
+            (pick >= 0) ? offered->inPixelFormat : PrPixelFormat_BGRA_4444_8u;
 
-    // Запись — общей функцией с обычным путём. Своей копией она тут и была,
-    // и ровно поэтому не узнала про выдачу плоскостями.
-    const char* why = nullptr;
-    if (!av1imp::WriteFrameToBuffer(s->decoder, frame,
-                                    s->PPixSuite, s->PPix2Suite,
-                                    *videoRec->outFrame, pixelFormat,
-                                    frameW, frameH, &why)) {
-        Log("async frame %lld: FAILED - %s", (long long)frame,
-            why ? why : s->decoder.LastError().c_str());
-        av1imp::DiscardHostFrame(s->PPixSuite, videoRec->outFrame);
-        return aiFrameNotFound;
-    }
+        prMALError result = av1imp::CreateVideoPPix(
+            s->PPixCreatorSuite, s->PPixCreator2Suite,
+            s->PPixSuite, s->PPix2Suite,
+            videoRec->outFrame, pixelFormat, frameW, frameH);
+        if (result != malNoError) {
+            if (av1imp::IsNativeP010(pixelFormat)) {
+                av1imp::MarkP010Unavailable();
+                av1imp::DiscardHostFrame(s->PPixSuite, videoRec->outFrame);
+                pick = av1imp::PickFrameFormat(videoRec->inFrameFormats,
+                                               videoRec->inNumFrameFormats,
+                                               pick + 1);
+                if (pick >= 0) continue;
+            }
+            return aiUnknownError;
+        }
 
-    // Первые кадры записываем — иначе по журналу вообще не видно, каким путём
-    // идёт выдача. Обычный путь такие строки писал, асинхронный молчал, и на
-    // живом Premiere, который берёт именно его, вопрос «взял ли хост родной
-    // YUV» оказалось нечем закрыть.
-    if (frame < 3) {
-        Log("async frame %lld delivered (%dx%d, %s)", (long long)frame,
-            frameW, frameH,
-            av1imp::IsNativeYUV(pixelFormat)
-                ? "planar YUV"
+        const char* why = nullptr;
+        if (!av1imp::WriteFrameToBuffer(s->decoder, frame,
+                                        s->PPixSuite, s->PPix2Suite,
+                                        *videoRec->outFrame, pixelFormat,
+                                        frameW, frameH, &why)) {
+            const bool p010NoBuf = av1imp::IsNativeP010(pixelFormat) && why &&
+                (strstr(why, "no buffer") != nullptr ||
+                 strstr(why, "buffer too small") != nullptr);
+            av1imp::DiscardHostFrame(s->PPixSuite, videoRec->outFrame);
+            if (p010NoBuf) {
+                av1imp::MarkP010Unavailable();
+                pick = av1imp::PickFrameFormat(videoRec->inFrameFormats,
+                                               videoRec->inNumFrameFormats,
+                                               pick + 1);
+                if (pick >= 0) continue;
+            }
+            Log("async frame %lld: FAILED - %s", (long long)frame,
+                why ? why : s->decoder.LastError().c_str());
+            return aiFrameNotFound;
+        }
+
+        if (frame < 3) {
+            Log("async frame %lld delivered (%dx%d, %s)", (long long)frame,
+                frameW, frameH,
+                av1imp::IsNativeP010(pixelFormat) ? "10u planes (P010)"
+                : av1imp::IsNativeYUV(pixelFormat) ? "planar YUV"
                 : (pixelFormat == PrPixelFormat_BGRA_4444_16u ? "BGRA 16u" : "BGRA 8u"));
-    }
+        }
 
-    std::lock_guard<std::mutex> lock(s->mutex);
-    s->ready.erase(frame);
-    return aiNoError;
+        std::lock_guard<std::mutex> lock(s->mutex);
+        s->ready.erase(frame);
+        return aiNoError;
+    }
 }
 
 prMALError Close(AsyncState* s)
@@ -324,6 +342,9 @@ prMALError Close(AsyncState* s)
     if (s->BasicSuite) {
         if (s->PPixCreatorSuiteVersion) {
             s->BasicSuite->ReleaseSuite(kPrSDKPPixCreatorSuite, s->PPixCreatorSuiteVersion);
+        }
+        if (s->PPixCreator2SuiteVersion) {
+            s->BasicSuite->ReleaseSuite(kPrSDKPPixCreator2Suite, s->PPixCreator2SuiteVersion);
         }
         if (s->PPixSuiteVersion) {
             s->BasicSuite->ReleaseSuite(kPrSDKPPixSuite, s->PPixSuiteVersion);
@@ -446,6 +467,10 @@ bool CreateAsyncImporter(ImporterLocalRecPtr source, imAsyncImporterCreationRec*
                                      (const void**)&s->PPixCreatorSuite) == kSPNoError
          && s->PPixCreatorSuite) ? kPrSDKPPixCreatorSuiteVersion : 0;
 
+    s->PPixCreator2SuiteVersion =
+        AcquireNewestSuite(s->BasicSuite, kPrSDKPPixCreator2Suite,
+                           kPrSDKPPixCreator2SuiteVersion, &s->PPixCreator2Suite);
+
     s->PPixSuiteVersion =
         (s->BasicSuite->AcquireSuite(kPrSDKPPixSuite, kPrSDKPPixSuiteVersion,
                                      (const void**)&s->PPixSuite) == kSPNoError
@@ -465,6 +490,9 @@ bool CreateAsyncImporter(ImporterLocalRecPtr source, imAsyncImporterCreationRec*
             s->PPixCreatorSuiteVersion, s->PPixSuiteVersion);
         if (s->PPixCreatorSuiteVersion) {
             s->BasicSuite->ReleaseSuite(kPrSDKPPixCreatorSuite, s->PPixCreatorSuiteVersion);
+        }
+        if (s->PPixCreator2SuiteVersion) {
+            s->BasicSuite->ReleaseSuite(kPrSDKPPixCreator2Suite, s->PPixCreator2SuiteVersion);
         }
         if (s->PPixSuiteVersion) {
             s->BasicSuite->ReleaseSuite(kPrSDKPPixSuite, s->PPixSuiteVersion);
