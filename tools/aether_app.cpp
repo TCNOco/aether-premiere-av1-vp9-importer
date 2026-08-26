@@ -20,6 +20,7 @@
 #include "app_diagnose.h"
 
 #include "../src/AV1Settings.h"
+#include "../src/PreviewCache.h"
 #include "../src/AV1Version.h"
 
 #include <windows.h>
@@ -40,17 +41,24 @@ namespace {
 
 enum {
     ID_NAV_SETTINGS = 100,
+    ID_NAV_CACHE,
     ID_NAV_DIAGNOSE,
 
     ID_AUTO = 200,
     ID_SOFTWARE,
     ID_HARDWARE,
+    ID_ENABLED,
     ID_SAVE,
 
     ID_PICK = 300,
     ID_RUN,
     ID_COPY,
     ID_LIST,
+
+    ID_MEMORY_CACHE = 350,
+    ID_PREVIEW_CACHE,
+    ID_PREVIEW_LIMIT,
+    ID_CLEAR_PREVIEW,
 
     ID_CLOSE = 400,
 };
@@ -114,7 +122,7 @@ const Palette kDark = {
     RGB(0x45, 0x45, 0x45), RGB(0x00, 0x1A, 0x2B), RGB(0x6E, 0x6E, 0x6E),
 };
 
-enum class Page { Settings, Diagnose };
+enum class Page { Settings, Cache, Diagnose };
 
 struct App {
     HWND  wnd = nullptr;
@@ -127,16 +135,31 @@ struct App {
 
     // Навигация
     HWND navSettings = nullptr;
+    HWND navCache    = nullptr;
     HWND navDiagnose = nullptr;
     HWND brand       = nullptr;
     HWND version     = nullptr;
 
     // Страница настроек
     HWND setHead = nullptr;
+    HWND enabled = nullptr;
+    HWND enabledNote = nullptr;
     HWND radio[3] = {};
     HWND note[3]  = {};
     HWND setHint = nullptr;
     HWND save    = nullptr;
+
+    // Страница кэша
+    HWND cacheHead = nullptr;
+    HWND memoryLabel = nullptr;
+    HWND memoryCombo = nullptr;
+    HWND memoryNote = nullptr;
+    HWND previewToggle = nullptr;
+    HWND previewNote = nullptr;
+    HWND previewLimitLabel = nullptr;
+    HWND previewLimitCombo = nullptr;
+    HWND cacheUsage = nullptr;
+    HWND clearPreview = nullptr;
 
     // Страница диагностики
     HWND diagHead = nullptr;
@@ -155,6 +178,8 @@ struct App {
     // Какой переключатель отмечен. Держим сами: у рисуемой вручную кнопки
     // нет состояния «отмечена», Windows его больше не ведёт.
     int      choice = 0;          // 0 авто, 1 процессор, 2 видеокарта
+    bool     enabledChoice = true;
+    bool     previewChoice = false;
 
     bool     dark = false;
     Palette  pal  = kLight;
@@ -310,11 +335,16 @@ void ApplyFonts()
     struct Pair { HWND h; HFONT f; };
     const Pair pairs[] = {
         { g.brand, g.head }, { g.version, g.body },
-        { g.navSettings, g.nav }, { g.navDiagnose, g.nav },
-        { g.setHead, g.head }, { g.diagHead, g.head },
+        { g.navSettings, g.nav }, { g.navCache, g.nav }, { g.navDiagnose, g.nav },
+        { g.setHead, g.head }, { g.cacheHead, g.head }, { g.diagHead, g.head },
+        { g.enabled, g.body }, { g.enabledNote, g.body },
         { g.radio[0], g.body }, { g.radio[1], g.body }, { g.radio[2], g.body },
         { g.note[0], g.body }, { g.note[1], g.body }, { g.note[2], g.body },
         { g.setHint, g.body }, { g.diagNote, g.body },
+        { g.memoryLabel, g.body }, { g.memoryCombo, g.body }, { g.memoryNote, g.body },
+        { g.previewToggle, g.body }, { g.previewNote, g.body },
+        { g.previewLimitLabel, g.body }, { g.previewLimitCombo, g.body },
+        { g.cacheUsage, g.body }, { g.clearPreview, g.body },
         { g.fileBox, g.body }, { g.pick, g.body }, { g.list, g.body },
         { g.status, g.body }, { g.run, g.body }, { g.copy, g.body },
         { g.save, g.body }, { g.close, g.body },
@@ -362,8 +392,11 @@ void ApplyTheme()
     if (g_flushMenus)  g_flushMenus();
 
     const wchar_t* theme = g.dark ? L"DarkMode_Explorer" : L"Explorer";
-    HWND themed[] = { g.navSettings, g.navDiagnose, g.radio[0], g.radio[1], g.radio[2],
-                      g.save, g.close, g.pick, g.run, g.copy, g.fileBox, g.list };
+    HWND themed[] = { g.navSettings, g.navCache, g.navDiagnose,
+                      g.enabled, g.radio[0], g.radio[1], g.radio[2],
+                      g.memoryCombo, g.previewToggle, g.previewLimitCombo,
+                      g.clearPreview, g.save, g.close, g.pick, g.run, g.copy,
+                      g.fileBox, g.list };
     for (HWND h : themed) {
         if (!h) continue;
         if (g_allowForWnd) g_allowForWnd(h, on);
@@ -403,11 +436,14 @@ void Layout()
     Place(g.brand,       kMargin, 22, kNavWidth - kMargin * 2, 26);
     Place(g.version,     kMargin, 48, kNavWidth - kMargin * 2, 18);
     Place(g.navSettings, 8, 92,  kNavWidth - 16, 36);
-    Place(g.navDiagnose, 8, 132, kNavWidth - 16, 36);
+    Place(g.navCache,    8, 132, kNavWidth - 16, 36);
+    Place(g.navDiagnose, 8, 172, kNavWidth - 16, 36);
 
     // Страница настроек
     int y = 26;
     Place(g.setHead, contentX, y, contentW, 26); y += 40;
+    Place(g.enabled, contentX, y, contentW, 22); y += 24;
+    Place(g.enabledNote, contentX + 24, y, contentW - 24, 34); y += 46;
     const int noteH[3] = { 18, 34, 18 };
     for (int i = 0; i < 3; ++i) {
         Place(g.radio[i], contentX, y, contentW, 22); y += 24;
@@ -415,6 +451,18 @@ void Layout()
         y += noteH[i] + 14;
     }
     Place(g.setHint, contentX, y, contentW, 18);
+
+    // Страница кэша
+    y = 26;
+    Place(g.cacheHead, contentX, y, contentW, 26); y += 44;
+    Place(g.memoryLabel, contentX, y, 250, 22);
+    Place(g.memoryCombo, contentX + 270, y - 3, 150, 180); y += 30;
+    Place(g.memoryNote, contentX, y, contentW, 34); y += 54;
+    Place(g.previewToggle, contentX, y, contentW, 22); y += 28;
+    Place(g.previewNote, contentX + 24, y, contentW - 24, 34); y += 52;
+    Place(g.previewLimitLabel, contentX, y, 250, 22);
+    Place(g.previewLimitCombo, contentX + 270, y - 3, 150, 180); y += 42;
+    Place(g.cacheUsage, contentX, y, contentW, 22);
 
     // Страница диагностики
     y = 26;
@@ -430,6 +478,7 @@ void Layout()
     const int by = barTop + (kBarHeight - kButtonH) / 2;
     Place(g.close, kWindowW - kMargin - kButtonW, by, kButtonW, kButtonH);
     Place(g.save,  kWindowW - kMargin - kButtonW * 2 - 8, by, kButtonW, kButtonH);
+    Place(g.clearPreview, kNavWidth + kMargin, by, kButtonW + 50, kButtonH);
     Place(g.run,   kNavWidth + kMargin, by, kButtonW + 24, kButtonH);
     Place(g.copy,  kNavWidth + kMargin + kButtonW + 32, by, kButtonW + 34, kButtonH);
 }
@@ -437,17 +486,28 @@ void Layout()
 void ShowPage()
 {
     const bool s = (g.page == Page::Settings);
+    const bool c = (g.page == Page::Cache);
+    const bool d = (g.page == Page::Diagnose);
     const int  showS = s ? SW_SHOW : SW_HIDE;
-    const int  showD = s ? SW_HIDE : SW_SHOW;
+    const int  showC = c ? SW_SHOW : SW_HIDE;
+    const int  showD = d ? SW_SHOW : SW_HIDE;
 
-    HWND setPage[] = { g.setHead, g.radio[0], g.radio[1], g.radio[2],
+    HWND setPage[] = { g.setHead, g.enabled, g.enabledNote,
+                       g.radio[0], g.radio[1], g.radio[2],
                        g.note[0], g.note[1], g.note[2], g.setHint, g.save };
     for (HWND h : setPage) if (h) ShowWindow(h, showS);
+
+    HWND cachePage[] = { g.cacheHead, g.memoryLabel, g.memoryCombo, g.memoryNote,
+                         g.previewToggle, g.previewNote, g.previewLimitLabel,
+                         g.previewLimitCombo, g.cacheUsage, g.clearPreview };
+    for (HWND h : cachePage) if (h) ShowWindow(h, showC);
+    if (g.save) ShowWindow(g.save, (s || c) ? SW_SHOW : SW_HIDE);
 
     HWND diagPage[] = { g.diagHead, g.diagNote, g.fileBox, g.pick,
                         g.list, g.status, g.run, g.copy };
     for (HWND h : diagPage) if (h) ShowWindow(h, showD);
 
+    if (g.previewLimitCombo) EnableWindow(g.previewLimitCombo, g.previewChoice);
     if (g.copy) EnableWindow(g.copy, g.haveReport && !g.running);
     if (g.run)  EnableWindow(g.run, !g.running);
 
@@ -579,19 +639,52 @@ void PickFile()
     }
 }
 
+void UpdateCacheUsage()
+{
+    const av1imp::PreviewCacheUsage usage = av1imp::PreviewCache::Instance().Usage();
+    wchar_t text[160] = {};
+    swprintf_s(text, L"Занято: %.1f MiB, файлов: %llu",
+               usage.bytes / (1024.0 * 1024.0),
+               (unsigned long long)usage.files);
+    SetWindowTextW(g.cacheUsage, text);
+}
+
+uint32_t ComboValue(HWND combo, uint32_t fallback)
+{
+    const LRESULT index = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+    if (index == CB_ERR) return fallback;
+    const LRESULT data = SendMessageW(combo, CB_GETITEMDATA, index, 0);
+    return data == CB_ERR ? fallback : (uint32_t)data;
+}
+
 void SaveSettings()
 {
-    const av1imp::DecodeMode mode = (g.choice == 1) ? av1imp::DecodeMode::Software
-                                  : (g.choice == 2) ? av1imp::DecodeMode::Hardware
-                                                    : av1imp::DecodeMode::Auto;
+    av1imp::Settings settings;
+    settings.enabled = g.enabledChoice;
+    settings.decode = (g.choice == 1) ? av1imp::DecodeMode::Software
+                    : (g.choice == 2) ? av1imp::DecodeMode::Hardware
+                                      : av1imp::DecodeMode::Auto;
+    settings.memoryCacheMB = ComboValue(g.memoryCombo, 512);
+    settings.previewCache = g.previewChoice;
+    settings.previewCacheMB = ComboValue(g.previewLimitCombo, 2048);
 
-    if (av1imp::SaveMode(mode)) {
+    if (av1imp::SaveSettings(settings)) {
         MessageBoxW(g.wnd, L"Сохранено.\n\nПерезапустите Premiere Pro, чтобы настройка применилась.",
                     L"Готово", MB_OK | MB_ICONINFORMATION);
     } else {
         MessageBoxW(g.wnd, L"Не удалось записать файл настроек.", L"Ошибка",
                     MB_OK | MB_ICONERROR);
     }
+}
+
+void ClearPreviewCache()
+{
+    av1imp::PreviewCache::Instance().Clear();
+    UpdateCacheUsage();
+    MessageBoxW(g.wnd,
+                L"Кэш уменьшенных превью очищен.\n\n"
+                L"Работающее приложение Adobe может сразу создать новые файлы.",
+                L"Кэш очищен", MB_OK | MB_ICONINFORMATION);
 }
 
 // ---------------------------------------------------------------- рисование
@@ -643,6 +736,7 @@ void PaintChrome(HWND w)
 void DrawNavItem(DRAWITEMSTRUCT* di)
 {
     const bool picked = (di->CtlID == ID_NAV_SETTINGS && g.page == Page::Settings) ||
+                        (di->CtlID == ID_NAV_CACHE && g.page == Page::Cache) ||
                         (di->CtlID == ID_NAV_DIAGNOSE && g.page == Page::Diagnose);
     const bool hot = (di->itemState & ODS_FOCUS) != 0;
 
@@ -781,6 +875,39 @@ void DrawRadio(DRAWITEMSTRUCT* di)
     }
 }
 
+void DrawCheck(DRAWITEMSTRUCT* di)
+{
+    const bool on = di->CtlID == ID_ENABLED ? g.enabledChoice : g.previewChoice;
+    const bool hot = (di->itemState & ODS_HOTLIGHT) != 0;
+    FillRect(di->hDC, &di->rcItem, g.brWindow);
+
+    const int size = Dp(16);
+    const int top = di->rcItem.top + ((di->rcItem.bottom - di->rcItem.top) - size) / 2;
+    RECT box = { di->rcItem.left, top, di->rcItem.left + size, top + size };
+    FillRounded(di->hDC, box, on ? g.pal.accent : (hot ? g.pal.ctrlHot : g.pal.ctrl),
+                on ? g.pal.accent : g.pal.ctrlEdge, Dp(3));
+    if (on) {
+        SetBkMode(di->hDC, TRANSPARENT);
+        SetTextColor(di->hDC, g.pal.onAccent);
+        SelectObject(di->hDC, g.body);
+        DrawTextW(di->hDC, L"✓", -1, &box, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    wchar_t caption[160] = {};
+    GetWindowTextW(di->hwndItem, caption, 160);
+    RECT text = di->rcItem;
+    text.left = box.right + Dp(10);
+    SetBkMode(di->hDC, TRANSPARENT);
+    SetTextColor(di->hDC, g.pal.text);
+    SelectObject(di->hDC, g.body);
+    DrawTextW(di->hDC, caption, -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    if (di->itemState & ODS_FOCUS) {
+        RECT f = di->rcItem;
+        InflateRect(&f, -Dp(1), -Dp(1));
+        DrawFocusRect(di->hDC, &f);
+    }
+}
+
 // Шапка столбцов рисуется вручную, и добраться до неё пришлось в обход.
 //
 // «Проверка» и «Что вышло» рисует не список, а вложенный SysHeader32, и своих
@@ -875,11 +1002,18 @@ void Build(HWND w)
 
     g.navSettings = Add(L"BUTTON", L"Настройки",
                         WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, ID_NAV_SETTINGS);
+    g.navCache = Add(L"BUTTON", L"Кэш",
+                     WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, ID_NAV_CACHE);
     g.navDiagnose = Add(L"BUTTON", L"Диагностика",
                         WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, ID_NAV_DIAGNOSE);
 
     // ---- настройки ----
     g.setHead  = Add(L"STATIC", L"Как распаковывать видео AV1 и VP9", 0, 0);
+    g.enabled = Add(L"BUTTON", L"Aether включён",
+                    BS_OWNERDRAW | WS_GROUP | WS_TABSTOP, ID_ENABLED);
+    g.enabledNote = Add(L"STATIC",
+                        L"Если выключить, после перезапуска Adobe файлы будут переданы\n"
+                        L"другим импортёрам, а FFmpeg не загрузится.", 0, 0);
     g.radio[0] = Add(L"BUTTON", L"Автоматически (рекомендуется)",
                      BS_OWNERDRAW | WS_GROUP | WS_TABSTOP, ID_AUTO);
     g.note[0]  = Add(L"STATIC", L"Процессором на машинах от 8 потоков, иначе видеокартой.", 0, 0);
@@ -892,6 +1026,26 @@ void Build(HWND w)
     g.setHint  = Add(L"STATIC", L"Изменения вступят в силу после перезапуска Premiere Pro.",
                      SS_LEFTNOWORDWRAP, 0);
     g.save     = Add(L"BUTTON", L"Сохранить", BS_OWNERDRAW | WS_TABSTOP, ID_SAVE);
+
+    // ---- кэш ----
+    g.cacheHead = Add(L"STATIC", L"Кэш Aether", 0, 0);
+    g.memoryLabel = Add(L"STATIC", L"Кэш кадров в памяти", SS_LEFTNOWORDWRAP, 0);
+    g.memoryCombo = Add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL,
+                        ID_MEMORY_CACHE);
+    g.memoryNote = Add(L"STATIC",
+                       L"Лимит относится только к кадрам, которые кэширует Aether.\n"
+                       L"Общая память Premiere может быть выше.", 0, 0);
+    g.previewToggle = Add(L"BUTTON", L"Хранить уменьшенные превью на диске",
+                          BS_OWNERDRAW | WS_GROUP | WS_TABSTOP, ID_PREVIEW_CACHE);
+    g.previewNote = Add(L"STATIC",
+                        L"Только BGRA8 Draft/Low до 2 MiB. Полноразмерное\n"
+                        L"воспроизведение и экспорт этот кэш не используют.", 0, 0);
+    g.previewLimitLabel = Add(L"STATIC", L"Лимит дискового кэша", SS_LEFTNOWORDWRAP, 0);
+    g.previewLimitCombo = Add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL,
+                              ID_PREVIEW_LIMIT);
+    g.cacheUsage = Add(L"STATIC", L"", SS_LEFTNOWORDWRAP, 0);
+    g.clearPreview = Add(L"BUTTON", L"Очистить кэш превью",
+                         BS_OWNERDRAW | WS_TABSTOP, ID_CLEAR_PREVIEW);
 
     // ---- диагностика ----
     g.diagHead = Add(L"STATIC", L"Диагностика", 0, 0);
@@ -925,11 +1079,39 @@ void Build(HWND w)
     ApplyFonts();
     Layout();
 
-    switch (av1imp::CurrentMode()) {
+    const av1imp::Settings settings = av1imp::CurrentSettings();
+    switch (settings.decode) {
         case av1imp::DecodeMode::Software: g.choice = 1; break;
         case av1imp::DecodeMode::Hardware: g.choice = 2; break;
         default:                           g.choice = 0; break;
     }
+    g.enabledChoice = settings.enabled;
+    g.previewChoice = settings.previewCache;
+
+    const uint32_t memoryValues[] = { 0, 128, 256, 512, 1024, 2048, 4096 };
+    for (uint32_t value : memoryValues) {
+        wchar_t label[64] = {};
+        if (value == 0) wcscpy_s(label, L"Выключен");
+        else swprintf_s(label, L"%u MiB", value);
+        const LRESULT at = SendMessageW(g.memoryCombo, CB_ADDSTRING, 0, (LPARAM)label);
+        SendMessageW(g.memoryCombo, CB_SETITEMDATA, at, value);
+        if (value == settings.memoryCacheMB) SendMessageW(g.memoryCombo, CB_SETCURSEL, at, 0);
+    }
+
+    const uint32_t diskValues[] = { 256, 512, 1024, 2048, 4096, 8192, 20480 };
+    for (uint32_t value : diskValues) {
+        wchar_t label[64] = {};
+        if (value >= 1024 && value % 1024 == 0) swprintf_s(label, L"%u GiB", value / 1024);
+        else swprintf_s(label, L"%u MiB", value);
+        const LRESULT at = SendMessageW(g.previewLimitCombo, CB_ADDSTRING, 0, (LPARAM)label);
+        SendMessageW(g.previewLimitCombo, CB_SETITEMDATA, at, value);
+        if (value == settings.previewCacheMB) SendMessageW(g.previewLimitCombo, CB_SETCURSEL, at, 0);
+    }
+    if (SendMessageW(g.memoryCombo, CB_GETCURSEL, 0, 0) == CB_ERR)
+        SendMessageW(g.memoryCombo, CB_SETCURSEL, 3, 0);
+    if (SendMessageW(g.previewLimitCombo, CB_GETCURSEL, 0, 0) == CB_ERR)
+        SendMessageW(g.previewLimitCombo, CB_SETCURSEL, 3, 0);
+    UpdateCacheUsage();
 
     ApplyTheme();
     DragAcceptFiles(w, TRUE);
@@ -958,8 +1140,13 @@ LRESULT CALLBACK Proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
             DRAWITEMSTRUCT* di = (DRAWITEMSTRUCT*)lp;
             switch (di->CtlID) {
                 case ID_NAV_SETTINGS:
+                case ID_NAV_CACHE:
                 case ID_NAV_DIAGNOSE:
                     DrawNavItem(di);
+                    return TRUE;
+                case ID_ENABLED:
+                case ID_PREVIEW_CACHE:
+                    DrawCheck(di);
                     return TRUE;
                 case ID_AUTO:
                 case ID_SOFTWARE:
@@ -970,6 +1157,7 @@ LRESULT CALLBACK Proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
                 case ID_PICK:
                 case ID_RUN:
                 case ID_COPY:
+                case ID_CLEAR_PREVIEW:
                 case ID_CLOSE:
                     DrawPushButton(di);
                     return TRUE;
@@ -995,7 +1183,10 @@ LRESULT CALLBACK Proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 
             const bool inNav = (ctl == g.brand || ctl == g.version);
             const bool note  = (ctl == g.note[0] || ctl == g.note[1] || ctl == g.note[2] ||
-                                ctl == g.setHint || ctl == g.diagNote || ctl == g.status ||
+                                ctl == g.enabledNote || ctl == g.setHint ||
+                                ctl == g.memoryNote || ctl == g.previewNote ||
+                                ctl == g.cacheUsage ||
+                                ctl == g.diagNote || ctl == g.status ||
                                 ctl == g.version);
             SetTextColor(dc, note ? g.pal.note : g.pal.text);
             return (LRESULT)(inNav ? g.brNav : g.brWindow);
@@ -1078,9 +1269,26 @@ LRESULT CALLBACK Proc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
                     for (HWND h : g.radio) if (h) InvalidateRect(h, nullptr, TRUE);
                     return 0;
 
+                case ID_ENABLED:
+                    g.enabledChoice = !g.enabledChoice;
+                    InvalidateRect(g.enabled, nullptr, TRUE);
+                    return 0;
+
+                case ID_PREVIEW_CACHE:
+                    g.previewChoice = !g.previewChoice;
+                    InvalidateRect(g.previewToggle, nullptr, TRUE);
+                    EnableWindow(g.previewLimitCombo, g.previewChoice);
+                    return 0;
+
                 case ID_NAV_SETTINGS: g.page = Page::Settings; ShowPage(); return 0;
+                case ID_NAV_CACHE:
+                    g.page = Page::Cache;
+                    UpdateCacheUsage();
+                    ShowPage();
+                    return 0;
                 case ID_NAV_DIAGNOSE: g.page = Page::Diagnose; ShowPage(); return 0;
                 case ID_SAVE:  SaveSettings(); return 0;
+                case ID_CLEAR_PREVIEW: ClearPreviewCache(); return 0;
                 case ID_PICK:  PickFile();     return 0;
                 case ID_RUN:   Diagnose();     return 0;
                 case ID_COPY:  CopyReport();   return 0;

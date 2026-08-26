@@ -2,6 +2,9 @@
 // Copyright 2026 neoHaDe
 
 #include "AV1Decoder.h"
+#include "AV1Settings.h"
+#include "AV1Version.h"
+#include "PreviewCache.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -28,8 +31,27 @@ namespace av1imp {
 
 // Счётчик живых декодеров видео на весь процесс, см. Decoder::Budget()
 std::atomic<int> Decoder::videoDecoders_{0};
+std::atomic<size_t> g_ramCacheBytes{0};
+
+size_t Decoder::RamCacheBytesHeld() {
+    return g_ramCacheBytes.load(std::memory_order_relaxed);
+}
 
 namespace {
+
+bool ReserveRamCache(size_t bytes, size_t ceiling)
+{
+    size_t held = g_ramCacheBytes.load(std::memory_order_relaxed);
+    for (;;) {
+        if (bytes > ceiling || held > ceiling - bytes) return false;
+        if (g_ramCacheBytes.compare_exchange_weak(
+                held, held + bytes,
+                std::memory_order_acq_rel,
+                std::memory_order_relaxed)) {
+            return true;
+        }
+    }
+}
 
 std::string AvErr(int err) {
     char buf[AV_ERROR_MAX_STRING_SIZE] = {};
@@ -573,6 +595,19 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
 
     lastDecodedFrame_ = -1;
     eofReached_ = false;
+    lastPreviewFrame_ = -1;
+    lastPreviewW_ = 0;
+    lastPreviewH_ = 0;
+    try {
+        const SourceFingerprint fp = FingerprintSource(utf8Path);
+        sourceFp_ = fp.hash;
+        sourceFpValid_ = fp.valid;
+    } catch (...) {
+        // Preview cache is optional. Allocation/path/hash failures must not
+        // turn a valid media file into an import failure.
+        sourceFp_.fill(0);
+        sourceFpValid_ = false;
+    }
     return true;
 }
 
@@ -732,11 +767,14 @@ void Decoder::Close() {
 }
 
 void Decoder::ClearCache() {
+    if (cacheBytes_) {
+        g_ramCacheBytes.fetch_sub(cacheBytes_, std::memory_order_relaxed);
+        cacheBytes_ = 0;
+    }
     for (auto& item : frameCache_) {
         av_frame_free(&item.second);
     }
     frameCache_.clear();
-    cacheBytes_ = 0;
 }
 
 // Сколько памяти под кэш достаётся ЭТОМУ клипу прямо сейчас.
@@ -751,27 +789,15 @@ void Decoder::ClearCache() {
 // нужнее, нам неоткуда — хост про это не сообщает, а угадывать по времени
 // последнего запроса значит отдавать память тому, кто просто громче стучится.
 //
-// Предел меняется переменной среды AETHER_CACHE_MB (0 — вернуть прежнее
-// поведение без общего потолка).
+// Предел берётся из настроек (cache_memory_mb / AETHER_CACHE_MB). Ноль —
+// кэш выключен, а не «без потолка»: один кадр 8K не должен пробивать лимит.
 size_t Decoder::Budget() const {
-    static const size_t kCeiling = [] {
-        const char* env = std::getenv("AETHER_CACHE_MB");
-        if (env) {
-            const long mb = strtol(env, nullptr, 10);
-            if (mb >= 0) return (size_t)mb * 1024 * 1024;
-        }
-        return (size_t)512 * 1024 * 1024;
-    }();
-
-    if (kCeiling == 0) return cacheBudget_;      // потолок отключён намеренно
+    const size_t kCeiling = (size_t)MemoryCacheLimitBytes();
+    if (kCeiling == 0) return 0;
 
     const int live = videoDecoders_.load(std::memory_order_relaxed);
     const size_t share = kCeiling / (live > 0 ? (size_t)live : 1u);
 
-    // Пол «четыре кадра» раньше поднимал долю сверх потолка: на 8K это
-    // около 200 МБ на клип, и десять клипов снова уезжали в гигабайты —
-    // ровно то, ради чего общий предел и заводили. Лучше кэш из одного
-    // кадра, чем снова без потолка.
     return (cacheBudget_ < share) ? cacheBudget_ : share;
 }
 
@@ -803,28 +829,43 @@ void Decoder::StoreInCache(int64_t index, AVFrame* src) {
         return;
     }
 
-    // Тесним самые дальние от текущей позиции: при отматывании назад
-    // пригодятся ближайшие.
-    //
-    // Предел спрашиваем на каждом кадре, а не считаем один раз при открытии:
-    // клипы на таймлайне появляются и закрываются по ходу работы, и доля
-    // каждого меняется вместе с их числом.
+    const size_t nbytes = (size_t)size;
     const size_t budget = Budget();
-    while (cacheBytes_ + size > budget && !frameCache_.empty()) {
+    const size_t ceiling = (size_t)MemoryCacheLimitBytes();
+    if (nbytes == 0 || budget == 0 || nbytes > budget || nbytes > ceiling) {
+        av_frame_free(&copy);
+        return;
+    }
+
+    auto dropOne = [&](int64_t around) {
         auto first = frameCache_.begin();
         auto last  = std::prev(frameCache_.end());
-        auto drop  = (index - first->first) >= (last->first - index) ? first : last;
-
+        auto drop  = (around - first->first) >= (last->first - around) ? first : last;
         const int dropSize = av_image_get_buffer_size((AVPixelFormat)drop->second->format,
                                                       drop->second->width,
                                                       drop->second->height, 1);
-        cacheBytes_ -= (dropSize > 0 ? dropSize : 0);
+        const size_t freed = dropSize > 0 ? (size_t)dropSize : 0;
+        if (freed && cacheBytes_ >= freed) cacheBytes_ -= freed;
+        else cacheBytes_ = 0;
+        if (freed) g_ramCacheBytes.fetch_sub(freed, std::memory_order_relaxed);
         av_frame_free(&drop->second);
         frameCache_.erase(drop);
+    };
+
+    while (cacheBytes_ > budget - nbytes && !frameCache_.empty()) {
+        dropOne(index);
+    }
+    while (g_ramCacheBytes.load(std::memory_order_relaxed) > ceiling - nbytes &&
+           !frameCache_.empty()) {
+        dropOne(index);
+    }
+    if (cacheBytes_ > budget - nbytes || !ReserveRamCache(nbytes, ceiling)) {
+        av_frame_free(&copy);
+        return;
     }
 
     frameCache_[index] = copy;
-    cacheBytes_ += size;
+    cacheBytes_ += nbytes;
 }
 
 void Decoder::CloseLocked() {
@@ -836,6 +877,8 @@ void Decoder::CloseLocked() {
     }
 
     ClearCache();
+    sourceFpValid_ = false;
+    lastPreviewFrame_ = -1;
     CloseAudioLocked();
     if (sws_)      { sws_freeContext(sws_); sws_ = nullptr; }
     if (swsYuv_)   { sws_freeContext(swsYuv_); swsYuv_ = nullptr; }
@@ -1420,6 +1463,27 @@ AVFrame* Decoder::AcquireFrameLocked(int64_t frameIndex) {
     const bool backward = (lastRequested_ >= 0 && frameIndex < lastRequested_);
     lastRequested_ = frameIndex;
 
+    // Число живых декодеров могло вырасти с прошлого запроса, а значит доля
+    // этого клипа уменьшилась. Подрезаем старый кэш до новой доли до hit:
+    // иначе клип, к которому только читают готовые кадры, держал бы прежний
+    // большой бюджет бесконечно.
+    const size_t budget = Budget();
+    while (cacheBytes_ > budget && !frameCache_.empty()) {
+        auto first = frameCache_.begin();
+        auto last = std::prev(frameCache_.end());
+        auto drop = (frameIndex - first->first) >= (last->first - frameIndex)
+                  ? first : last;
+        const int bytes = av_image_get_buffer_size(
+            (AVPixelFormat)drop->second->format,
+            drop->second->width, drop->second->height, 1);
+        const size_t freed = bytes > 0 ? (size_t)bytes : 0;
+        if (freed && cacheBytes_ >= freed) cacheBytes_ -= freed;
+        else cacheBytes_ = 0;
+        if (freed) g_ramCacheBytes.fetch_sub(freed, std::memory_order_relaxed);
+        av_frame_free(&drop->second);
+        frameCache_.erase(drop);
+    }
+
     auto cached = frameCache_.find(frameIndex);
     if (cached != frameCache_.end()) {
         lastFrameTimeSec_ = FrameTimeSec(cached->second);
@@ -1457,9 +1521,88 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
     if (dstWidth  <= 0) dstWidth  = info_.width;
     if (dstHeight <= 0) dstHeight = info_.height;
 
+    const Settings set = CurrentSettings();
+    const bool reduced = dstWidth < info_.width || dstHeight < info_.height;
+    const bool payloadOk = reduced && dstWidth > 0 && dstHeight > 0 &&
+        (uint64_t)dstWidth <= (kPreviewCacheMaxPayload / 4ull) / (uint64_t)dstHeight;
+    const bool baseEligible = set.previewCache &&
+                              format == FrameFormat::BGRA8 &&
+                              scaling_ == Scaling::Fast &&
+                              payloadOk &&
+                              sourceFpValid_;
+    const bool sequential =
+        baseEligible &&
+        lastPreviewFrame_ >= 0 &&
+        frameIndex == lastPreviewFrame_ + 1 &&
+        dstWidth == lastPreviewW_ &&
+        dstHeight == lastPreviewH_;
+    if (baseEligible) {
+        lastPreviewFrame_ = frameIndex;
+        lastPreviewW_ = dstWidth;
+        lastPreviewH_ = dstHeight;
+    }
+    const bool eligible = baseEligible && !sequential;
+
+    if (eligible) {
+        try {
+            PreviewKeyInput keyIn;
+            keyIn.source.hash = sourceFp_;
+            keyIn.source.valid = true;
+            keyIn.videoStream = videoStream_;
+            keyIn.frameIndex = frameIndex;
+            keyIn.width = dstWidth;
+            keyIn.height = dstHeight;
+            keyIn.fastScaling = true;
+            keyIn.hardware = info_.hardwareDecode;
+            keyIn.decoderName = info_.decoderName;
+            keyIn.ffmpegVersion = av_version_info();
+            keyIn.aetherVersion = AETHER_VERSION_STR;
+            const auto key = MakePreviewKey(keyIn);
+
+            const auto tRead = std::chrono::steady_clock::now();
+            if (PreviewCache::Instance().TryRead(key, dstWidth, dstHeight, dst, dstStride)) {
+                const double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - tRead).count();
+                ++stats_.previewCacheHits;
+                stats_.previewCacheReadMs += ms;
+                ++stats_.frames;
+                return true;
+            }
+        } catch (...) {
+            // Any cache failure is a miss. Decode the frame normally.
+        }
+        ++stats_.previewCacheMisses;
+    }
+
     AVFrame* src = AcquireFrameLocked(frameIndex);
     if (!src) return false;
-    return ConvertToBGRA(src, dst, dstStride, dstWidth, dstHeight, format);
+    if (!ConvertToBGRA(src, dst, dstStride, dstWidth, dstHeight, format)) return false;
+
+    if (eligible) {
+        try {
+            PreviewKeyInput keyIn;
+            keyIn.source.hash = sourceFp_;
+            keyIn.source.valid = true;
+            keyIn.videoStream = videoStream_;
+            keyIn.frameIndex = frameIndex;
+            keyIn.width = dstWidth;
+            keyIn.height = dstHeight;
+            keyIn.fastScaling = true;
+            keyIn.hardware = info_.hardwareDecode;
+            keyIn.decoderName = info_.decoderName;
+            keyIn.ffmpegVersion = av_version_info();
+            keyIn.aetherVersion = AETHER_VERSION_STR;
+            if (PreviewCache::Instance().QueueWrite(MakePreviewKey(keyIn),
+                                                    dstWidth, dstHeight, dst, dstStride)) {
+                ++stats_.previewCacheWritesQueued;
+            } else {
+                ++stats_.previewCacheWritesDropped;
+            }
+        } catch (...) {
+            ++stats_.previewCacheWritesDropped;
+        }
+    }
+    return true;
 }
 
 bool Decoder::CanDeliverYUV420() const {

@@ -8,19 +8,23 @@
 #include <shlobj.h>
 
 #include <cstdio>
+#include <cerrno>
 #include <cstring>
 #include <cwchar>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace av1imp {
 
 namespace {
 
-// Ниже этого числа логических процессоров считаем, что программный декодер
-// не вытянет, и берём видеокарту. Порог взят с потолка: замерить получилось
-// только на одной машине (16 потоков), где процессор выигрывал вшестеро.
 const DWORD kSoftwareNeedsThreads = 8;
+
+const uint32_t kMemoryChoices[] = { 0, 128, 256, 512, 1024, 2048, 4096 };
+const uint32_t kPreviewMinMB = 256;
+const uint32_t kPreviewMaxMB = 20480;
+const uint32_t kPreviewDefaultMB = 2048;
 
 bool LooksDisabled(const wchar_t* v)
 {
@@ -34,15 +38,21 @@ bool LooksDisabledNarrow(const char* v)
            _stricmp(v, "false") == 0 || _stricmp(v, "no") == 0;
 }
 
-// Файл читается один раз на процесс: Premiere зовёт YuvEnabled с каждым
-// перечислением форматов, а настройка и так применяется после перезапуска.
+bool LooksEnabledNarrow(const char* v)
+{
+    return _stricmp(v, "on") == 0 || _stricmp(v, "1") == 0 ||
+           _stricmp(v, "true") == 0 || _stricmp(v, "yes") == 0;
+}
+
 std::mutex g_iniMutex;
 bool g_iniLoaded = false;
 std::string g_iniText;
+bool g_settingsParsed = false;
+Settings g_settings;
+wchar_t g_settingsOverride[MAX_PATH] = {};
 
-std::string LoadIniText()
+std::string LoadIniTextUnlocked()
 {
-    std::lock_guard<std::mutex> lock(g_iniMutex);
     if (g_iniLoaded) return g_iniText;
     g_iniLoaded = true;
 
@@ -61,32 +71,18 @@ std::string LoadIniText()
     return g_iniText;
 }
 
+std::string LoadIniText()
+{
+    std::lock_guard<std::mutex> lock(g_iniMutex);
+    return LoadIniTextUnlocked();
+}
+
 void RememberIniText(std::string text)
 {
     std::lock_guard<std::mutex> lock(g_iniMutex);
     g_iniText = std::move(text);
     g_iniLoaded = true;
-}
-
-bool MatchIniKey(const char* p, const char* key, size_t keyLen)
-{
-    if (_strnicmp(p, key, keyLen) != 0) return false;
-    // Ключ обязан на этом кончиться. В файле есть и `yuv`, и `yuv10`;
-    // без этой проверки первый отвечал бы на строку второго.
-    const char after = p[keyLen];
-    return after == ' ' || after == '\t' || after == '=' || after == '\0' ||
-           after == '\n' || after == '\r';
-}
-
-bool ReadIniValue(const char* p, const char* key, size_t keyLen, char* value, unsigned valueSize)
-{
-    if (!MatchIniKey(p, key, keyLen)) return false;
-    p += keyLen;
-    while (*p == ' ' || *p == '\t') ++p;
-    if (*p != '=') return false;
-    ++p;
-    while (*p == ' ' || *p == '\t') ++p;
-    return sscanf_s(p, "%31s", value, valueSize) == 1;
+    g_settingsParsed = false;
 }
 
 const wchar_t* SettingsFolder()
@@ -98,10 +94,6 @@ const wchar_t* SettingsFolder()
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &base))) {
         swprintf_s(folder, MAX_PATH, L"%s\\Aether", base);
 
-        // Переезд со старого имени. Настройка тут одна — процессор или
-        // видеокарта, — но потерять её значит без причины вернуть человека
-        // к окну настроек. Переносим один раз: если в новой папке файла ещё
-        // нет, а в старой есть.
         wchar_t oldFile[MAX_PATH] = {};
         wchar_t newFile[MAX_PATH] = {};
         swprintf_s(oldFile, MAX_PATH, L"%s\\AV1Importer\\settings.ini", base);
@@ -117,51 +109,88 @@ const wchar_t* SettingsFolder()
     return folder;
 }
 
-} // namespace
-
-const wchar_t* SettingsFilePath()
+uint32_t ParseU32(const std::string& text, uint32_t fallback)
 {
-    static wchar_t path[MAX_PATH] = {};
-    if (path[0]) return path;
-
-    const wchar_t* folder = SettingsFolder();
-    if (folder[0]) swprintf_s(path, MAX_PATH, L"%s\\settings.ini", folder);
-    return path;
+    if (text.empty()) return fallback;
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long v = strtoul(text.c_str(), &end, 10);
+    if (end == text.c_str() || *end != '\0' || errno == ERANGE) return fallback;
+    if (v > 0xFFFFFFFFul) return fallback;
+    return (uint32_t)v;
 }
 
-DecodeMode CurrentMode()
+DecodeMode ParseDecode(const std::string& value)
 {
-    // Переменная среды главнее файла и ничего не сохраняет
+    if (_stricmp(value.c_str(), "software") == 0) return DecodeMode::Software;
+    if (_stricmp(value.c_str(), "hardware") == 0) return DecodeMode::Hardware;
+    return DecodeMode::Auto;
+}
+
+const char* DecodeName(DecodeMode mode)
+{
+    switch (mode) {
+        case DecodeMode::Software: return "software";
+        case DecodeMode::Hardware: return "hardware";
+        default: return "auto";
+    }
+}
+
+bool ParseOnOff(const std::string& value, bool fallback)
+{
+    if (LooksDisabledNarrow(value.c_str())) return false;
+    if (LooksEnabledNarrow(value.c_str())) return true;
+    return fallback;
+}
+
+Settings ParseFileSettings(const std::string& text)
+{
+    Settings s;
+    std::string value;
+    if (GetIniValue(text, "enabled", &value)) s.enabled = ParseOnOff(value, true);
+    value.clear();
+    if (GetIniValue(text, "decode", &value)) s.decode = ParseDecode(value);
+    value.clear();
+    if (GetIniValue(text, "cache_memory_mb", &value)) {
+        s.memoryCacheMB = SnapMemoryCacheMB(ParseU32(value, 512));
+    }
+    value.clear();
+    if (GetIniValue(text, "preview_cache", &value)) {
+        s.previewCache = ParseOnOff(value, false);
+    }
+    value.clear();
+    if (GetIniValue(text, "preview_cache_mb", &value)) {
+        s.previewCacheMB = ClampPreviewCacheMB(ParseU32(value, kPreviewDefaultMB));
+    }
+    return s;
+}
+
+Settings ApplyEnv(Settings s)
+{
     wchar_t env[64] = {};
+    if (GetEnvironmentVariableW(L"AETHER_ENABLED", env, 64) > 0) {
+        s.enabled = !LooksDisabled(env);
+    }
     if (GetEnvironmentVariableW(L"AV1IMPORTER_HARDWARE", env, 64) > 0) {
-        return LooksDisabled(env) ? DecodeMode::Software : DecodeMode::Hardware;
+        s.decode = LooksDisabled(env) ? DecodeMode::Software : DecodeMode::Hardware;
     }
-
-    const std::string text = LoadIniText();
-    DecodeMode mode = DecodeMode::Auto;
-    const char* cursor = text.c_str();
-    while (*cursor) {
-        const char* lineStart = cursor;
-        while (*cursor && *cursor != '\n' && *cursor != '\r') ++cursor;
-        char line[256];
-        size_t n = static_cast<size_t>(cursor - lineStart);
-        if (n >= sizeof(line)) n = sizeof(line) - 1;
-        memcpy(line, lineStart, n);
-        line[n] = '\0';
-        while (*cursor == '\n' || *cursor == '\r') ++cursor;
-
-        char* p = line;
-        while (*p == ' ' || *p == '\t') ++p;
-        char value[32] = {};
-        if (!ReadIniValue(p, "decode", 6, value, (unsigned)sizeof(value))) continue;
-        if (_stricmp(value, "software") == 0)      mode = DecodeMode::Software;
-        else if (_stricmp(value, "hardware") == 0) mode = DecodeMode::Hardware;
-        break;
+    if (GetEnvironmentVariableW(L"AETHER_CACHE_MB", env, 64) > 0) {
+        char narrow[64] = {};
+        WideCharToMultiByte(CP_UTF8, 0, env, -1, narrow, (int)sizeof(narrow), nullptr, nullptr);
+        s.memoryCacheMB = SnapMemoryCacheMB(ParseU32(narrow, s.memoryCacheMB));
     }
-    return mode;
+    if (GetEnvironmentVariableW(L"AETHER_PREVIEW_CACHE", env, 64) > 0) {
+        s.previewCache = !LooksDisabled(env);
+    }
+    if (GetEnvironmentVariableW(L"AETHER_PREVIEW_CACHE_MB", env, 64) > 0) {
+        char narrow[64] = {};
+        WideCharToMultiByte(CP_UTF8, 0, env, -1, narrow, (int)sizeof(narrow), nullptr, nullptr);
+        s.previewCacheMB = ClampPreviewCacheMB(ParseU32(narrow, s.previewCacheMB));
+    }
+    return s;
 }
 
-bool SaveMode(DecodeMode mode)
+bool WriteSettingsFile(const std::string& updated)
 {
     const wchar_t* folder = SettingsFolder();
     if (!folder[0]) return false;
@@ -170,44 +199,6 @@ bool SaveMode(DecodeMode mode)
     }
 
     const wchar_t* path = SettingsFilePath();
-    const char* value = mode == DecodeMode::Software ? "software"
-                      : mode == DecodeMode::Hardware ? "hardware"
-                                                     : "auto";
-
-    // Читаем файл целиком до открытия на запись: кроме decode в нём живут
-    // аварийные выключатели async/yuv и могут появиться будущие настройки.
-    // Сохранение одного переключателя не имеет права стирать остальные.
-    std::string existing;
-    FILE* input = nullptr;
-    const errno_t openResult = _wfopen_s(&input, path, L"rb");
-    if (openResult == 0 && input) {
-        char chunk[4096];
-        size_t got = 0;
-        while ((got = fread(chunk, 1, sizeof(chunk), input)) > 0) {
-            existing.append(chunk, got);
-        }
-        if (ferror(input)) {
-            fclose(input);
-            return false;
-        }
-        fclose(input);
-    } else {
-        const DWORD attributes = GetFileAttributesW(path);
-        const DWORD error = GetLastError();
-        if (attributes != INVALID_FILE_ATTRIBUTES ||
-            (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)) {
-            return false;
-        }
-    }
-
-    if (existing.empty()) {
-        existing = "; AV1 / VP9 Importer for Premiere Pro\r\n"
-                   "; decode = auto | software | hardware\r\n";
-    }
-    const std::string updated = SetIniValue(existing, "decode", value);
-
-    // Пишем сначала рядом, затем заменяем одним MoveFileEx: оборванная запись
-    // не должна оставить Premiere с наполовину пустым settings.ini.
     std::wstring temporary = path;
     temporary += L".tmp";
 
@@ -231,6 +222,208 @@ bool SaveMode(DecodeMode mode)
     return true;
 }
 
+bool EnabledUnlessTurnedOff(const wchar_t* envName, const char* key)
+{
+    wchar_t env[64] = {};
+    if (GetEnvironmentVariableW(envName, env, 64) > 0) {
+        return !LooksDisabled(env);
+    }
+
+    const std::string text = LoadIniText();
+    std::string value;
+    if (!GetIniValue(text, key, &value)) return true;
+    return !LooksDisabledNarrow(value.c_str());
+}
+
+std::string JsonEscape(const std::string& in)
+{
+    std::string out;
+    out.reserve(in.size());
+    for (unsigned char c : in) {
+        if (c == '\\' || c == '"') {
+            out += '\\';
+            out += (char)c;
+        } else if (c < 0x20) {
+            char buf[8];
+            sprintf_s(buf, "\\u%04x", c);
+            out += buf;
+        } else {
+            out += (char)c;
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+uint32_t SnapMemoryCacheMB(uint32_t mb)
+{
+    uint32_t best = kMemoryChoices[0];
+    uint32_t bestDist = mb > best ? mb - best : best - mb;
+    for (uint32_t choice : kMemoryChoices) {
+        const uint32_t dist = mb > choice ? mb - choice : choice - mb;
+        if (dist < bestDist) {
+            best = choice;
+            bestDist = dist;
+        }
+    }
+    return best;
+}
+
+uint32_t ClampPreviewCacheMB(uint32_t mb)
+{
+    if (mb < kPreviewMinMB) return kPreviewMinMB;
+    if (mb > kPreviewMaxMB) return kPreviewMaxMB;
+    return mb;
+}
+
+const wchar_t* SettingsFilePath()
+{
+    static wchar_t path[MAX_PATH] = {};
+    if (g_settingsOverride[0]) return g_settingsOverride;
+    if (path[0]) return path;
+
+    const wchar_t* folder = SettingsFolder();
+    if (folder[0]) swprintf_s(path, MAX_PATH, L"%s\\settings.ini", folder);
+    return path;
+}
+
+void SetSettingsFilePathForTests(const wchar_t* path)
+{
+    std::lock_guard<std::mutex> lock(g_iniMutex);
+    if (path && path[0]) {
+        wcsncpy_s(g_settingsOverride, path, _TRUNCATE);
+    } else {
+        g_settingsOverride[0] = 0;
+    }
+    g_iniText.clear();
+    g_iniLoaded = false;
+    g_settingsParsed = false;
+}
+
+void ReloadSettingsForTests()
+{
+    std::lock_guard<std::mutex> lock(g_iniMutex);
+    g_iniText.clear();
+    g_iniLoaded = false;
+    g_settingsParsed = false;
+}
+
+Settings CurrentSettings()
+{
+    std::lock_guard<std::mutex> lock(g_iniMutex);
+    if (!g_settingsParsed) {
+        g_settings = ApplyEnv(ParseFileSettings(LoadIniTextUnlocked()));
+        g_settingsParsed = true;
+    }
+    return g_settings;
+}
+
+bool SaveSettings(const Settings& settings)
+{
+    const Settings clamped = {
+        settings.enabled,
+        settings.decode,
+        SnapMemoryCacheMB(settings.memoryCacheMB),
+        settings.previewCache,
+        ClampPreviewCacheMB(settings.previewCacheMB),
+    };
+
+    std::string existing;
+    FILE* input = nullptr;
+    const wchar_t* path = SettingsFilePath();
+    const errno_t openResult = _wfopen_s(&input, path, L"rb");
+    if (openResult == 0 && input) {
+        char chunk[4096];
+        size_t got = 0;
+        while ((got = fread(chunk, 1, sizeof(chunk), input)) > 0) {
+            existing.append(chunk, got);
+        }
+        if (ferror(input)) {
+            fclose(input);
+            return false;
+        }
+        fclose(input);
+    } else {
+        const DWORD attributes = GetFileAttributesW(path);
+        const DWORD error = GetLastError();
+        if (attributes != INVALID_FILE_ATTRIBUTES ||
+            (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)) {
+            return false;
+        }
+    }
+
+    if (existing.empty()) {
+        existing = "; AV1 / VP9 Importer for Premiere Pro\r\n"
+                   "; enabled = on | off\r\n"
+                   "; decode = auto | software | hardware\r\n"
+                   "; cache_memory_mb = 0 | 128 | 256 | 512 | 1024 | 2048 | 4096\r\n"
+                   "; preview_cache = on | off\r\n"
+                   "; preview_cache_mb = 256 .. 20480\r\n";
+    }
+
+    std::string updated = existing;
+    updated = SetIniValue(updated, "enabled", clamped.enabled ? "on" : "off");
+    updated = SetIniValue(updated, "decode", DecodeName(clamped.decode));
+    updated = SetIniValue(updated, "cache_memory_mb", std::to_string(clamped.memoryCacheMB));
+    updated = SetIniValue(updated, "preview_cache", clamped.previewCache ? "on" : "off");
+    updated = SetIniValue(updated, "preview_cache_mb", std::to_string(clamped.previewCacheMB));
+    return WriteSettingsFile(updated);
+}
+
+uint64_t MemoryCacheLimitBytes()
+{
+    return (uint64_t)CurrentSettings().memoryCacheMB * 1024ull * 1024ull;
+}
+
+bool PluginEnabled()
+{
+    return CurrentSettings().enabled;
+}
+
+std::string SettingsJson()
+{
+    const Settings s = CurrentSettings();
+    const std::string file = [] {
+        const wchar_t* path = SettingsFilePath();
+        if (!path || !path[0]) return std::string();
+        const int need = WideCharToMultiByte(CP_UTF8, 0, path, -1, nullptr, 0, nullptr, nullptr);
+        if (need <= 1) return std::string();
+        std::string out((size_t)need, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, path, -1, &out[0], need, nullptr, nullptr);
+        out.pop_back();
+        return out;
+    }();
+
+    std::string json = "{";
+    json += "\"enabled\":";
+    json += s.enabled ? "true" : "false";
+    json += ",\"decode\":\"";
+    json += DecodeName(s.decode);
+    json += "\",\"cache_memory_mb\":";
+    json += std::to_string(s.memoryCacheMB);
+    json += ",\"preview_cache\":";
+    json += s.previewCache ? "true" : "false";
+    json += ",\"preview_cache_mb\":";
+    json += std::to_string(s.previewCacheMB);
+    json += ",\"file\":\"";
+    json += JsonEscape(file);
+    json += "\"}";
+    return json;
+}
+
+DecodeMode CurrentMode()
+{
+    return CurrentSettings().decode;
+}
+
+bool SaveMode(DecodeMode mode)
+{
+    Settings s = ParseFileSettings(LoadIniText());
+    s.decode = mode;
+    return SaveSettings(s);
+}
+
 bool PreferHardware()
 {
     switch (CurrentMode()) {
@@ -244,68 +437,16 @@ bool PreferHardware()
     return si.dwNumberOfProcessors < kSoftwareNeedsThreads;
 }
 
-namespace {
-
-// Выключатель «включено, пока явно не выключили»: переменная среды главнее
-// файла, как и у выбора декодера.
-//
-// Вынесено в одно место, потому что таких выключателей стало два, а разбор
-// строки у них был бы посимвольно одинаковый. Второй копии достаточно, чтобы
-// они разъехались — и разъезжаются такие двойники в сторону редкого случая,
-// где никто не смотрит.
-bool EnabledUnlessTurnedOff(const wchar_t* envName, const char* key)
-{
-    wchar_t env[64] = {};
-    if (GetEnvironmentVariableW(envName, env, 64) > 0) {
-        return !LooksDisabled(env);
-    }
-
-    const std::string text = LoadIniText();
-    const size_t keyLen = strlen(key);
-    bool enabled = true;
-    const char* cursor = text.c_str();
-    while (*cursor) {
-        const char* lineStart = cursor;
-        while (*cursor && *cursor != '\n' && *cursor != '\r') ++cursor;
-        char line[256];
-        size_t n = static_cast<size_t>(cursor - lineStart);
-        if (n >= sizeof(line)) n = sizeof(line) - 1;
-        memcpy(line, lineStart, n);
-        line[n] = '\0';
-        while (*cursor == '\n' || *cursor == '\r') ++cursor;
-
-        char* p = line;
-        while (*p == ' ' || *p == '\t') ++p;
-        char value[32] = {};
-        if (!ReadIniValue(p, key, keyLen, value, (unsigned)sizeof(value))) continue;
-        if (LooksDisabledNarrow(value)) enabled = false;
-    }
-    return enabled;
-}
-
-} // namespace
-
-// Асинхронная выдача. По умолчанию включена — выключенная возможность никем
-// не проверяется и тихо гниёт, — но выключатель есть, потому что это отдельный
-// поток внутри чужого процесса, и если он однажды окажется виноват, человек
-// должен уметь его отключить, не удаляя плагин.
 bool AsyncDeliveryEnabled()
 {
     return EnabledUnlessTurnedOff(L"AETHER_ASYNC", "async");
 }
 
-// Выдача кадров без перевода в RGB. По умолчанию включена по той же причине,
-// что и асинхронная, и выключатель есть по той же: путь новый, а решение
-// «беру или не беру» принимает хост, и предсказать его поведение на всех
-// версиях Adobe мы не можем. Если где-то цвет уедет, человек должен уметь
-// вернуться на прежний путь строкой в файле, а не удалением плагина.
 bool YuvEnabled()
 {
     return EnabledUnlessTurnedOff(L"AETHER_YUV", "yuv");
 }
 
-// Десятибитная выдача плоскостями. По умолчанию включена: CreateCustomPPix
-// даёт плоский буфер, а при отказе хоста тот же запрос уходит в BGRA16.
 bool Yuv10Enabled()
 {
     return EnabledUnlessTurnedOff(L"AETHER_YUV10", "yuv10");

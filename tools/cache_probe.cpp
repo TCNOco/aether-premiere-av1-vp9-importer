@@ -15,6 +15,7 @@
 // видно в диспетчере задач, и есть та, на которую жалуется пользователь.
 
 #include "../src/AV1Decoder.h"
+#include "../src/AV1Settings.h"
 #include "utf8_args.h"
 
 #include <windows.h>
@@ -80,5 +81,13 @@ int wmain(int argc, wchar_t** wargv)
     printf("%dx%d, клипов %d: пик рабочего набора %zu МБ (до открытия %zu)\n",
            info.width, info.height, clips, peak, before);
     printf("на клип: %.1f МБ\n", clips ? (double)(peak - before) / clips : 0.0);
+    const size_t held = av1imp::Decoder::RamCacheBytesHeld();
+    const uint64_t limit = av1imp::MemoryCacheLimitBytes();
+    printf("внутренний кэш Aether: %.1f МБ, предел %.1f МБ\n",
+           held / (1024.0 * 1024.0), limit / (1024.0 * 1024.0));
+    if (held > limit) {
+        printf("FAIL: внутренний счётчик пробил общий предел\n");
+        return 4;
+    }
     return 0;
 }

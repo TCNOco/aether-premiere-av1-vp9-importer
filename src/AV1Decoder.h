@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <atomic>
@@ -293,9 +294,17 @@ public:
         double  transferMs = 0.0;   // перенос из памяти видеокарты
         double  convertMs  = 0.0;   // пересчёт в BGRA
         int64_t frames     = 0;
+        int64_t previewCacheHits = 0;
+        int64_t previewCacheMisses = 0;
+        int64_t previewCacheWritesQueued = 0;
+        int64_t previewCacheWritesDropped = 0;
+        double  previewCacheReadMs = 0.0;
     };
     const Stats& GetStats() const { return stats_; }
     void ResetStats() { stats_ = Stats(); }
+
+    // Сколько байт RAM-кэш кадров держит во всём процессе прямо сейчас.
+    static size_t RamCacheBytesHeld();
 
     // Текст последней ошибки — для журнала плагина.
     //
@@ -464,6 +473,12 @@ private:
     std::map<int64_t, AVFrame*> frameCache_;
     size_t   cacheBytes_    = 0;
     size_t   cacheBudget_   = 0;    // сколько хочет ЭТОТ клип, см. Open()
+
+    std::array<uint8_t, 32> sourceFp_{};
+    bool     sourceFpValid_ = false;
+    int64_t  lastPreviewFrame_ = -1;
+    int      lastPreviewW_ = 0;
+    int      lastPreviewH_ = 0;
 
     // Сколько памяти ему достанется с учётом остальных клипов, см. Budget()
     size_t   Budget() const;

@@ -14,8 +14,11 @@
 // actually made.
 
 #include "../src/AV1Decoder.h"
+#include "../src/AV1Settings.h"
+#include "../src/PreviewCache.h"
 #include "utf8_args.h"
 
+#include <windows.h>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -695,6 +698,76 @@ void CheckReducedSizeStaysInBuffer(av1imp::Decoder& dec, const av1imp::MediaInfo
     Check(guardIntact, "reduced-size frame stays inside the buffer");
 }
 
+void CheckPersistentReducedPreview(const std::string& path,
+                                   const av1imp::MediaInfo& info,
+                                   bool preferHardware)
+{
+    if (!info.hasVideo || info.width < 2 || info.height < 2) {
+        printf("  %-46s SKIP (no reducible video)\n",
+               "persistent reduced preview round trip");
+        return;
+    }
+
+    wchar_t root[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, root);
+    wcscat_s(root, L"aether-decoder-preview-test");
+    SetEnvironmentVariableW(L"AETHER_PREVIEW_CACHE_DIR", root);
+    SetEnvironmentVariableW(L"AETHER_PREVIEW_CACHE", L"on");
+    av1imp::ReloadSettingsForTests();
+    av1imp::PreviewCache& cache = av1imp::PreviewCache::Instance();
+    cache.Clear();
+
+    const int w = info.width / 2;
+    const int h = info.height / 2;
+    const int stride = w * 4;
+    const int64_t at = info.frameCount > 20 ? 17 : 0;
+    std::vector<uint8_t> cold((size_t)stride * h);
+    std::vector<uint8_t> warm(cold.size());
+
+    av1imp::Decoder first;
+    const bool openedFirst = first.Open(path, preferHardware);
+    first.SetScaling(av1imp::Scaling::Fast);
+    const bool gotCold = openedFirst &&
+        first.GetFrameBGRA(at, cold.data(), stride, w, h);
+    cache.FlushForTests();
+    const uint64_t filesAfterCold = cache.Usage().files;
+
+    av1imp::Decoder second;
+    const bool openedSecond = second.Open(path, preferHardware);
+    second.SetScaling(av1imp::Scaling::Fast);
+    const bool gotWarm = openedSecond &&
+        second.GetFrameBGRA(at, warm.data(), stride, w, h);
+    const bool hit = second.GetStats().previewCacheHits == 1;
+    const bool warmEqual = cold == warm;
+
+    const uint64_t beforeExcluded = cache.Usage().files;
+    std::vector<uint8_t> full((size_t)info.width * info.height * 4);
+    const bool gotFull = second.GetFrameBGRA(at + 3, full.data(), info.width * 4,
+                                             info.width, info.height);
+    second.SetScaling(av1imp::Scaling::Good);
+    const bool gotGood = second.GetFrameBGRA(at + 6, warm.data(), stride, w, h);
+    cache.FlushForTests();
+    const uint64_t afterExcluded = cache.Usage().files;
+
+    printf("      preview cache: cold=%d warm=%d hit=%lld files=%llu equal=%d\n",
+           gotCold ? 1 : 0, gotWarm ? 1 : 0,
+           (long long)second.GetStats().previewCacheHits,
+           (unsigned long long)filesAfterCold,
+           warmEqual ? 1 : 0);
+    Check(gotCold && gotWarm && hit && warmEqual && filesAfterCold == 1,
+          "persistent reduced preview round trip");
+    Check(gotFull && gotGood && beforeExcluded == afterExcluded,
+          "full-size and Good frames bypass disk cache");
+
+    first.Close();
+    second.Close();
+    cache.Clear();
+    cache.Shutdown();
+    SetEnvironmentVariableW(L"AETHER_PREVIEW_CACHE", nullptr);
+    SetEnvironmentVariableW(L"AETHER_PREVIEW_CACHE_DIR", nullptr);
+    av1imp::ReloadSettingsForTests();
+}
+
 // Reading the same range twice must give the same samples, even after the
 // decoder has been sent somewhere else in between.
 void CheckAudioIsRepeatable(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
@@ -1096,6 +1169,7 @@ int wmain(int argc, wchar_t** wargv)
     CheckColourMatrix(dec, info, requireColour);
     CheckTransferUnspecified(info, requireTransferUnspecified);
     CheckAudioChannelCap(dec, info, requireAudioCap);
+    CheckPersistentReducedPreview(path, info, preferHardware);
 
     printf("\n%s\n", g_failures == 0 ? "ALL CHECKS PASSED"
                                      : "SOME CHECKS FAILED");

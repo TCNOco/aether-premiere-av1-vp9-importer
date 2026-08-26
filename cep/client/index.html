@@ -17,6 +17,8 @@
   <nav role="tablist" aria-label="Разделы Aether">
     <button id="tab-settings" class="tab active" role="tab"
       aria-selected="true" aria-controls="page-settings">Настройки</button>
+    <button id="tab-cache" class="tab" role="tab" tabindex="-1"
+      aria-selected="false" aria-controls="page-cache">Кэш</button>
     <button id="tab-diagnose" class="tab" role="tab" tabindex="-1"
       aria-selected="false" aria-controls="page-diagnose">Диагностика</button>
   </nav>
@@ -24,6 +26,13 @@
   <!-- ------------------------------------------------------- настройки -->
   <section id="page-settings" role="tabpanel" aria-labelledby="tab-settings">
     <h2>Как распаковывать видео AV1 и VP9</h2>
+
+    <label class="choice">
+      <input id="enabled" type="checkbox" checked>
+      <span class="title">Aether включён</span>
+      <span class="note">Если выключить, после перезапуска Adobe файлы будут
+        переданы другим импортёрам, а FFmpeg не загрузится.</span>
+    </label>
 
     <label class="choice">
       <input type="radio" name="decode" value="auto" checked>
@@ -50,6 +59,54 @@
     <div class="bar">
       <button id="save" class="primary">Сохранить</button>
       <span id="saved" class="note"></span>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------------- кэш -->
+  <section id="page-cache" role="tabpanel" aria-labelledby="tab-cache" hidden>
+    <h2>Кэш Aether</h2>
+
+    <label class="field">
+      <span>Кэш кадров в памяти</span>
+      <select id="memory-cache">
+        <option value="0">Выключен</option>
+        <option value="128">128 MiB</option>
+        <option value="256">256 MiB</option>
+        <option value="512" selected>512 MiB</option>
+        <option value="1024">1 GiB</option>
+        <option value="2048">2 GiB</option>
+        <option value="4096">4 GiB</option>
+      </select>
+    </label>
+    <p class="note">Лимит относится только к кадрам, которые кэширует Aether.
+      Общая память Premiere может быть выше.</p>
+
+    <label class="choice">
+      <input id="preview-cache" type="checkbox">
+      <span class="title">Хранить уменьшенные превью на диске</span>
+      <span class="note">Только BGRA8 Draft/Low до 2 MiB. Полноразмерное
+        воспроизведение и экспорт этот кэш не используют.</span>
+    </label>
+
+    <label class="field">
+      <span>Лимит дискового кэша</span>
+      <select id="preview-limit">
+        <option value="256">256 MiB</option>
+        <option value="512">512 MiB</option>
+        <option value="1024">1 GiB</option>
+        <option value="2048" selected>2 GiB</option>
+        <option value="4096">4 GiB</option>
+        <option value="8192">8 GiB</option>
+        <option value="20480">20 GiB</option>
+      </select>
+    </label>
+
+    <p id="cache-usage" class="note" aria-live="polite">Занято: считаем...</p>
+    <p id="cache-status" class="note" role="status" aria-live="polite"></p>
+
+    <div class="bar">
+      <button id="save-cache" class="primary">Сохранить</button>
+      <button id="clear-cache">Очистить кэш превью</button>
     </div>
   </section>
 

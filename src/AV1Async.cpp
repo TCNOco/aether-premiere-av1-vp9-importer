@@ -276,6 +276,16 @@ prMALError GetFrame(AsyncState* s, imSourceVideoRec* videoRec)
     int pick = av1imp::PickFrameFormat(videoRec->inFrameFormats,
                                        videoRec->inNumFrameFormats);
 
+    {
+        imFrameFormat* offered = &videoRec->inFrameFormats[pick >= 0 ? pick : 0];
+        const int askedW = (offered->inFrameWidth  > 0) ? offered->inFrameWidth  : s->width;
+        const int askedH = (offered->inFrameHeight > 0) ? offered->inFrameHeight : s->height;
+        const PrPixelFormat askedFmt =
+            (pick >= 0) ? offered->inPixelFormat : PrPixelFormat_BGRA_4444_8u;
+        NoteHostVideoRequest((csSDK_int32)frame, s->width, s->height,
+                             askedW, askedH, askedFmt, videoRec->inQuality);
+    }
+
     s->decoder.SetScaling(av1imp::ScalingFor(videoRec->inQuality));
 
     for (;;) {

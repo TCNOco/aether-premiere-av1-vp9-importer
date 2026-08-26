@@ -18,9 +18,13 @@
 // не запускается — внутри него она была бы недоступна.
 //
 // Переключается программой Aether.exe (ярлык в меню «Пуск») и панелью
-// Window -> Extensions внутри Premiere. Обе правят один и тот же файл.
+// Window -> Extensions внутри Premiere. Обе правят один и тот же файл
+// через эту реализацию, а не через второй парсер.
 
 #pragma once
+
+#include <cstdint>
+#include <string>
 
 namespace av1imp {
 
@@ -30,9 +34,22 @@ enum class DecodeMode {
     Hardware,     // всегда видеокарта
 };
 
+struct Settings {
+    bool     enabled         = true;
+    DecodeMode decode        = DecodeMode::Auto;
+    uint32_t memoryCacheMB   = 512;
+    // Включается пользователем до живого cold/warm замера в Premiere.
+    bool     previewCache    = false;
+    uint32_t previewCacheMB  = 2048;
+};
+
 // Папка, из которой загружен плагин, с завершающим слэшем.
 // Рядом лежат библиотеки ffmpeg. Доступно только внутри плагина.
 const wchar_t* PluginDirectory();
+
+// Только журнал, без ffmpeg. Нужен выключенному импортёру: Adobe всё равно
+// зовёт imInit, а грузить библиотеки в этом случае незачем.
+void EnsureLog();
 
 // Отложенная подготовка: журнал и библиотеки ffmpeg. Вызывается из точки входа
 // плагина, а не при загрузке DLL, — см. длинный комментарий в AV1Runtime.cpp.
@@ -42,6 +59,14 @@ bool EnsureRuntime();
 
 // Полный путь к файлу настроек. Папка создаётся при сохранении.
 const wchar_t* SettingsFilePath();
+
+Settings CurrentSettings();
+bool SaveSettings(const Settings& settings);
+
+uint64_t MemoryCacheLimitBytes();
+bool PluginEnabled();
+
+std::string SettingsJson();
 
 // Что выбрано сейчас. Переменная среды AV1IMPORTER_HARDWARE (0/1) главнее файла:
 // ею удобно проверить догадку, ничего не сохраняя.
@@ -81,5 +106,12 @@ bool YuvEnabled();
 //
 // Выключить вручную: `yuv10 = off` или AETHER_YUV10=0.
 bool Yuv10Enabled();
+
+// Для автотестов: подменить файл настроек и сбросить кэш чтения.
+void SetSettingsFilePathForTests(const wchar_t* path);
+void ReloadSettingsForTests();
+
+uint32_t SnapMemoryCacheMB(uint32_t mb);
+uint32_t ClampPreviewCacheMB(uint32_t mb);
 
 } // namespace av1imp

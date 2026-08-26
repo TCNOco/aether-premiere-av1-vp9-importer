@@ -13,15 +13,20 @@
 #include "AV1Log.h"
 #include "AV1Settings.h"
 #include "ImporterMath.h"
+#include "PreviewCache.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <iterator>     // std::size — длина буфера пути берётся из него самого
+#include <map>
 #include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Вспомогательное
@@ -47,6 +52,137 @@ std::string Utf8FromUtf16(const prUTF16Char* path)
 // Хост один раз отказал в буфере P010 — до конца процесса не дразним его этим
 // форматом снова (иначе каждый кадр отказывает и предпросмотр замирает).
 std::atomic<bool> g_p010Unavailable{false};
+
+struct HostRequestProfile {
+    std::mutex mutex;
+    uint64_t total = 0;
+    uint64_t reduced = 0;
+    uint64_t full = 0;
+    uint64_t bgra8 = 0;
+    uint64_t bgra16 = 0;
+    uint64_t yuv = 0;
+    uint64_t p010 = 0;
+    uint64_t otherFmt = 0;
+    uint64_t qDraft = 0;
+    uint64_t qLow = 0;
+    uint64_t qMedium = 0;
+    uint64_t qHigh = 0;
+    uint64_t qOther = 0;
+    uint64_t sequential = 0;
+    uint64_t jump = 0;
+    uint64_t first = 0;
+    bool haveLast = false;
+    csSDK_int32 lastFrame = 0;
+    std::map<std::pair<int, int>, uint64_t> sizes;
+};
+
+HostRequestProfile g_hostReq;
+
+void FinishImporterShutdown()
+{
+    av1imp::LogHostRequestProfile();
+    av1imp::PreviewCache::Instance().Shutdown();
+    av1imp::LogClose();
+}
+
+} // namespace
+
+namespace av1imp {
+
+void NoteHostVideoRequest(csSDK_int32 frameIndex,
+                          int nativeWidth, int nativeHeight,
+                          int askedWidth, int askedHeight,
+                          PrPixelFormat pixelFormat,
+                          PrRenderQuality quality)
+{
+    std::lock_guard<std::mutex> lock(g_hostReq.mutex);
+    ++g_hostReq.total;
+    const bool reduced = askedWidth > 0 && askedHeight > 0 &&
+                         nativeWidth > 0 && nativeHeight > 0 &&
+                         (askedWidth < nativeWidth || askedHeight < nativeHeight);
+    if (reduced) ++g_hostReq.reduced;
+    else ++g_hostReq.full;
+
+    if (pixelFormat == PrPixelFormat_BGRA_4444_8u) ++g_hostReq.bgra8;
+    else if (pixelFormat == PrPixelFormat_BGRA_4444_16u) ++g_hostReq.bgra16;
+    else if (IsNativeP010(pixelFormat)) ++g_hostReq.p010;
+    else if (IsNativeYUV(pixelFormat)) ++g_hostReq.yuv;
+    else ++g_hostReq.otherFmt;
+
+    switch (quality) {
+        case kPrRenderQuality_Draft:  ++g_hostReq.qDraft; break;
+        case kPrRenderQuality_Low:    ++g_hostReq.qLow; break;
+        case kPrRenderQuality_Medium: ++g_hostReq.qMedium; break;
+        case kPrRenderQuality_High:   ++g_hostReq.qHigh; break;
+        default:                      ++g_hostReq.qOther; break;
+    }
+
+    if (!g_hostReq.haveLast) {
+        ++g_hostReq.first;
+        g_hostReq.haveLast = true;
+    } else if (frameIndex == g_hostReq.lastFrame + 1) {
+        ++g_hostReq.sequential;
+    } else {
+        ++g_hostReq.jump;
+    }
+    g_hostReq.lastFrame = frameIndex;
+
+    if (askedWidth > 0 && askedHeight > 0) {
+        ++g_hostReq.sizes[std::make_pair(askedWidth, askedHeight)];
+    }
+}
+
+void LogHostRequestProfile()
+{
+    std::lock_guard<std::mutex> lock(g_hostReq.mutex);
+    if (g_hostReq.total == 0) return;
+
+    Log("host requests: %llu total, %llu reduced, %llu full; "
+        "BGRA8 %llu BGRA16 %llu YUV %llu P010 %llu other %llu; "
+        "quality draft %llu low %llu medium %llu high %llu other %llu; "
+        "seq %llu jump %llu first %llu",
+        (unsigned long long)g_hostReq.total,
+        (unsigned long long)g_hostReq.reduced,
+        (unsigned long long)g_hostReq.full,
+        (unsigned long long)g_hostReq.bgra8,
+        (unsigned long long)g_hostReq.bgra16,
+        (unsigned long long)g_hostReq.yuv,
+        (unsigned long long)g_hostReq.p010,
+        (unsigned long long)g_hostReq.otherFmt,
+        (unsigned long long)g_hostReq.qDraft,
+        (unsigned long long)g_hostReq.qLow,
+        (unsigned long long)g_hostReq.qMedium,
+        (unsigned long long)g_hostReq.qHigh,
+        (unsigned long long)g_hostReq.qOther,
+        (unsigned long long)g_hostReq.sequential,
+        (unsigned long long)g_hostReq.jump,
+        (unsigned long long)g_hostReq.first);
+
+    std::vector<std::pair<uint64_t, std::pair<int, int>>> top;
+    top.reserve(g_hostReq.sizes.size());
+    for (const auto& kv : g_hostReq.sizes) {
+        top.push_back({kv.second, kv.first});
+    }
+    std::sort(top.begin(), top.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+    const size_t n = top.size() < 8 ? top.size() : 8;
+    std::string sizes;
+    for (size_t i = 0; i < n; ++i) {
+        if (!sizes.empty()) sizes += ", ";
+        char buf[64];
+        sprintf_s(buf, "%dx%d=%llu",
+                  top[i].second.first, top[i].second.second,
+                  (unsigned long long)top[i].first);
+        sizes += buf;
+    }
+    if (!sizes.empty()) {
+        Log("host request sizes: %s", sizes.c_str());
+    }
+}
+
+} // namespace av1imp
+
+namespace {
 
 // Удачный рецепт создания P010: после первого кадра не гоняем весь перебор
 // и не спамим журнал на каждый кадр скраба.
@@ -580,6 +716,17 @@ static prMALError AV1CloseFile(imStdParms* stdParms, imFileRef* fileRef, void* p
     av1imp::Log("imCloseFile: stream %d", ldata->streamIdx);
 
     if (ldata->decoder) {
+        const av1imp::Decoder::Stats& stats = ldata->decoder->GetStats();
+        if (stats.previewCacheHits || stats.previewCacheMisses ||
+            stats.previewCacheWritesQueued || stats.previewCacheWritesDropped) {
+            av1imp::Log(
+                "preview cache: hit %lld, miss %lld, queued %lld, dropped %lld, read %.2f ms",
+                (long long)stats.previewCacheHits,
+                (long long)stats.previewCacheMisses,
+                (long long)stats.previewCacheWritesQueued,
+                (long long)stats.previewCacheWritesDropped,
+                stats.previewCacheReadMs);
+        }
         delete ldata->decoder;
         ldata->decoder = nullptr;
     }
@@ -1361,19 +1508,6 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
     const csSDK_int32 frameIndex =
         static_cast<csSDK_int32>(videoRec->inFrameTime / ldata->ticksPerFrame);
 
-    // Если кадр уже разбирали — Premiere вернёт его из своего кэша,
-    // и на перемотке туда-сюда мы не декодируем одно и то же дважды
-    // Кэш кадров самого Premiere — не обязательное условие: без него мы просто
-    // распаковываем заново, опираясь на собственный кэш в декодере
-    prMALError result = imOtherErr;
-    if (ldata->PPixCacheSuite) {
-        result = ldata->PPixCacheSuite->GetFrameFromCache(
-            ldata->importerID, 0, frameIndex, 1,
-            videoRec->inFrameFormats, videoRec->outFrame, nullptr, 0);
-
-        if (result == suiteError_NoError) return result;
-    }
-
     // Сколько форматов прислали, столько и читаем. Обращение к нулевому без
     // этой проверки — чтение чужой памяти, если хост однажды пришлёт пустой
     // список. Сейчас так не делает ни один, но полагаться на это незачем.
@@ -1392,6 +1526,29 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
                     "(first is 0x%08X) - falling back to BGRA 8u",
                     videoRec->inNumFrameFormats,
                     (unsigned)videoRec->inFrameFormats[0].inPixelFormat);
+    }
+
+    {
+        imFrameFormat* offered = &videoRec->inFrameFormats[pick >= 0 ? pick : 0];
+        const int askedW = (offered->inFrameWidth  > 0) ? offered->inFrameWidth  : mi.width;
+        const int askedH = (offered->inFrameHeight > 0) ? offered->inFrameHeight : mi.height;
+        const PrPixelFormat askedFmt =
+            (pick >= 0) ? offered->inPixelFormat : PrPixelFormat_BGRA_4444_8u;
+        av1imp::NoteHostVideoRequest(frameIndex, mi.width, mi.height,
+                                     askedW, askedH, askedFmt, videoRec->inQuality);
+    }
+
+    // Если кадр уже разбирали — Premiere вернёт его из своего кэша,
+    // и на перемотке туда-сюда мы не декодируем одно и то же дважды
+    // Кэш кадров самого Premiere — не обязательное условие: без него мы просто
+    // распаковываем заново, опираясь на собственный кэш в декодере
+    prMALError result = imOtherErr;
+    if (ldata->PPixCacheSuite) {
+        result = ldata->PPixCacheSuite->GetFrameFromCache(
+            ldata->importerID, 0, frameIndex, 1,
+            videoRec->inFrameFormats, videoRec->outFrame, nullptr, 0);
+
+        if (result == suiteError_NoError) return result;
     }
 
     // Качество, которое просит хост: при черновом кадр уменьшается дешевле.
@@ -1469,17 +1626,63 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
 // Точка входа
 // ---------------------------------------------------------------------------
 
+static prMALError DispatchDisabled(csSDK_int32 selector, imStdParms* stdParms,
+                                   void* param1)
+{
+    switch (selector) {
+        case imInit: {
+            imImportInfoRec* importInfo = reinterpret_cast<imImportInfoRec*>(param1);
+            if (!importInfo) return imOtherErr;
+            importInfo->canSave       = kPrFalse;
+            importInfo->canDelete     = kPrFalse;
+            importInfo->canTrim       = kPrFalse;
+            importInfo->canCalcSizes  = kPrFalse;
+            importInfo->hasSetup      = kPrFalse;
+            importInfo->setupOnDblClk = kPrFalse;
+            importInfo->dontCache     = kPrFalse;
+            importInfo->keepLoaded    = kPrFalse;
+            importInfo->priority      = 0;
+            av1imp::Log("imInit: disabled by settings, priority 0, FFmpeg not loaded");
+            return imIsCacheable;
+        }
+        case imGetIndFormat:
+            return imBadFormatIndex;
+        case imOpenFile8:
+            av1imp::Log("imOpenFile8: importer disabled, handing the file back");
+            return imBadFile;
+        case imGetSupports7:
+            return malSupports7;
+        case imGetSupports8:
+            return malSupports8;
+        case imShutdown:
+            FinishImporterShutdown();
+            return malNoError;
+        default:
+            return imUnsupported;
+    }
+}
+
 static prMALError DispatchImport(csSDK_int32 selector, imStdParms* stdParms,
                                  void* param1, void* param2)
 {
-    // Журнал и библиотеки ffmpeg готовятся здесь, а не при загрузке DLL:
-    // из DllMain грузить библиотеки нельзя, там держится замок загрузчика.
+    // Журнал открываем до ffmpeg: выключенный импортёр должен уметь отказаться
+    // от файла, не загружая библиотеки в процесс Adobe.
+    av1imp::EnsureLog();
+    if (!av1imp::PluginEnabled()) {
+        const prMALError result = DispatchDisabled(selector, stdParms, param1);
+        if (selector != imGetSourceVideo && selector != imImportAudio7) {
+            av1imp::Log("  selector %s -> %d (disabled)",
+                        av1imp::SelectorName(selector), result);
+        }
+        return result;
+    }
+
     if (!av1imp::EnsureRuntime()) {
         // Delay-load исключение на первом вызове ffmpeg завершило бы весь
         // процесс Adobe. Отказываем ещё до dispatch: битая установка должна
         // выглядеть как неработающий импортёр, а не как закрывшийся Premiere.
         if (selector == imShutdown) {
-            av1imp::LogClose();
+            FinishImporterShutdown();
             return malNoError;
         }
         const prMALError result = imOtherErr;
@@ -1572,7 +1775,7 @@ static prMALError DispatchImport(csSDK_int32 selector, imStdParms* stdParms,
             break;
 
         case imShutdown:
-            av1imp::LogClose();
+            FinishImporterShutdown();
             result = malNoError;
             break;
 
@@ -1604,7 +1807,7 @@ PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
         av1imp::Log("xImportEntry %s: exception: %s",
                     av1imp::SelectorName(selector), e.what());
         if (selector == imShutdown) {
-            av1imp::LogClose();
+            FinishImporterShutdown();
             return malNoError;
         }
         return imOtherErr;
@@ -1612,7 +1815,7 @@ PREMPLUGENTRY DllExport xImportEntry(csSDK_int32 selector, imStdParms* stdParms,
         av1imp::Log("xImportEntry %s: unknown exception",
                     av1imp::SelectorName(selector));
         if (selector == imShutdown) {
-            av1imp::LogClose();
+            FinishImporterShutdown();
             return malNoError;
         }
         return imOtherErr;

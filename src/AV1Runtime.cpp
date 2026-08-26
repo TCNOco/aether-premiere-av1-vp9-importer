@@ -109,13 +109,21 @@ const wchar_t* PluginDirectory() { return g_pluginDir; }
 // одна: строчка «плагин загружен» появляется не в момент загрузки, а в момент
 // первого вопроса. На практике одно следует за другим сразу же, а пустой
 // журнал по-прежнему означает, что плагин не спросили вовсе.
-bool EnsureRuntime()
+void EnsureLog()
 {
     static std::once_flag once;
-    static bool ready = false;
     std::call_once(once, []() {
         LogReset();
         Log("Aether %s, plug-in ready in process", AETHER_VERSION_STR);
+    });
+}
+
+bool EnsureRuntime()
+{
+    EnsureLog();
+    static std::once_flag once;
+    static bool ready = false;
+    std::call_once(once, []() {
         ready = PreloadFFmpeg();
     });
     return ready;

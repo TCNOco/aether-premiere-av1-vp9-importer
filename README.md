@@ -76,7 +76,7 @@ neither AV1 nor VP9. Taking someone else's file is worse than not taking your ow
 | Property | Support |
 |---|---|
 | 8-bit | **yes** |
-| 10-bit | **yes** — delivered as 16-bit in Adobe's range, see below |
+| 10-bit | **yes** — native P010 planes when the host accepts them, otherwise 16-bit BGRA |
 | 12-bit | **not tried** — the same path as 10-bit |
 | Alpha, VP9 in WebM | **yes** — CPU decoding only, see below |
 | Alpha in AV1 | **no** — stored differently, not done |
@@ -290,10 +290,11 @@ visible. Switch with the setting below and judge on your own footage.
 
 ### What 10-bit costs
 
-A 10-bit source is offered to the host as `BGRA_4444_16u` first and 8-bit second,
-so the host can fall back if it wants to. Nothing changes for an 8-bit file: it is
-still offered one format, and the measurements above are unchanged — 205 fps before
-this was added, 205 after.
+A 10-bit source is offered as native P010 planes first, then `BGRA_4444_16u`, then
+8-bit, so the host can fall back if it will not take a planar buffer. Premiere 26
+accepts P010; its `GetRowBytes` for that format can report zero, and the stride is
+then taken from the buffer size. An 8-bit file is still offered one format, and
+the measurements above are unchanged.
 
 The wider output is not free, though, and the price is the colour conversion rather
 than the decoding:
@@ -336,9 +337,25 @@ Premiere restarts. The environment variable `AV1IMPORTER_HARDWARE=0` (or `=1`)
 overrides the file without changing it, which is the quick way to test a hunch.
 Either way, the decoder actually used is recorded in the log.
 
-There is deliberately no settings dialog inside Premiere. The setting matters most
-when a graphics driver fault stops Premiere from starting, and inside Premiere it
-would be out of reach at exactly that moment.
+The same window and Premiere panel also control:
+
+- **Aether enabled** — when off, a restarted Adobe application receives priority
+  0 and every file is handed to the next importer without loading FFmpeg;
+- **Aether RAM frame cache** — 0 (off) through 4 GiB, default 512 MiB. This caps
+  only decoded frames retained by Aether, not Premiere's whole process;
+- **reduced preview cache** — lossless BGRA8 Draft/Low frames up to 2 MiB,
+  stored under `%LOCALAPPDATA%\Aether\preview-cache\v1`, limit 2 GiB by default.
+  Full-size playback, native YUV/P010 delivery, audio and export never use it.
+  It is available but remains off by default until a cold/warm Premiere project
+  benchmark confirms the intended win without a playback regression.
+
+`cache_memory_mb=0` and `AETHER_CACHE_MB=0` now mean **RAM cache off**. Older
+builds treated zero as unlimited. The other overrides are `AETHER_ENABLED`,
+`AETHER_PREVIEW_CACHE` and `AETHER_PREVIEW_CACHE_MB`.
+
+There is deliberately no modal settings dialog in the importer API. The optional
+Premiere panel is convenient, while the standalone window remains available when
+a graphics driver fault stops Premiere from starting.
 
 ## Building from source
 

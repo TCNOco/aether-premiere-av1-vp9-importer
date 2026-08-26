@@ -5,6 +5,7 @@
 
 #include "../src/AV1Decoder.h"
 #include "../src/AV1Settings.h"
+#include "../src/PreviewCache.h"
 #include "../src/AV1Version.h"
 
 #include <windows.h>
@@ -684,6 +685,48 @@ Report Run(const std::wstring& userFile,
         s.title = L"Aether";
         CheckPlugin(s);
         CheckFfmpeg(s);
+        r.sections.push_back(s);
+    }
+
+    onStep(L"кэш");
+    {
+        Section s;
+        s.title = L"Кэш";
+        const av1imp::Settings settings = av1imp::CurrentSettings();
+        const av1imp::PreviewCacheUsage usage =
+            av1imp::PreviewCache::Instance().Usage();
+        wchar_t memory[64] = {};
+        swprintf_s(memory, L"%u MiB%s", settings.memoryCacheMB,
+                   settings.memoryCacheMB == 0 ? L" (выключен)" : L"");
+        Add(s, L"RAM-кэш Aether", State::Info, memory);
+        wchar_t disk[128] = {};
+        swprintf_s(disk, L"%s, лимит %u MiB, занято %.1f MiB, файлов %llu",
+                   settings.previewCache ? L"включён" : L"выключен",
+                   settings.previewCacheMB,
+                   usage.bytes / (1024.0 * 1024.0),
+                   (unsigned long long)usage.files);
+        Add(s, L"Кэш уменьшенных превью", State::Info, disk);
+        Add(s, L"Каталог", State::Info, usage.directory);
+        const av1imp::PreviewCacheProcessStats process =
+            av1imp::PreviewCache::Instance().ProcessStats();
+        wchar_t activity[128] = {};
+        swprintf_s(activity, L"hit %llu, miss %llu, queued %llu, dropped %llu",
+                   (unsigned long long)process.hits,
+                   (unsigned long long)process.misses,
+                   (unsigned long long)process.writesQueued,
+                   (unsigned long long)process.writesDropped);
+        Add(s, L"Текущий процесс", State::Info, activity);
+        if (!process.lastWarning.empty()) {
+            const int need = MultiByteToWideChar(CP_UTF8, 0,
+                process.lastWarning.c_str(), -1, nullptr, 0);
+            std::wstring warning(need > 1 ? (size_t)need : 1, L'\0');
+            if (need > 1) {
+                MultiByteToWideChar(CP_UTF8, 0, process.lastWarning.c_str(), -1,
+                                    &warning[0], need);
+                warning.pop_back();
+            } else warning.clear();
+            Add(s, L"Последнее предупреждение", State::Warn, warning);
+        }
         r.sections.push_back(s);
     }
 

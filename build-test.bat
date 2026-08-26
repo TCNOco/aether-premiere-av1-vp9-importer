@@ -45,10 +45,18 @@ if /I "%AETHER_ASAN%"=="no"    set "ASAN_WANTED="
 if /I "%AETHER_ASAN%"=="false" set "ASAN_WANTED="
 if defined ASAN_WANTED set "EXTRA_CFLAGS=/fsanitize=address /Zi"
 
-REM settings_test - pure INI update logic, no FFmpeg or Adobe SDK needed
+REM settings_test - INI preservation plus the shared settings model
 cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
-   tools\settings_test.cpp ^
-   /Fe:build\settings_test.exe /Fo:build\obj\
+   tools\settings_test.cpp src\AV1Settings.cpp ^
+   /Fe:build\settings_test.exe /Fo:build\obj\ ^
+   /link shell32.lib ole32.lib
+if errorlevel 1 exit /b 1
+
+REM preview_cache_test - strict AEPV records, keys, corruption and strides
+cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
+   tools\preview_cache_test.cpp src\AV1Settings.cpp src\PreviewCache.cpp src\AV1Log.cpp ^
+   /Fe:build\preview_cache_test.exe /Fo:build\obj\ ^
+   /link shell32.lib ole32.lib bcrypt.lib
 if errorlevel 1 exit /b 1
 
 REM importer_math_test - overflow boundaries in Adobe's 32-bit duration field
@@ -61,9 +69,9 @@ REM decoder_test - the decoding core, works on a file directly
 cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
    /I"ffmpeg\include" ^
-   src\AV1Decoder.cpp tools\decoder_test.cpp ^
+   src\AV1Settings.cpp src\PreviewCache.cpp src\AV1Log.cpp src\AV1Decoder.cpp tools\decoder_test.cpp ^
    /Fe:build\decoder_test.exe /Fo:build\obj\ ^
-   /link /LIBPATH:"ffmpeg\lib" avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib
+   /link /LIBPATH:"ffmpeg\lib" avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib bcrypt.lib shell32.lib ole32.lib
 if errorlevel 1 exit /b 1
 
 REM Second half of the same guard: the flags were passed, now prove they landed.
@@ -93,9 +101,9 @@ REM reached 4.4 GB. Measured, not assumed - this is the instrument.
 cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
    /I"ffmpeg\include" ^
-   src\AV1Decoder.cpp tools\cache_probe.cpp ^
+   src\AV1Settings.cpp src\PreviewCache.cpp src\AV1Log.cpp src\AV1Decoder.cpp tools\cache_probe.cpp ^
    /Fe:build\cache_probe.exe /Fo:build\obj\ ^
-   /link /LIBPATH:"ffmpeg\lib" avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib psapi.lib
+   /link /LIBPATH:"ffmpeg\lib" avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib psapi.lib bcrypt.lib shell32.lib ole32.lib
 if errorlevel 1 exit /b 1
 
 REM conform_probe - reads one audio track end to end, the way conforming does.
@@ -104,18 +112,18 @@ REM conform action": the decoder had to be cleared before looking further up.
 cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
    /I"ffmpeg\include" ^
-   src\AV1Decoder.cpp tools\conform_probe.cpp ^
+   src\AV1Settings.cpp src\PreviewCache.cpp src\AV1Log.cpp src\AV1Decoder.cpp tools\conform_probe.cpp ^
    /Fe:build\conform_probe.exe /Fo:build\obj\ ^
-   /link /LIBPATH:"ffmpeg\lib" avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib
+   /link /LIBPATH:"ffmpeg\lib" avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib bcrypt.lib shell32.lib ole32.lib
 if errorlevel 1 exit /b 1
 
 REM fuzz_test - the same core, fed deliberately broken files
 cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MD %EXTRA_CFLAGS% ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
    /I"ffmpeg\include" ^
-   src\AV1Decoder.cpp tools\fuzz_test.cpp ^
+   src\AV1Settings.cpp src\PreviewCache.cpp src\AV1Log.cpp src\AV1Decoder.cpp tools\fuzz_test.cpp ^
    /Fe:build\fuzz_test.exe /Fo:build\obj\ ^
-   /link /LIBPATH:"ffmpeg\lib" avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib
+   /link /LIBPATH:"ffmpeg\lib" avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib bcrypt.lib shell32.lib ole32.lib
 if errorlevel 1 exit /b 1
 
 set SDK=sdk\Premiere Pro 26.0 C++ SDK\Examples\Headers

@@ -76,4 +76,38 @@ inline std::string SetIniValue(const std::string& text,
     return out;
 }
 
+// Last matching key wins. Missing key leaves `value` unchanged and returns false.
+inline bool GetIniValue(const std::string& text, const char* key, std::string* value)
+{
+    if (!value) return false;
+
+    bool found = false;
+    size_t begin = 0;
+    while (begin < text.size()) {
+        const size_t lf = text.find('\n', begin);
+        const size_t contentEnd =
+            (lf != std::string::npos && lf > begin && text[lf - 1] == '\r')
+                ? lf - 1
+                : (lf != std::string::npos ? lf : text.size());
+        const std::string line = text.substr(begin, contentEnd - begin);
+
+        if (IsIniKeyLine(line, key)) {
+            size_t at = 0;
+            while (at < line.size() && (line[at] == ' ' || line[at] == '\t')) ++at;
+            at += strlen(key);
+            while (at < line.size() && (line[at] == ' ' || line[at] == '\t')) ++at;
+            if (at < line.size() && line[at] == '=') ++at;
+            while (at < line.size() && (line[at] == ' ' || line[at] == '\t')) ++at;
+            size_t end = line.size();
+            while (end > at && (line[end - 1] == ' ' || line[end - 1] == '\t')) --end;
+            *value = line.substr(at, end - at);
+            found = true;
+        }
+
+        if (lf == std::string::npos) break;
+        begin = lf + 1;
+    }
+    return found;
+}
+
 } // namespace av1imp

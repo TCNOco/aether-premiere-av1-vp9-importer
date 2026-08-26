@@ -12,6 +12,8 @@ Adobe SDK, so it can be built and exercised by a console program, which removes
 most of the debugging from the slow build-install-restart-Premiere loop.
 `src/AV1Importer.*` is the SDK layer and only translates Premiere's requests into
 calls on the core.
+`src/PreviewCache.*` is the Adobe-independent persistent cache for reduced BGRA8
+previews.
 
 ## What is in here
 
@@ -360,10 +362,20 @@ keyframe and decode forward from there, and OBS writes a keyframe every second,
 so every step back decoded half a second of video and threw away the result that
 would be needed a moment later.
 
-The cache is therefore filled **only while moving backwards**. Reading forward is
-already sequential, and caching there would waste memory for nothing. Frames are
-moved out of GPU memory first (fifty 1440p frames will not fit in VRAM), the
-budget is 256 MB, and the frames farthest from the current position are evicted.
+The RAM cache is therefore filled **only while moving backwards**. Reading forward
+is already sequential, and caching there would waste memory for nothing. Frames
+are moved out of GPU memory first. Its default process-wide ceiling is 512 MiB;
+every insertion reserves bytes atomically, so one oversized frame or several
+decoders cannot cross it. A zero limit disables this cache.
+
+A separate persistent cache sits only in `GetFrameBGRA`: reduced BGRA8 requests
+at Draft/Low quality, at most 2 MiB, and never sequential playback. Its key hashes
+the source identity (path, size, mtime, file ID and first/last 64 KiB), timeline
+frame, output size, decoder/backend, FFmpeg and Aether versions. The `.aepv`
+record is tight top-down BGRA plus a strict header and CRC32. Writes go through a
+bounded worker queue and atomic rename; any I/O or validation failure is a miss,
+never an import failure. LRU cleanup returns the directory to 90% of its configured
+limit.
 
 ## Loading and building
 
@@ -453,6 +465,12 @@ actual decoding for a 1440p frame. The log was adding roughly a third to the
 decoder's own work. Flushing stayed: it is what gives the crash-safety the
 whole arrangement was for, and it costs twenty-four times less than reopening
 the file.
+
+Successful `imGetSourceVideo` / async frame calls are not logged one by one.
+On `imShutdown` the importer writes one aggregated host-request profile instead:
+reduced vs full size, pixel format, render quality, sequential vs jump, and the
+most common asked sizes. That is the measurement surface for whether live
+Premiere thumbnails actually match the disk-cache predicates.
 
 ## Testing without Premiere
 

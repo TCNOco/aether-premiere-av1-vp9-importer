@@ -39,11 +39,11 @@ cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MT /DUNICODE /D_UNICODE ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
    /I"ffmpeg\include" ^
    tools\aether_app.cpp tools\app_diagnose.cpp ^
-   src\AV1Settings.cpp src\AV1Decoder.cpp build\obj\aether.res ^
+   src\AV1Settings.cpp src\PreviewCache.cpp src\AV1Log.cpp src\AV1Decoder.cpp build\obj\aether.res ^
    /Fe:build\Release\Aether.exe "/Fo:build\obj\\" ^
    /link /SUBSYSTEM:WINDOWS /LIBPATH:"ffmpeg\lib" ^
    avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib ^
-   shell32.lib ole32.lib user32.lib gdi32.lib comdlg32.lib advapi32.lib version.lib
+   shell32.lib ole32.lib user32.lib gdi32.lib comdlg32.lib advapi32.lib version.lib bcrypt.lib
 
 REM AetherDiagnose.exe - the diagnostic engine with no window of its own.
 REM Ships with the plug-in: the CEP panel inside Premiere is HTML and cannot
@@ -53,8 +53,8 @@ cl /nologo /utf-8 /std:c++17 /EHsc /O2 /MT ^
    /D__STDC_CONSTANT_MACROS /D__STDC_LIMIT_MACROS ^
    /I"ffmpeg\include" ^
    tools\diagnose_app.cpp tools\app_diagnose.cpp ^
-   src\AV1Settings.cpp src\AV1Decoder.cpp build\obj\diagnose.res ^
+   src\AV1Settings.cpp src\PreviewCache.cpp src\AV1Log.cpp src\AV1Decoder.cpp build\obj\diagnose.res ^
    /Fe:build\Release\AetherDiagnose.exe "/Fo:build\obj\\" ^
    /link /LIBPATH:"ffmpeg\lib" ^
    avcodec.lib avformat.lib avutil.lib swscale.lib swresample.lib ^
-   shell32.lib ole32.lib user32.lib advapi32.lib version.lib
+   shell32.lib ole32.lib user32.lib advapi32.lib version.lib bcrypt.lib

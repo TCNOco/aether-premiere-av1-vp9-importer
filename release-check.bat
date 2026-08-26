@@ -64,6 +64,10 @@ for %%D in (avutil-60.dll swresample-6.dll swscale-9.dll avcodec-62.dll avformat
 build\plugin_test.exe "%STAGE%\Aether.prm"
 if errorlevel 1 exit /b 1
 
+REM The user kill switch must hand files back without loading any FFmpeg DLL.
+build\plugin_test.exe "%STAGE%\Aether.prm" --expect-disabled
+if errorlevel 1 exit /b 1
+
 REM A missing dependency must disable the importer without terminating the host.
 ren "%STAGE%\swscale-9.dll" "swscale-9.dll.missing"
 if errorlevel 1 exit /b 1

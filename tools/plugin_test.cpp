@@ -5,6 +5,7 @@
 //
 //   plugin_test.exe <путь к Aether.prm>
 //   plugin_test.exe <путь к Aether.prm> --expect-runtime-failure
+//   plugin_test.exe <путь к Aether.prm> --expect-disabled
 //
 // Отвечает на три вопроса, из-за которых плагин чаще всего "просто не появляется"
 // в Premiere, причём молча:
@@ -85,11 +86,14 @@ bool ImportsMsvcRuntime(const wchar_t* path, std::string* found)
 int wmain(int argc, wchar_t** argv)
 {
     if (argc < 2) {
-        printf("Usage: plugin_test <path to Aether.prm> [--expect-runtime-failure]\n");
+        printf("Usage: plugin_test <path to Aether.prm> [--expect-runtime-failure|--expect-disabled]\n");
         return 1;
     }
     const bool expectRuntimeFailure =
         argc >= 3 && wcscmp(argv[2], L"--expect-runtime-failure") == 0;
+    const bool expectDisabled =
+        argc >= 3 && wcscmp(argv[2], L"--expect-disabled") == 0;
+    if (expectDisabled) SetEnvironmentVariableW(L"AETHER_ENABLED", L"off");
 
     HMODULE plugin = LoadLibraryExW(argv[1], nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!plugin) {
@@ -141,12 +145,26 @@ int wmain(int argc, wchar_t** argv)
     bool ffmpegOk = true;
     for (const wchar_t* m : modules) {
         if (!GetModuleHandleW(m)) {
-            wprintf(L"FAIL: %s did not load on the first request\n", m);
+            if (!expectDisabled)
+                wprintf(L"FAIL: %s did not load on the first request\n", m);
             ffmpegOk = false;
         }
     }
     printf("ffmpeg     : %s\n", ffmpegOk ? "loaded from the plug-in folder on demand"
                                           : "NOT FOUND");
+
+    if (expectDisabled) {
+        const prMALError open = entry(imOpenFile8, &stdParms, nullptr, nullptr);
+        const bool controlled = r == imIsCacheable && info.priority == 0 &&
+                                !ffmpegOk && open == imBadFile;
+        printf("disabled   : %s\n", controlled
+            ? "priority 0, file handed back, ffmpeg untouched"
+            : "WRONG disabled behavior");
+        entry(imShutdown, &stdParms, nullptr, nullptr);
+        FreeLibrary(plugin);
+        SetEnvironmentVariableW(L"AETHER_ENABLED", nullptr);
+        return controlled ? 0 : 9;
+    }
 
     if (expectRuntimeFailure) {
         const bool controlled = !ffmpegOk && r == imOtherErr;

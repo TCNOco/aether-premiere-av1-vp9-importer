@@ -13,9 +13,7 @@
 
 const fs   = require('fs');
 const path = require('path');
-const os   = require('os');
 const { execFile } = require('child_process');
-const { updateDecodeMode, writeFileAtomic } = require('./settings');
 
 function system32(name) {
     const root = process.env.SystemRoot || 'C:\\Windows';
@@ -72,8 +70,6 @@ async function pluginFolder() {
 }
 
 let PLUGIN_DIR = null;
-const SETTINGS_DIR = path.join(process.env['LOCALAPPDATA'] || os.homedir(), 'Aether');
-const SETTINGS_INI = path.join(SETTINGS_DIR, 'settings.ini');
 
 // ---------------------------------------------------------------------------
 // Цвета из самого Premiere
@@ -113,32 +109,36 @@ function applyHostTheme() {
 // Настройки
 // ---------------------------------------------------------------------------
 
-// Файл человекочитаемый и правится руками по совету из issue, поэтому читаем
-// его терпимо: неизвестные строки пропускаем, а не считаем поломкой.
-function readMode() {
-    try {
-        const text = fs.readFileSync(SETTINGS_INI, 'utf8');
-        const m = text.match(/^\s*decode\s*=\s*(\w+)/mi);
-        if (m) {
-            const v = m[1].toLowerCase();
-            if (v === 'software' || v === 'hardware') return v;
-        }
-    } catch (e) { /* файла нет — значит «автоматически» */ }
-    return 'auto';
+function diagnoseExe() {
+    if (!PLUGIN_DIR) throw new Error('папка плагина не найдена');
+    return path.join(PLUGIN_DIR, 'AetherDiagnose.exe');
 }
 
-function writeMode(mode) {
-    fs.mkdirSync(SETTINGS_DIR, { recursive: true });
+async function diagnoseJson(args) {
+    return JSON.parse(await execText(diagnoseExe(), args));
+}
 
-    let current = '';
-    try {
-        current = fs.readFileSync(SETTINGS_INI, 'utf8');
-    } catch (e) {
-        if (e.code !== 'ENOENT') throw e;
-        current = '; AV1 / VP9 Importer for Premiere Pro\r\n' +
-                  '; decode = auto | software | hardware\r\n';
-    }
-    writeFileAtomic(SETTINGS_INI, updateDecodeMode(current, mode), 'utf8');
+async function readSettings() {
+    return diagnoseJson(['--settings-json']);
+}
+
+async function writeSettings(settings) {
+    return diagnoseJson([
+        '--set',
+        'enabled=' + (settings.enabled ? 'on' : 'off'),
+        'decode=' + settings.decode,
+        'cache_memory_mb=' + settings.cache_memory_mb,
+        'preview_cache=' + (settings.preview_cache ? 'on' : 'off'),
+        'preview_cache_mb=' + settings.preview_cache_mb,
+    ]);
+}
+
+async function refreshCacheUsage() {
+    const usage = await diagnoseJson(['--cache-json']);
+    document.getElementById('cache-usage').textContent =
+        'Занято: ' + (usage.bytes / 1024 / 1024).toFixed(1) +
+        ' MiB, файлов: ' + usage.files;
+    return usage;
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +309,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     applyHostTheme();
 
     // Вкладки
-    const pages = { settings: 'page-settings', diagnose: 'page-diagnose' };
+    const pages = { settings: 'page-settings', cache: 'page-cache', diagnose: 'page-diagnose' };
     const tabNames = Object.keys(pages);
     const activateTab = (name, moveFocus) => {
         for (const other of tabNames) {
@@ -338,19 +338,45 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
-    // Настройки
-    const mode = readMode();
-    const radio = document.querySelector(`input[name="decode"][value="${mode}"]`);
-    if (radio) radio.checked = true;
-
-    document.getElementById('save').addEventListener('click', () => {
+    const saveSettings = async () => {
         const chosen = document.querySelector('input[name="decode"]:checked').value;
         const saved  = document.getElementById('saved');
+        const cacheStatus = document.getElementById('cache-status');
         try {
-            writeMode(chosen);
+            await writeSettings({
+                enabled: document.getElementById('enabled').checked,
+                decode: chosen,
+                cache_memory_mb: Number(document.getElementById('memory-cache').value),
+                preview_cache: document.getElementById('preview-cache').checked,
+                preview_cache_mb: Number(document.getElementById('preview-limit').value),
+            });
             saved.textContent = 'Сохранено. Перезапустите Premiere Pro.';
+            cacheStatus.textContent = saved.textContent;
         } catch (e) {
             saved.textContent = 'Не удалось записать: ' + e.message;
+            cacheStatus.textContent = saved.textContent;
+        }
+    };
+    document.getElementById('save').addEventListener('click', saveSettings);
+    document.getElementById('save-cache').addEventListener('click', saveSettings);
+
+    const previewToggle = document.getElementById('preview-cache');
+    const syncPreviewControls = () => {
+        document.getElementById('preview-limit').disabled = !previewToggle.checked;
+    };
+    previewToggle.addEventListener('change', syncPreviewControls);
+
+    document.getElementById('clear-cache').addEventListener('click', async () => {
+        const status = document.getElementById('cache-status');
+        try {
+            const usage = await diagnoseJson(['--clear-preview-cache']);
+            document.getElementById('cache-usage').textContent =
+                'Занято: ' + (usage.bytes / 1024 / 1024).toFixed(1) +
+                ' MiB, файлов: ' + usage.files;
+            status.textContent =
+                'Кэш очищен. Работающий Adobe может сразу создать новые превью.';
+        } catch (e) {
+            status.textContent = 'Не удалось очистить кэш: ' + e.message;
         }
     });
 
@@ -401,6 +427,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!PLUGIN_DIR) {
         version.textContent = 'плагин не найден';
         return;
+    }
+
+    try {
+        const settings = await readSettings();
+        document.getElementById('enabled').checked = settings.enabled;
+        const radio = document.querySelector(
+            `input[name="decode"][value="${settings.decode}"]`);
+        if (radio) radio.checked = true;
+        document.getElementById('memory-cache').value =
+            String(settings.cache_memory_mb);
+        document.getElementById('preview-cache').checked = settings.preview_cache;
+        document.getElementById('preview-limit').value =
+            String(settings.preview_cache_mb);
+        syncPreviewControls();
+        await refreshCacheUsage();
+    } catch (e) {
+        document.getElementById('saved').textContent =
+            'Не удалось прочитать настройки: ' + e.message;
     }
 
     // Путь передаётся отдельным аргументом для -LiteralPath, а не вставляется

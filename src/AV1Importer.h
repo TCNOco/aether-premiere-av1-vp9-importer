@@ -221,6 +221,15 @@ inline Scaling ScalingFor(PrRenderQuality q)
            ? Scaling::Fast : Scaling::Good;
 }
 
+// Сводка запросов хоста за процесс: размер, формат, качество, seq vs jump.
+// Без строки на каждый кадр — одна запись в журнал при выгрузке.
+void NoteHostVideoRequest(csSDK_int32 frameIndex,
+                          int nativeWidth, int nativeHeight,
+                          int askedWidth, int askedHeight,
+                          PrPixelFormat pixelFormat,
+                          PrRenderQuality quality);
+void LogHostRequestProfile();
+
 } // namespace av1imp
 
 extern "C" {
