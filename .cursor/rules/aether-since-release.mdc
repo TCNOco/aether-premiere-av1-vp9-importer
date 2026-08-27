@@ -28,6 +28,7 @@ alwaysApply: true
 
 ## Не смешивать
 
-- `[[todo-premiere-av1-importer]]` — план и долги, не черновик релиза.
+- `[[roadmap-aether]]` — куда расти после 1.3.3 (corpus / diagnostics / 10-bit).
+- `[[todo-premiere-av1-importer]]` — архив старого плана, не черновик релиза.
 - `[[доработки-aether]]` — backlog аудита.
 - `since-release-aether` — только то, что уже сделано после последнего релиза.

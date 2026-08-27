@@ -1,0 +1,27 @@
+---
+description: После 1.3.3 Aether растёт по corpus / diagnostics / 10-bit pipeline
+alwaysApply: true
+---
+
+# Aether: куда расти
+
+Источник правды:
+
+`F:\SecondBrain\02-Projects\premiere-av1-importer\roadmap-aether.md`
+(`[[roadmap-aether]]`)
+
+После **1.3.3** декодирование AV1 уже доказано. Не предлагать и не начинать
+новый кодек/контейнер (VP8, HAP, OGV, TS, FLV…) как следующую фичу.
+
+Три оси, в этом порядке:
+
+1. **Надёжность** — corpus реальных файлов (OBS, ShadowPlay, телефоны, VFR,
+   HDR, битые, huge, 5.1/7.1). Синтетика `release-check` остаётся регрессией,
+   не заменой corpus. Большие файлы не коммитить.
+2. **Diagnostics** — довести существующий `app_diagnose` до
+   Recommended action + кнопки Create GitHub Issue (не новый инструмент).
+3. **Performance** — стоимость пайплайна после decode на **10-bit/HDR**,
+   цель 4K 10-bit realtime+ в Premiere. Не «ускорить dav1d».
+
+Исторический чеклист — `[[todo-premiere-av1-importer]]`, не текущий план.
+Сделанное после релиза — `[[since-release-aether]]`.
