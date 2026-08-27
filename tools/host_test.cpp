@@ -1449,6 +1449,11 @@ int wmain(int argc, wchar_t** argv)
             Check(r.colourIdentity == !planar,
                   planar ? "matrix declared, because we did not apply it"
                          : "matrix declared identity after the conversion");
+            if (IsBiplanar10((PrPixelFormat)r.pixelFormat)) {
+                Check(r.colourBitDepth == 10, "P010 declared as 10-bit to the host");
+            } else if (r.pixelFormat == PrPixelFormat_BGRA_4444_16u) {
+                Check(r.colourBitDepth == 16, "BGRA16 declared as 16-bit to the host");
+            }
             Check(r.colourEnumEnds, "the list of colour spaces ends");
         }
 

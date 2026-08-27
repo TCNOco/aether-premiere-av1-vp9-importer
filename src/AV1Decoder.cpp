@@ -17,6 +17,8 @@ extern "C" {
 #include <libswresample/swresample.h>
 #include <libavutil/display.h>
 #include <libavutil/dict.h>
+#include <libavutil/mastering_display_metadata.h>
+#include <libavcodec/packet.h>
 }
 
 #include <algorithm>
@@ -60,6 +62,105 @@ std::string AvErr(int err) {
     av_strerror(err, buf, sizeof(buf));
     return buf;
 }
+
+const char* PrimariesName(int v)
+{
+    switch (v) {
+        case 1:  return "BT.709";
+        case 2:  return "unspecified";
+        case 5:  return "BT.601";
+        case 6:  return "BT.601";
+        case 9:  return "BT.2020";
+        case 12: return "P3-DCI";
+        case 13: return "P3-D65";
+        default: return "other";
+    }
+}
+
+const char* TransferName(int v)
+{
+    switch (v) {
+        case 1:  return "BT.709";
+        case 2:  return "unspecified";
+        case 8:  return "linear";
+        case 14: return "BT.2020-10";
+        case 15: return "BT.2020-12";
+        case 16: return "PQ";
+        case 18: return "HLG";
+        default: return "other";
+    }
+}
+
+const char* MatrixName(int v)
+{
+    switch (v) {
+        case 0:  return "RGB";
+        case 1:  return "BT.709";
+        case 2:  return "unspecified";
+        case 5:  return "BT.601";
+        case 6:  return "BT.601";
+        case 9:  return "BT.2020";
+        case 10: return "BT.2020 CL";
+        default: return "other";
+    }
+}
+
+void ReadHdrSideData(const AVCodecParameters* par, MediaInfo* info)
+{
+    if (!par || !info) return;
+
+    if (const AVPacketSideData* sd = av_packet_side_data_get(
+            par->coded_side_data, par->nb_coded_side_data,
+            AV_PKT_DATA_CONTENT_LIGHT_LEVEL)) {
+        AVContentLightMetadata cl{};
+        const size_t n = (std::min)(sd->size, sizeof(cl));
+        if (sd->data && n > 0) memcpy(&cl, sd->data, n);
+        info->maxCll  = cl.MaxCLL;
+        info->maxFall = cl.MaxFALL;
+    }
+
+    if (const AVPacketSideData* sd = av_packet_side_data_get(
+            par->coded_side_data, par->nb_coded_side_data,
+            AV_PKT_DATA_MASTERING_DISPLAY_METADATA)) {
+        AVMasteringDisplayMetadata md{};
+        const size_t n = (std::min)(sd->size, sizeof(md));
+        if (sd->data && n > 0) memcpy(&md, sd->data, n);
+        if (md.has_luminance) {
+            info->masteringMaxNits = av_q2d(md.max_luminance);
+            info->masteringMinNits = av_q2d(md.min_luminance);
+        }
+    }
+}
+
+} // namespace
+
+std::string MediaInfo::ColourSummary() const
+{
+    std::string out = PrimariesName(colourPrimaries);
+    out += " / ";
+    out += TransferName(colourTransfer);
+    if (colourTransfer == 16) out += " (HDR10)";
+    else if (colourTransfer == 18) out += " (HLG)";
+    out += " / ";
+    out += MatrixName(colourMatrix);
+    char bits[32];
+    snprintf(bits, sizeof(bits), " / %d-bit / %s",
+             bitDepth, fullRange ? "full range" : "limited");
+    out += bits;
+    if (maxCll > 0 || maxFall > 0) {
+        char cll[64];
+        snprintf(cll, sizeof(cll), ", MaxCLL %u MaxFALL %u", maxCll, maxFall);
+        out += cll;
+    }
+    if (masteringMaxNits > 0) {
+        char md[48];
+        snprintf(md, sizeof(md), ", mastering %.0f nits", masteringMaxNits);
+        out += md;
+    }
+    return out;
+}
+
+namespace {
 
 // Какие кодеки берём на себя и чем их распаковывать.
 //
@@ -471,6 +572,7 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
     info_.colourTransfer = st->codecpar->color_trc;
 
     info_.fullRange = (st->codecpar->color_range == AVCOL_RANGE_JPEG);
+    ReadHdrSideData(st->codecpar, &info_);
 
     // Положение цветности. Нужно только выдаче без пересчёта: пока мы сами
     // переводим в RGB, swscale разбирается с этим внутри себя, а вот отдавая

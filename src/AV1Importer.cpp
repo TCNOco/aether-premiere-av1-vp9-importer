@@ -1103,6 +1103,7 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
                 mi.width, mi.height, mi.bitDepth,
                 fileInfo->vidScale, fileInfo->vidSampleSize,
                 (long long)mi.frameCount);
+    av1imp::Log("imGetInfo8: colour %s", mi.ColourSummary().c_str());
 
     // Поворот сообщаем в журнал, но кадр отдаём как есть — объявить его хосту
     // нечем, в SDK импортёра такого поля нет. Строка нужна, чтобы «ролик
@@ -1583,7 +1584,12 @@ static prMALError AV1GetIndColorSpace(imStdParms* stdParms, csSDK_size_t index,
         sei.isRGB               = kPrTrue;
     }
 
-    sei.bitDepth        = (mi.bitDepth > 8) ? 16 : 8;
+    // bitDepth в SEI помечен «for future, align with PixelFormat». Для P010
+    // пиксели — десять бит в шестнадцатибитном контейнере (10u_as16u), для
+    // BGRA16 — шестнадцать с белым на 32768. Раньше любой 10-bit файл
+    // объявлялся как 16, даже когда хост забирал плоскости.
+    sei.bitDepth        = (planar && PrefersNativeP010(ldata)) ? 10
+                        : (mi.bitDepth > 8) ? 16 : 8;
     sei.isSceneReferred = kPrFalse;   // PQ, HLG и BT.709 — все про показ
 
     av1imp::Log("imGetIndColorSpace: primaries %d, transfer %d, matrix %d, %d-bit %s%s",
@@ -1591,6 +1597,14 @@ static prMALError AV1GetIndColorSpace(imStdParms* stdParms, csSDK_size_t index,
                 sei.matrixEquationsCode, sei.bitDepth,
                 planar ? "YUV" : "RGB",
                 (planar && !mi.fullRange) ? " (limited range)" : "");
+    if (mi.IsHdr()) {
+        av1imp::Log("imGetIndColorSpace: %s", mi.ColourSummary().c_str());
+        if (mi.maxCll > 0 || mi.masteringMaxNits > 0) {
+            av1imp::Log("imGetIndColorSpace: MaxCLL %u MaxFALL %u mastering %.0f nits - "
+                        "SEI has no fields for these, the host will not see them",
+                        mi.maxCll, mi.maxFall, mi.masteringMaxNits);
+        }
+    }
     return malNoError;
 }
 

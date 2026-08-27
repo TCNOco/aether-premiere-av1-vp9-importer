@@ -642,6 +642,17 @@ void CheckTransferUnspecified(const av1imp::MediaInfo& info, bool required)
     Check(info.colourTransfer == 2, name);
 }
 
+void CheckHdrPq(const av1imp::MediaInfo& info, bool required)
+{
+    if (!required) return;
+    printf("      colour %s\n", info.ColourSummary().c_str());
+    Check(info.bitDepth == 10, "HDR10 is 10-bit");
+    Check(info.colourPrimaries == 9, "HDR primaries are BT.2020");
+    Check(info.colourTransfer == 16, "HDR transfer is PQ");
+    Check(info.colourMatrix == 9 || info.colourMatrix == 10, "HDR matrix is BT.2020");
+    Check(info.IsHdr(), "PQ tag is treated as HDR");
+}
+
 void CheckAudioChannelCap(av1imp::Decoder& dec, const av1imp::MediaInfo& info,
                           bool requireRefuse)
 {
@@ -910,6 +921,8 @@ int wmain(int argc, wchar_t** wargv)
         printf("            unless it decodes to the colour it should\n");
         printf("  --transfer-unspecified  the file has no transfer tag;\n");
         printf("            fail if the core invents BT.709\n");
+        printf("  --hdr     the file is BT.2020 PQ 10-bit; fail unless those\n");
+        printf("            tags survive into MediaInfo\n");
         printf("  --audio-cap  the file has more than 64 audio channels;\n");
         printf("            fail unless OpenAudio refuses it\n");
         return 1;
@@ -927,6 +940,7 @@ int wmain(int argc, wchar_t** wargv)
     // --colour: файл залит известным цветом с явной меткой BT.709
     bool requireColour = false;
     bool requireTransferUnspecified = false;
+    bool requireHdr = false;
     bool requireAudioCap = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -935,6 +949,7 @@ int wmain(int argc, wchar_t** wargv)
         else if (arg == "--sync") requireSync = true;
         else if (arg == "--colour") requireColour = true;
         else if (arg == "--transfer-unspecified") requireTransferUnspecified = true;
+        else if (arg == "--hdr") requireHdr = true;
         else if (arg == "--audio-cap") requireAudioCap = true;
         else if (path.empty())  path = arg;
         else                    wanted = _atoi64(arg.c_str());
@@ -961,9 +976,7 @@ int wmain(int argc, wchar_t** wargv)
     printf("frames     : %lld\n", (long long)info.frameCount);
     printf("decoder    : %s (%s)\n", info.decoderName.c_str(),
            info.hardwareDecode ? "GPU" : "CPU");
-    printf("colour     : primaries %d, transfer %d, matrix %d%s\n",
-           info.colourPrimaries, info.colourTransfer, info.colourMatrix,
-           info.fullRange ? ", full range" : "");
+    printf("colour     : %s\n", info.ColourSummary().c_str());
 
     // Буфер по формату: в шестнадцати битах пиксель занимает вдвое больше
     const int stride = info.width * (format == av1imp::FrameFormat::BGRA16 ? 8 : 4);
@@ -1172,6 +1185,7 @@ int wmain(int argc, wchar_t** wargv)
     CheckSoundMatchesPicture(dec, info, requireSync);
     CheckColourMatrix(dec, info, requireColour);
     CheckTransferUnspecified(info, requireTransferUnspecified);
+    CheckHdrPq(info, requireHdr);
     CheckAudioChannelCap(dec, info, requireAudioCap);
     CheckPersistentReducedPreview(path, info, preferHardware);
 

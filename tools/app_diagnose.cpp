@@ -417,10 +417,20 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
                    mi.fps, mi.durationSec));
         Add(s, L"Декодер", State::Info, Widen(mi.decoderName) +
             (mi.hardwareDecode ? L" (видеокарта)" : L" (процессор)"));
-        Add(s, L"Цвет", State::Info,
-            Format(L"первичные %d, кривая %d, матрица %d, размах %s",
-                   mi.colourPrimaries, mi.colourTransfer, mi.colourMatrix,
-                   mi.fullRange ? L"полный" : L"урезанный"));
+        Add(s, L"Цвет", State::Info, Widen(mi.ColourSummary()));
+        if (mi.IsHdr()) {
+            Add(s, L"HDR", State::Info,
+                L"кривая объявляется хосту, сводит Premiere — мы не тон-маппим");
+        }
+        if (mi.bitDepth > 8 && (mi.colourTransfer == 0 || mi.colourTransfer == 2) &&
+            (mi.colourPrimaries == 9 || mi.colourMatrix == 9 || mi.colourMatrix == 10)) {
+            Add(s, L"Кривая переноса", State::Warn,
+                L"10-bit BT.2020 без PQ/HLG в тегах — хост может принять это за SDR");
+        }
+        if (mi.bitDepth == 10 && !av1imp::Yuv10Enabled()) {
+            Add(s, L"10-bit плоскости", State::Warn,
+                L"yuv10 выключен: кадр пойдёт через BGRA16, это в десятки раз медленнее P010");
+        }
         // Дорожку надо открыть: до этого число каналов и частота пустые,
         // и отчёт показывал бы «каналов 0, 0 Гц» у совершенно исправного файла.
         if (mi.audioStreamCount > 0 && dec.OpenAudio(0)) {
@@ -463,8 +473,22 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
         return;
     }
 
+    if (mi.bitDepth == 10 && dec.CanDeliverP010()) {
+        const int strideY = mi.width * (int)sizeof(uint16_t);
+        const int chromaH = (mi.height + 1) / 2;
+        std::vector<uint8_t> p010((size_t)strideY * mi.height + (size_t)strideY * chromaH);
+        if (!dec.GetFrameP010(0, p010.data(), strideY,
+                              p010.data() + (size_t)strideY * mi.height, strideY,
+                              mi.width, mi.height)) {
+            Add(s, label, State::Fail, L"первый кадр есть, а 10-bit плоскости не отдались");
+            return;
+        }
+    }
+
     Add(s, label, State::Pass,
-        Format(L"%dx%d, %d бит, кадры 0 и %lld", mi.width, mi.height, mi.bitDepth, middle));
+        Format(L"%dx%d, %d бит, кадры 0 и %lld%s",
+               mi.width, mi.height, mi.bitDepth, middle,
+               mi.IsHdr() ? L", HDR" : L""));
 }
 
 // Вшитые клипы лежат рядом с программой, в подпапке. Установщик кладёт их

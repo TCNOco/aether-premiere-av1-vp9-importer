@@ -85,6 +85,7 @@ $extraArgs = @{
     "sync_offset.mp4" = @("--sync")
     "colour_bt709.mp4" = @("--colour")
     "colour_unspecified.mp4" = @("--transfer-unspecified")
+    "hdr_pq.mkv"      = @("--hdr")
     "audio_65ch.mkv"  = @("--audio-cap")
 }
 

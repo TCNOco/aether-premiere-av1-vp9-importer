@@ -81,6 +81,14 @@ struct MediaInfo {
     int      colourMatrix    = 1;    // AVCOL_SPC_*  — до пересчёта в RGB
     bool     fullRange       = false;// размах в самом файле
 
+    // CTA-861.3 / SMPTE 2086, если контейнер их нёс. Premiere через
+    // imGetIndColorSpace их принять не умеет — поля в SEI нет, — но без этих
+    // чисел диагностика не отличит «теги PQ есть» от «ещё и MaxCLL 1000».
+    unsigned maxCll  = 0;
+    unsigned maxFall = 0;
+    double   masteringMaxNits = 0;
+    double   masteringMinNits = 0;
+
     // Где стоит цветность относительно яркости: AVCHROMA_LOC_*. Нужно только
     // при выдаче без пересчёта — тогда цветность едет к хосту как есть, и он
     // должен знать, как её читать. Ошибка здесь сдвигает цвет на полпикселя:
@@ -124,6 +132,13 @@ struct MediaInfo {
     int      audioChannels    = 0;
     int      audioSampleRate  = 0;
     int64_t  audioSampleCount = 0;   // длина в кадрах отсчётов (не в байтах)
+
+    // ITU: 16 = PQ (HDR10), 18 = HLG. Не «10 бит» и не BT.2020 сами по себе —
+    // десятибитный BT.709 это SDR, а 2020 без PQ/HLG тоже не HDR.
+    bool IsHdr() const { return colourTransfer == 16 || colourTransfer == 18; }
+
+    // Одна строка для журнала и диагностики: «BT.2020 / PQ (HDR10) / 10-bit / limited».
+    std::string ColourSummary() const;
 };
 
 class Decoder {
