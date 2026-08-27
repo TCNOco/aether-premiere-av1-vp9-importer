@@ -17,6 +17,9 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
+
+#include "ImporterMath.h"
 
 namespace av1imp {
 
@@ -87,6 +90,18 @@ struct AsyncState {
     int                          inFlight = 0;
 };
 
+// Живые AsyncState. CallGuard сверяет указатель ЗДЕСЬ, не разыменовывая его:
+// иначе aiClose удаляет объект, а другой поток ещё читает inPrivateData.
+// Порядок замков: сначала таблица, потом s->mutex. Никогда наоборот.
+std::mutex g_asyncTableMutex;
+std::unordered_set<AsyncState*> g_asyncAlive;
+
+void ForgetAsync(AsyncState* s)
+{
+    std::lock_guard<std::mutex> lock(g_asyncTableMutex);
+    g_asyncAlive.erase(s);
+}
+
 // Отмечает, что вызов хоста работает внутри нас, и не даёт закрытию освободить
 // состояние раньше времени. Возвращает false, если закрытие уже началось.
 class CallGuard {
@@ -94,6 +109,8 @@ public:
     explicit CallGuard(AsyncState* s) : state_(s), entered_(false)
     {
         if (!s) return;
+        std::lock_guard<std::mutex> table(g_asyncTableMutex);
+        if (g_asyncAlive.find(s) == g_asyncAlive.end()) return;
         std::lock_guard<std::mutex> lock(s->mutex);
         if (s->stopping) return;
         ++s->inFlight;
@@ -292,6 +309,7 @@ prMALError GetFrame(AsyncState* s, imSourceVideoRec* videoRec)
         imFrameFormat* offered = &videoRec->inFrameFormats[pick >= 0 ? pick : 0];
         const int frameW = (offered->inFrameWidth  > 0) ? offered->inFrameWidth  : s->width;
         const int frameH = (offered->inFrameHeight > 0) ? offered->inFrameHeight : s->height;
+        if (!UsableFrameSize(frameW, frameH)) return aiUnknownError;
 
         const PrPixelFormat pixelFormat =
             (pick >= 0) ? offered->inPixelFormat : PrPixelFormat_BGRA_4444_8u;
@@ -352,13 +370,18 @@ prMALError Close(AsyncState* s)
     if (!s) return aiUnknownError;
 
     {
+        std::lock_guard<std::mutex> table(g_asyncTableMutex);
+        if (g_asyncAlive.erase(s) == 0) return aiNoError;
+    }
+
+    {
         std::unique_lock<std::mutex> lock(s->mutex);
         s->stopping = true;
         s->wake.notify_all();
         s->done.notify_all();
 
-        // Ждём, пока из нас выйдут все, кто уже внутри. После этого новых
-        // не будет: CallGuard не пускает, когда stopping уже поднят.
+        // Ждём, пока из нас выйдут все, кто уже внутри. После erase из таблицы
+        // новые CallGuard не входят; этот wait — для тех, кто уже внутри.
         s->idle.wait(lock, [s] { return s->inFlight == 0; });
     }
 
@@ -543,10 +566,16 @@ bool CreateAsyncImporter(ImporterLocalRecPtr source, imAsyncImporterCreationRec*
     s->height           = mi.height;
     s->ticksPerFrame    = source->ticksPerFrame;
 
+    {
+        std::lock_guard<std::mutex> table(g_asyncTableMutex);
+        g_asyncAlive.insert(s);
+    }
+
     try {
         s->worker = std::thread(WorkerLoop, s);
     } catch (const std::exception& e) {
         Log("async: cannot start worker - %s", e.what());
+        ForgetAsync(s);
         if (s->PPixCreatorSuiteVersion) {
             s->BasicSuite->ReleaseSuite(kPrSDKPPixCreatorSuite, s->PPixCreatorSuiteVersion);
         }

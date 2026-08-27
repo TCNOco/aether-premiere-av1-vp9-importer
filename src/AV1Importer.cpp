@@ -26,6 +26,7 @@
 #include <mutex>
 #include <string>
 #include <utility>
+#include <condition_variable>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -311,7 +312,7 @@ prMALError av1imp::CreateVideoPPix(PrSDKPPixCreatorSuite* creator,
                                    PrPixelFormat pixelFormat,
                                    int width, int height)
 {
-    if (!outFrame || width <= 0 || height <= 0) return imOtherErr;
+    if (!outFrame || !UsableFrameSize(width, height)) return imOtherErr;
     *outFrame = nullptr;
 
     if (!av1imp::IsNativeP010(pixelFormat)) {
@@ -464,6 +465,7 @@ bool CopyUtf16(prUTF16Char* dst, size_t dstCount, const prUTF16Char* src)
 // замок (это и требовалось), разные почти всегда на разные. Совпадение адресов
 // по остатку стоит немного лишнего ожидания и ничего не ломает.
 std::mutex g_openMutexes[64];
+std::condition_variable g_openCvs[64];
 
 std::mutex& OpenMutexFor(const void* ldata)
 {
@@ -474,11 +476,80 @@ std::mutex& OpenMutexFor(const void* ldata)
     return g_openMutexes[bits % (sizeof(g_openMutexes) / sizeof(g_openMutexes[0]))];
 }
 
+std::condition_variable& OpenCvFor(const void* ldata)
+{
+    const size_t bits = reinterpret_cast<size_t>(ldata) >> 5;
+    return g_openCvs[bits % (sizeof(g_openCvs) / sizeof(g_openCvs[0]))];
+}
+
+bool EnsureDecoderLocked(ImporterLocalRecPtr ldata);
+
+// Держит Decoder* живым, пока хост читает кадр или звук. CloseFile ждёт
+// inFlight==0, потом delete. Без этого Premiere закрывает файл на одном
+// потоке, а GetFrame на другом уже держит указатель.
+struct DecoderPin {
+    ImporterLocalRecPtr ldata = nullptr;
+    av1imp::Decoder* decoder = nullptr;
+
+    DecoderPin() = default;
+    DecoderPin(const DecoderPin&) = delete;
+    DecoderPin& operator=(const DecoderPin&) = delete;
+    DecoderPin(DecoderPin&& other) noexcept
+        : ldata(other.ldata), decoder(other.decoder)
+    {
+        other.ldata = nullptr;
+        other.decoder = nullptr;
+    }
+    DecoderPin& operator=(DecoderPin&& other) noexcept
+    {
+        if (this != &other) {
+            reset();
+            ldata = other.ldata;
+            decoder = other.decoder;
+            other.ldata = nullptr;
+            other.decoder = nullptr;
+        }
+        return *this;
+    }
+    ~DecoderPin() { reset(); }
+
+    explicit operator bool() const { return decoder != nullptr; }
+
+    void reset()
+    {
+        if (!ldata) return;
+        ImporterLocalRecPtr hold = ldata;
+        ldata = nullptr;
+        decoder = nullptr;
+        std::lock_guard<std::mutex> lock(OpenMutexFor(hold));
+        if (hold->inFlight > 0) --hold->inFlight;
+        OpenCvFor(hold).notify_all();
+    }
+};
+
+bool PinDecoder(ImporterLocalRecPtr ldata, DecoderPin* pin)
+{
+    if (!ldata || !pin) return false;
+    pin->reset();
+    std::unique_lock<std::mutex> lock(OpenMutexFor(ldata));
+    if (ldata->closing) return false;
+    if (!EnsureDecoderLocked(ldata)) return false;
+    ++ldata->inFlight;
+    pin->ldata = ldata;
+    pin->decoder = ldata->decoder;
+    return pin->decoder != nullptr;
+}
+
+void WaitUntilIdleLocked(ImporterLocalRecPtr ldata, std::unique_lock<std::mutex>& lock)
+{
+    OpenCvFor(ldata).wait(lock, [&] { return ldata->inFlight == 0; });
+}
+
 // Premiere может спросить сведения о файле раньше, чем откроет его,
 // поэтому декодер создаём по требованию из сохранённого пути.
-bool EnsureDecoder(ImporterLocalRecPtr ldata)
+bool EnsureDecoderLocked(ImporterLocalRecPtr ldata)
 {
-    std::lock_guard<std::mutex> lock(OpenMutexFor(ldata));
+    if (ldata->closing) return false;
     if (ldata->decoder && ldata->decoder->IsOpen()) return true;
 
     if (!ldata->decoder) ldata->decoder = new av1imp::Decoder();
@@ -492,14 +563,26 @@ bool EnsureDecoder(ImporterLocalRecPtr ldata)
     return ldata->decoder->Open(path, av1imp::PreferHardware(), needVideo);
 }
 
+std::string SafeDecoderError(ImporterLocalRecPtr ldata)
+{
+    std::lock_guard<std::mutex> lock(OpenMutexFor(ldata));
+    if (!ldata || !ldata->decoder) return "no decoder";
+    return ldata->decoder->LastError();
+}
+
+std::string SafeDecoderAudioError(ImporterLocalRecPtr ldata)
+{
+    std::lock_guard<std::mutex> lock(OpenMutexFor(ldata));
+    if (!ldata || !ldata->decoder) return "no decoder";
+    return ldata->decoder->LastAudioError();
+}
+
 // Дорожка звука открывается по требованию: Premiere спрашивает отсчёты
-// не у всех потоков и не сразу
+// не у всех потоков и не сразу. Вызывать, пока жив DecoderPin: иначе
+// CloseFile может удалить декодер между проверкой и OpenAudio.
 bool EnsureAudio(ImporterLocalRecPtr ldata)
 {
-    // Тот же замок, что и у EnsureDecoder, и это обязательно: обе функции
-    // трогают одно и то же состояние одного и того же декодера
-    std::lock_guard<std::mutex> lock(OpenMutexFor(ldata));
-    if (!ldata->decoder) return false;
+    if (!ldata || !ldata->decoder) return false;
 
     // Сравниваем НОМЕР дорожки, а не просто «звук уже открыт».
     //
@@ -587,7 +670,9 @@ static prMALError AV1Init(imStdParms* stdParms, imImportInfoRec* importInfo)
     importInfo->hasSetup        = kPrFalse;
     importInfo->setupOnDblClk   = kPrFalse;
     importInfo->dontCache       = kPrFalse;
-    importInfo->keepLoaded      = kPrFalse;
+    // Хост иначе выгружает .prm, не дожидаясь aiClose / GetFrame: асинхронный
+    // работник и пины декодера тогда остаются внутри уже снятого модуля.
+    importInfo->keepLoaded      = kPrTrue;
 
     // Чтобы получить .mp4 раньше штатного импортёра Premiere, нужно ровно это:
     // в документации SDK сказано, что для перебивания импортёров самой Adobe
@@ -664,21 +749,21 @@ static prMALError AV1OpenFile8(imStdParms* stdParms, imFileRef* fileRef,
 
     // Главная проверка: файл наш, только если внутри поддерживаемый кодек.
     // Иначе честно отдаём его обратно — Premiere передаст штатному импортёру.
-    if (!EnsureDecoder(ldata)) {
-        av1imp::Log("imOpenFile8: refused - %s",
-                    ldata->decoder ? ldata->decoder->LastError().c_str() : "no decoder");
+    DecoderPin pin;
+    if (!PinDecoder(ldata, &pin)) {
+        av1imp::Log("imOpenFile8: refused - %s", SafeDecoderError(ldata).c_str());
         CloseHandle(ldata->fileRef);
         ldata->fileRef = imInvalidHandleValue;
         return imBadFile;
     }
-    if (ldata->decoder->Info().hasVideo) {
+    const av1imp::MediaInfo mi = pin.decoder->Info();
+    if (mi.hasVideo) {
         av1imp::Log("imOpenFile8: accepted, %s %dx%d, decoder %s",
-                    ldata->decoder->Info().codecName.c_str(),
-                    ldata->decoder->Info().width, ldata->decoder->Info().height,
-                    ldata->decoder->Info().decoderName.c_str());
+                    mi.codecName.c_str(), mi.width, mi.height,
+                    mi.decoderName.c_str());
     } else {
         av1imp::Log("imOpenFile8: accepted, no video, %d audio track(s)",
-                    ldata->decoder->Info().audioStreamCount);
+                    mi.audioStreamCount);
     }
 
     *fileRef                   = ldata->fileRef;
@@ -696,8 +781,12 @@ static prMALError AV1QuietFile(imStdParms* stdParms, imFileRef* fileRef, void* p
 
     ImporterLocalRecPtr ldata = *ldataH;
     av1imp::Log("imQuietFile: stream %d", ldata->streamIdx);
-    if (ldata->decoder) {
-        ldata->decoder->Close();  // сам объект оставляем: путь известен, откроемся заново
+    {
+        std::unique_lock<std::mutex> lock(OpenMutexFor(ldata));
+        WaitUntilIdleLocked(ldata, lock);
+        if (ldata->decoder) {
+            ldata->decoder->Close();  // сам объект оставляем: путь известен, откроемся заново
+        }
     }
     if (ldata->fileRef && ldata->fileRef != imInvalidHandleValue) {
         CloseHandle(ldata->fileRef);
@@ -715,20 +804,25 @@ static prMALError AV1CloseFile(imStdParms* stdParms, imFileRef* fileRef, void* p
     ImporterLocalRecPtr ldata = *ldataH;
     av1imp::Log("imCloseFile: stream %d", ldata->streamIdx);
 
-    if (ldata->decoder) {
-        const av1imp::Decoder::Stats& stats = ldata->decoder->GetStats();
-        if (stats.previewCacheHits || stats.previewCacheMisses ||
-            stats.previewCacheWritesQueued || stats.previewCacheWritesDropped) {
-            av1imp::Log(
-                "preview cache: hit %lld, miss %lld, queued %lld, dropped %lld, read %.2f ms",
-                (long long)stats.previewCacheHits,
-                (long long)stats.previewCacheMisses,
-                (long long)stats.previewCacheWritesQueued,
-                (long long)stats.previewCacheWritesDropped,
-                stats.previewCacheReadMs);
+    {
+        std::unique_lock<std::mutex> lock(OpenMutexFor(ldata));
+        ldata->closing = 1;
+        WaitUntilIdleLocked(ldata, lock);
+        if (ldata->decoder) {
+            const av1imp::Decoder::Stats stats = ldata->decoder->GetStats();
+            if (stats.previewCacheHits || stats.previewCacheMisses ||
+                stats.previewCacheWritesQueued || stats.previewCacheWritesDropped) {
+                av1imp::Log(
+                    "preview cache: hit %lld, miss %lld, queued %lld, dropped %lld, read %.2f ms",
+                    (long long)stats.previewCacheHits,
+                    (long long)stats.previewCacheMisses,
+                    (long long)stats.previewCacheWritesQueued,
+                    (long long)stats.previewCacheWritesDropped,
+                    stats.previewCacheReadMs);
+            }
+            delete ldata->decoder;
+            ldata->decoder = nullptr;
         }
-        delete ldata->decoder;
-        ldata->decoder = nullptr;
     }
     if (ldata->fileRef && ldata->fileRef != imInvalidHandleValue) {
         CloseHandle(ldata->fileRef);
@@ -807,14 +901,14 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     ldata->streamIdx  = fileInfo->streamIdx;
     ldata->audioTrack = fileInfo->streamIdx;
 
-    if (!EnsureDecoder(ldata)) {
-        av1imp::Log("imGetInfo8: refused - %s",
-                    ldata->decoder ? ldata->decoder->LastError().c_str() : "no decoder");
+    DecoderPin pin;
+    if (!PinDecoder(ldata, &pin)) {
+        av1imp::Log("imGetInfo8: refused - %s", SafeDecoderError(ldata).c_str());
         stdParms->piSuites->memFuncs->unlockHandle(reinterpret_cast<char**>(ldataH));
         return imBadFile;
     }
 
-    const av1imp::MediaInfo& mi = ldata->decoder->Info();
+    const av1imp::MediaInfo mi = pin.decoder->Info();
 
     ldata->memFuncs = stdParms->piSuites->memFuncs;
 
@@ -916,7 +1010,7 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     } else if (audioTracks > 0) {
         av1imp::Log("imGetInfo8: stream %d has audio, but it is not usable: %s",
                     fileInfo->streamIdx,
-                    ldata->decoder->LastAudioError().c_str());
+                    pin.decoder->LastAudioError().c_str());
     }
 
     if (!fileInfo->hasVideo) {
@@ -991,7 +1085,14 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     if (ldata->TimeSuite && mi.fpsNum > 0) {
         PrTime ticksPerSecond = 0;
         ldata->TimeSuite->GetTicksPerSecond(&ticksPerSecond);
-        ldata->ticksPerFrame = ticksPerSecond * mi.fpsDen / mi.fpsNum;
+        int64_t ticks = 0;
+        if (!av1imp::TicksPerFrame(ticksPerSecond, mi.fpsNum, mi.fpsDen, &ticks)) {
+            av1imp::Log("imGetInfo8: cannot compute ticksPerFrame from %lld * %d / %d",
+                        (long long)ticksPerSecond, mi.fpsDen, mi.fpsNum);
+            ldata->ticksPerFrame = 0;
+        } else {
+            ldata->ticksPerFrame = ticks;
+        }
     }
 
     av1imp::Log("imGetInfo8: %s %dx%d %d-bit, %d/%d fps, %lld frames, subType RAW",
@@ -1029,22 +1130,23 @@ static prMALError AV1ImportAudio7(imStdParms* stdParms, imFileRef fileRef,
     ImporterLocalRecPtr ldata = *ldataH;
     const csSDK_int32 nth = ldata->audioRequests++;
 
-    if (!EnsureDecoder(ldata) || !EnsureAudio(ldata)) {
+    DecoderPin pin;
+    if (!PinDecoder(ldata, &pin) || !EnsureAudio(ldata)) {
         av1imp::Log("imImportAudio7: track %d request %d at %lld - audio unavailable: %s",
                     ldata->audioTrack, nth, (long long)audioRec->position,
-                    ldata->decoder ? ldata->decoder->LastAudioError().c_str() : "no decoder");
+                    SafeDecoderAudioError(ldata).c_str());
         return imFileReadFailed;
     }
 
     // Число каналов передаём то, которое сами и объявили: только оно
     // описывает буферы, что выделил хост
-    if (!ldata->decoder->GetAudio(audioRec->position,
+    if (!pin.decoder->GetAudio(audioRec->position,
                                   static_cast<int32_t>(audioRec->size),
                                   audioRec->buffer,
                                   ldata->declaredAudioChannels)) {
         av1imp::Log("imImportAudio7: track %d request %d at %lld, %u samples - FAILED: %s",
                     ldata->audioTrack, nth, (long long)audioRec->position,
-                    audioRec->size, ldata->decoder->LastAudioError().c_str());
+                    audioRec->size, pin.decoder->LastAudioError().c_str());
         return imFileReadFailed;
     }
 
@@ -1373,8 +1475,9 @@ static prMALError AV1GetIndPixelFormat(imStdParms* stdParms, csSDK_size_t idx,
 
     if (rec->privatedata) {
         ImporterLocalRecH ldataH = reinterpret_cast<ImporterLocalRecH>(rec->privatedata);
-        if (*ldataH && (*ldataH)->decoder && (*ldataH)->decoder->IsOpen()) {
-            const av1imp::MediaInfo& mi = (*ldataH)->decoder->Info();
+        DecoderPin pin;
+        if (*ldataH && PinDecoder(*ldataH, &pin)) {
+            const av1imp::MediaInfo mi = pin.decoder->Info();
             deep = mi.bitDepth > 8;
 
             // Десятибитный родной путь проверяем первым: он и есть тот случай,
@@ -1406,9 +1509,10 @@ static prMALError AV1PreferredFrameSize(imStdParms* stdParms,
     if (rec->inIndex != 0) return imOtherErr;
 
     ImporterLocalRecH ldataH = reinterpret_cast<ImporterLocalRecH>(rec->inPrivateData);
-    if (!ldataH || !(*ldataH)->decoder) return imOtherErr;
+    DecoderPin pin;
+    if (!ldataH || !PinDecoder(*ldataH, &pin)) return imOtherErr;
 
-    const av1imp::MediaInfo& mi = (*ldataH)->decoder->Info();
+    const av1imp::MediaInfo mi = pin.decoder->Info();
     rec->outWidth  = mi.width;
     rec->outHeight = mi.height;
     return malNoError;
@@ -1441,8 +1545,9 @@ static prMALError AV1GetIndColorSpace(imStdParms* stdParms, csSDK_size_t index,
     if (!ldataH) return imOtherErr;
     ImporterLocalRecPtr ldata = *ldataH;
 
-    if (!EnsureDecoder(ldata)) return imOtherErr;
-    const av1imp::MediaInfo& mi = ldata->decoder->Info();
+    DecoderPin pin;
+    if (!PinDecoder(ldata, &pin)) return imOtherErr;
+    const av1imp::MediaInfo mi = pin.decoder->Info();
     if (!mi.hasVideo) return imOtherErr;
 
     rec->outColorSpaceType = kPrSDKColorSpaceType_SEITags;
@@ -1500,9 +1605,10 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
     if (!ldata->PPixSuite || !ldata->PPixCreatorSuite) {
         return imOtherErr;  // imGetInfo8 не отработал: наборов функций нет
     }
-    if (!EnsureDecoder(ldata)) return imBadFile;
+    DecoderPin pin;
+    if (!PinDecoder(ldata, &pin)) return imBadFile;
 
-    const av1imp::MediaInfo& mi = ldata->decoder->Info();
+    const av1imp::MediaInfo mi = pin.decoder->Info();
 
     if (ldata->ticksPerFrame <= 0) return imOtherErr;
     const csSDK_int32 frameIndex =
@@ -1552,12 +1658,17 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
     }
 
     // Качество, которое просит хост: при черновом кадр уменьшается дешевле.
-    ldata->decoder->SetScaling(av1imp::ScalingFor(videoRec->inQuality));
+    pin.decoder->SetScaling(av1imp::ScalingFor(videoRec->inQuality));
 
     for (;;) {
         imFrameFormat* offered = &videoRec->inFrameFormats[pick >= 0 ? pick : 0];
         const int frameW = (offered->inFrameWidth  > 0) ? offered->inFrameWidth  : mi.width;
         const int frameH = (offered->inFrameHeight > 0) ? offered->inFrameHeight : mi.height;
+        if (!av1imp::UsableFrameSize(frameW, frameH)) {
+            av1imp::Log("imGetSourceVideo: host asked for unusable frame size %dx%d",
+                        frameW, frameH);
+            return imOtherErr;
+        }
 
         const PrPixelFormat pixelFormat =
             (pick >= 0) ? offered->inPixelFormat : PrPixelFormat_BGRA_4444_8u;
@@ -1586,7 +1697,7 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
         }
 
         const char* why = nullptr;
-        if (!av1imp::WriteFrameToBuffer(*ldata->decoder, frameIndex,
+        if (!av1imp::WriteFrameToBuffer(*pin.decoder, frameIndex,
                                         ldata->PPixSuite, ldata->PPix2Suite,
                                         *videoRec->outFrame, pixelFormat,
                                         frameW, frameH, &why)) {
@@ -1602,7 +1713,7 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
                 if (pick >= 0) continue;
             }
             av1imp::Log("frame %d: FAILED - %s", frameIndex,
-                        why ? why : ldata->decoder->LastError().c_str());
+                        why ? why : pin.decoder->LastError().c_str());
             return why ? imOtherErr : imFileReadFailed;
         }
         if (frameIndex < 3) {
@@ -1627,7 +1738,7 @@ static prMALError AV1GetSourceVideo(imStdParms* stdParms, imFileRef fileRef,
 // ---------------------------------------------------------------------------
 
 static prMALError DispatchDisabled(csSDK_int32 selector, imStdParms* stdParms,
-                                   void* param1)
+                                   void* param1, void* param2, const char* why)
 {
     switch (selector) {
         case imInit: {
@@ -1642,14 +1753,24 @@ static prMALError DispatchDisabled(csSDK_int32 selector, imStdParms* stdParms,
             importInfo->dontCache     = kPrFalse;
             importInfo->keepLoaded    = kPrFalse;
             importInfo->priority      = 0;
-            av1imp::Log("imInit: disabled by settings, priority 0, FFmpeg not loaded");
+            av1imp::Log("imInit: %s, priority 0, FFmpeg not loaded",
+                        why ? why : "importer unavailable");
             return imIsCacheable;
         }
         case imGetIndFormat:
             return imBadFormatIndex;
         case imOpenFile8:
-            av1imp::Log("imOpenFile8: importer disabled, handing the file back");
+        case imGetInfo8:
+        case imGetSourceVideo:
+        case imImportAudio7:
+            av1imp::Log("%s: %s, handing the file back",
+                        av1imp::SelectorName(selector),
+                        why ? why : "importer unavailable");
             return imBadFile;
+        case imQuietFile:
+            return AV1QuietFile(stdParms, reinterpret_cast<imFileRef*>(param1), param2);
+        case imCloseFile:
+            return AV1CloseFile(stdParms, reinterpret_cast<imFileRef*>(param1), param2);
         case imGetSupports7:
             return malSupports7;
         case imGetSupports8:
@@ -1669,7 +1790,8 @@ static prMALError DispatchImport(csSDK_int32 selector, imStdParms* stdParms,
     // от файла, не загружая библиотеки в процесс Adobe.
     av1imp::EnsureLog();
     if (!av1imp::PluginEnabled()) {
-        const prMALError result = DispatchDisabled(selector, stdParms, param1);
+        const prMALError result = DispatchDisabled(selector, stdParms, param1, param2,
+                                                   "disabled by settings");
         if (selector != imGetSourceVideo && selector != imImportAudio7) {
             av1imp::Log("  selector %s -> %d (disabled)",
                         av1imp::SelectorName(selector), result);
@@ -1681,11 +1803,8 @@ static prMALError DispatchImport(csSDK_int32 selector, imStdParms* stdParms,
         // Delay-load исключение на первом вызове ffmpeg завершило бы весь
         // процесс Adobe. Отказываем ещё до dispatch: битая установка должна
         // выглядеть как неработающий импортёр, а не как закрывшийся Premiere.
-        if (selector == imShutdown) {
-            FinishImporterShutdown();
-            return malNoError;
-        }
-        const prMALError result = imOtherErr;
+        const prMALError result = DispatchDisabled(selector, stdParms, param1, param2,
+                                                   "ffmpeg runtime unavailable");
         av1imp::Log("  selector %s -> %d (ffmpeg runtime unavailable)",
                     av1imp::SelectorName(selector), result);
         return result;
@@ -1746,6 +1865,9 @@ static prMALError DispatchImport(csSDK_int32 selector, imStdParms* stdParms,
             ImporterLocalRecH ldataH =
                 reinterpret_cast<ImporterLocalRecH>(rec->inPrivateData);
             if (!ldataH) { result = imOtherErr; break; }
+
+            DecoderPin pin;
+            if (!PinDecoder(*ldataH, &pin)) { result = imOtherErr; break; }
 
             // Отказ здесь не беда: хост просто останется на обычном пути
             result = av1imp::CreateAsyncImporter(*ldataH, rec)

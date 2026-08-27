@@ -145,7 +145,7 @@ int wmain(int argc, wchar_t** argv)
     bool ffmpegOk = true;
     for (const wchar_t* m : modules) {
         if (!GetModuleHandleW(m)) {
-            if (!expectDisabled)
+            if (!expectDisabled && !expectRuntimeFailure)
                 wprintf(L"FAIL: %s did not load on the first request\n", m);
             ffmpegOk = false;
         }
@@ -167,10 +167,13 @@ int wmain(int argc, wchar_t** argv)
     }
 
     if (expectRuntimeFailure) {
-        const bool controlled = !ffmpegOk && r == imOtherErr;
+        const prMALError open = entry(imOpenFile8, &stdParms, nullptr, nullptr);
+        const bool controlled = !ffmpegOk && r == imIsCacheable && info.priority == 0 &&
+                                open == imBadFile;
         printf("failure    : %s\n", controlled
-            ? "controlled importer error, host process survived"
+            ? "priority 0, file handed back, host process survived"
             : "WRONG result for an incomplete runtime");
+        entry(imShutdown, &stdParms, nullptr, nullptr);
         FreeLibrary(plugin);
         return controlled ? 0 : 8;
     }

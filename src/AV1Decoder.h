@@ -149,8 +149,8 @@ public:
     // не дожидаясь, пока другие его потоки договорят с декодером.
     void Close();
 
-    bool IsOpen() const { return fmt_ != nullptr; }
-    const MediaInfo& Info() const { return info_; }
+    bool IsOpen() const;
+    MediaInfo Info() const;
 
     // Выдать кадр по индексу в буфер вызывающего.
     // Формат — BGRA, 8 бит на канал, строка dstStride байт.
@@ -259,7 +259,7 @@ public:
     // Отдельно от видео: у звука свой разбор контейнера, иначе перемотка
     // видео сбивала бы позицию звука и наоборот.
     bool OpenAudio(int ordinal);
-    bool HasAudio() const { return audioCodec_ != nullptr; }
+    bool HasAudio() const;
 
     // Какая дорожка открыта сейчас, или -1.
     //
@@ -268,7 +268,7 @@ public:
     // и молча отдавала прежнюю: у файла с четырьмя одинаковыми дорожками OBS
     // это незаметно, а на записи, где дорожки разной длины или разной
     // разрядности, Premiere получал бы чужие сведения.
-    int OpenAudioTrack() const { return audioOrdinal_; }
+    int OpenAudioTrack() const;
 
     // Выдать отсчёты в буферы вызывающего: dst[канал][отсчёт], 32-битные float.
     // Именно в таком виде их ждёт Premiere.
@@ -300,8 +300,8 @@ public:
         int64_t previewCacheWritesDropped = 0;
         double  previewCacheReadMs = 0.0;
     };
-    const Stats& GetStats() const { return stats_; }
-    void ResetStats() { stats_ = Stats(); }
+    Stats GetStats() const;
+    void ResetStats();
 
     // Сколько байт RAM-кэш кадров держит во всём процессе прямо сейчас.
     static size_t RamCacheBytesHeld();
@@ -529,8 +529,8 @@ private:
     // Порядок захвата, когда нужны оба: сначала видео, потом звук.
     Stats stats_;
 
-    std::mutex mutex_;
-    std::mutex audioMutex_;
+    mutable std::mutex mutex_;
+    mutable std::mutex audioMutex_;
 };
 
 } // namespace av1imp

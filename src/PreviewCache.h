@@ -14,7 +14,7 @@
 
 namespace av1imp {
 
-constexpr uint32_t kPreviewCacheKeySchema = 1;
+constexpr uint32_t kPreviewCacheKeySchema = 2;
 constexpr size_t   kPreviewCacheMaxPayload = 2u * 1024u * 1024u;
 
 struct SourceFingerprint {

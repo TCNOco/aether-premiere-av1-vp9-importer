@@ -179,6 +179,7 @@ Engine g_eng;
 
 void Warn(const std::string& msg)
 {
+    std::lock_guard<std::mutex> lock(g_eng.mutex);
     g_eng.lastWarning = msg;
     g_eng.stats.lastWarning = msg;
 }
@@ -521,19 +522,31 @@ SourceFingerprint FingerprintSource(const std::string& utf8Path)
     LARGE_INTEGER size{};
     GetFileSizeEx(file, &size);
 
-    std::vector<uint8_t> head(65536), tail(65536);
-    DWORD got = 0;
-    ReadFile(file, head.data(), 65536, &got, nullptr);
-    head.resize(got);
-    if (size.QuadPart > 65536) {
+    std::vector<uint8_t> head, mid, tail;
+    const DWORD kSample = 256u * 1024u;
+    auto readChunk = [&](int64_t offset, DWORD want, std::vector<uint8_t>* out) {
         LARGE_INTEGER at;
-        at.QuadPart = size.QuadPart - 65536;
-        SetFilePointerEx(file, at, nullptr, FILE_BEGIN);
-        got = 0;
-        ReadFile(file, tail.data(), 65536, &got, nullptr);
-        tail.resize(got);
-    } else {
-        tail.clear();
+        at.QuadPart = offset;
+        if (!SetFilePointerEx(file, at, nullptr, FILE_BEGIN)) {
+            out->clear();
+            return;
+        }
+        out->assign(want, 0);
+        DWORD got = 0;
+        if (!ReadFile(file, out->data(), want, &got, nullptr)) {
+            out->clear();
+            return;
+        }
+        out->resize(got);
+    };
+
+    readChunk(0, kSample, &head);
+    if (size.QuadPart > static_cast<LONGLONG>(kSample) * 2) {
+        const int64_t midAt = (size.QuadPart - kSample) / 2;
+        readChunk(midAt, kSample, &mid);
+        readChunk(size.QuadPart - kSample, kSample, &tail);
+    } else if (size.QuadPart > kSample) {
+        readChunk(size.QuadPart - kSample, kSample, &tail);
     }
     CloseHandle(file);
 
@@ -561,6 +574,7 @@ SourceFingerprint FingerprintSource(const std::string& utf8Path)
     }
     uint8_t sparse[32] = {};
     std::vector<uint8_t> sample = head;
+    sample.insert(sample.end(), mid.begin(), mid.end());
     sample.insert(sample.end(), tail.begin(), tail.end());
     Sha256(sample.data(), sample.size(), sparse);
     blob.insert(blob.end(), sparse, sparse + 32);

@@ -4,6 +4,7 @@
 #include "AV1Decoder.h"
 #include "AV1Settings.h"
 #include "AV1Version.h"
+#include "ImporterMath.h"
 #include "PreviewCache.h"
 
 extern "C" {
@@ -25,6 +26,7 @@ extern "C" {
 #include <cstdlib>
 #include <cstring>
 #include <emmintrin.h>
+#include <mutex>
 #include <thread>
 
 namespace av1imp {
@@ -180,12 +182,11 @@ bool HardwareFormatFor(const AVCodec* dec, AVHWDeviceType device,
 // «основной» бывает не тот, на котором хочется распаковывать.
 const char* ForcedAdapter() {
     static const char* value = nullptr;
-    static bool asked = false;
-    if (!asked) {
-        asked = true;
+    static std::once_flag once;
+    std::call_once(once, [] {
         const char* v = std::getenv("AETHER_D3D11_ADAPTER");
         value = (v && *v) ? v : nullptr;
-    }
+    });
     return value;
 }
 
@@ -204,12 +205,11 @@ const char* ForcedAdapter() {
 
 const char* ForcedDecoder() {
     static const char* value = nullptr;
-    static bool asked = false;
-    if (!asked) {
-        asked = true;
+    static std::once_flag once;
+    std::call_once(once, [] {
         const char* v = std::getenv("AETHER_DECODER");
         value = (v && *v) ? v : nullptr;
-    }
+    });
     return value;
 }
 
@@ -231,6 +231,15 @@ int OpenContainer(AVFormatContext** ctx, const char* path)
 {
     AVDictionary* opts = ContainerOpenOptions();
     const int err = avformat_open_input(ctx, path, nullptr, &opts);
+    if (err >= 0 &&
+        (av_dict_get(opts, "protocol_whitelist", nullptr, 0) ||
+         av_dict_get(opts, "format_whitelist", nullptr, 0))) {
+        // Остаток в словаре значит, что эта сборка ffmpeg опцию не съела.
+        // Тогда белый список не действует — закрываемся, а не открываем «как есть».
+        avformat_close_input(ctx);
+        av_dict_free(&opts);
+        return AVERROR_OPTION_NOT_FOUND;
+    }
     av_dict_free(&opts);
     return err;
 }
@@ -238,7 +247,7 @@ int OpenContainer(AVFormatContext** ctx, const char* path)
 // Потолок ребра кадра. 8K DCI — 8192 по ширине, поэтому равенство проходит.
 // Фаззер берёг себя тем же числом, продакшн — нет: width из заголовка шёл
 // в расчёт кэша и в вектор диагностики как есть.
-const int kMaxFrameEdge = 8192;
+// Само число — av1imp::kMaxFrameEdge в ImporterMath.h.
 
 // Сколько шагов демультиплексора на один запрос. Битый контейнер без EOF
 // иначе крутит поток хоста, пока Premiere не снимут.
@@ -328,6 +337,26 @@ std::string Decoder::LastError() const {
 std::string Decoder::LastAudioError() const {
     std::lock_guard<std::mutex> lock(errorMutex_);
     return lastAudioError_.empty() ? lastError_ : lastAudioError_;
+}
+
+bool Decoder::IsOpen() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return fmt_ != nullptr;
+}
+
+MediaInfo Decoder::Info() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return info_;
+}
+
+Decoder::Stats Decoder::GetStats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return stats_;
+}
+
+void Decoder::ResetStats() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stats_ = Stats();
 }
 
 bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVideo) {
@@ -568,30 +597,34 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
         }
     }
 
-    frame_   = av_frame_alloc();
-    swFrame_ = av_frame_alloc();
-    lastFrame_ = av_frame_alloc();
-    aheadFrame_ = av_frame_alloc();
-    packet_  = av_packet_alloc();
-    if (!frame_ || !swFrame_ || !lastFrame_ || !aheadFrame_ || !packet_) {
-        SetError("out of memory for frame buffers");
-        CloseLocked();
-        return false;
-    }
+    // Дорожкам звука декодер кадров, кэш и слот в общем бюджете не нужны:
+    // иначе каждый audio-only поток клипа считался бы ещё одним видео.
+    if (needVideo) {
+        frame_   = av_frame_alloc();
+        swFrame_ = av_frame_alloc();
+        lastFrame_ = av_frame_alloc();
+        aheadFrame_ = av_frame_alloc();
+        packet_  = av_packet_alloc();
+        if (!frame_ || !swFrame_ || !lastFrame_ || !aheadFrame_ || !packet_) {
+            SetError("out of memory for frame buffers");
+            CloseLocked();
+            return false;
+        }
 
-    // Сколько кэша хочет ЭТОТ клип: около секунды видео. Считаем от разрешения,
-    // а не константой — кадр 4K весит вчетверо больше, чем 1440p, и фиксированные
-    // 256 МБ вмещали бы уже не полсекунды, а пятую часть.
-    //
-    // Прежде здесь стоял ещё и нижний порог в 128 МБ, и он был вреден: клипу
-    // 640x360 нужно 20 МБ на секунду, а выдавалось 128 — вшестеро больше, чем
-    // он просил. Порог убран; сколько просит, столько и хочет.
-    //
-    // Сколько он ПОЛУЧИТ, решает уже общий предел на процесс — см. Budget().
-    const size_t bytesPerFrame = (size_t)info_.width * info_.height * 3 / 2;  // NV12
-    cacheBudget_ = bytesPerFrame * 60;
-    videoDecoders_.fetch_add(1, std::memory_order_relaxed);
-    countedAsVideo_ = true;
+        // Сколько кэша хочет ЭТОТ клип: около секунды видео. Считаем от разрешения,
+        // а не константой — кадр 4K весит вчетверо больше, чем 1440p, и фиксированные
+        // 256 МБ вмещали бы уже не полсекунды, а пятую часть.
+        //
+        // Прежде здесь стоял ещё и нижний порог в 128 МБ, и он был вреден: клипу
+        // 640x360 нужно 20 МБ на секунду, а выдавалось 128 — вшестеро больше, чем
+        // он просил. Порог убран; сколько просит, столько и хочет.
+        //
+        // Сколько он ПОЛУЧИТ, решает уже общий предел на процесс — см. Budget().
+        const size_t bytesPerFrame = (size_t)info_.width * info_.height * 3 / 2;  // NV12
+        cacheBudget_ = bytesPerFrame * 60;
+        videoDecoders_.fetch_add(1, std::memory_order_relaxed);
+        countedAsVideo_ = true;
+    }
 
     lastDecodedFrame_ = -1;
     eofReached_ = false;
@@ -1159,11 +1192,12 @@ bool Decoder::ConvertToBGRA(AVFrame* src, uint8_t* dst, int dstStride, int dstW,
     AVFrame* srcFrame = ToSystemMemory(src);
     if (!srcFrame) return false;
 
-    const auto tConv = std::chrono::steady_clock::now();
+    if (!UsableFrameSize(dstW, dstH)) {
+        SetError("host frame size is not usable");
+        return false;
+    }
 
-    // Размер берём запрошенный, а не размер файла: Premiere при пониженном
-    // качестве воспроизведения создаёт буфер поменьше, и запись туда полного
-    // кадра выходила бы за его пределы.
+    const auto tConv = std::chrono::steady_clock::now();
     //
     // SWS_BICUBIC, а не BILINEAR: пока масштабирования не было, флаг ни на что
     // не влиял, а при уменьшении разница видна.
@@ -1292,6 +1326,7 @@ AVFrame* Decoder::ToSystemMemory(AVFrame* src) {
     // не ошибка импорта, а закрывшийся Premiere. Настоящую причину чинит
     // DecodeUntil, но проверка тут стоит и остаётся: цена ей ноль.
     if (srcFrame->width <= 0 || srcFrame->height <= 0 ||
+        !UsableFrameSize(srcFrame->width, srcFrame->height) ||
         srcFrame->format < 0 ||
         !av_pix_fmt_desc_get((AVPixelFormat)srcFrame->format)) {
         char msg[128];
@@ -1310,6 +1345,10 @@ bool Decoder::CopyToYUV420(AVFrame* src,
                            int dstW, int dstH) {
     AVFrame* srcFrame = ToSystemMemory(src);
     if (!srcFrame) return false;
+    if (!UsableFrameSize(dstW, dstH)) {
+        SetError("host frame size is not usable");
+        return false;
+    }
 
     const auto tConv = std::chrono::steady_clock::now();
 
@@ -1371,6 +1410,10 @@ bool Decoder::CopyToP010(AVFrame* src,
                          int dstW, int dstH) {
     AVFrame* srcFrame = ToSystemMemory(src);
     if (!srcFrame) return false;
+    if (!UsableFrameSize(dstW, dstH)) {
+        SetError("host frame size is not usable");
+        return false;
+    }
 
     const auto tConv = std::chrono::steady_clock::now();
 
@@ -1440,7 +1483,7 @@ void Decoder::LimitCacheToFrames(int frames) {
 
 bool Decoder::PrefetchFrame(int64_t frameIndex) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!IsOpen() || !info_.hasVideo || !codec_) return false;
+    if (!fmt_ || !info_.hasVideo || !codec_) return false;
     if (frameIndex < 0) frameIndex = 0;
 
     // Уже лежит — работы нет
@@ -1508,7 +1551,7 @@ AVFrame* Decoder::AcquireFrameLocked(int64_t frameIndex) {
 bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
                            int dstWidth, int dstHeight, FrameFormat format) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!IsOpen() || !dst) {
+    if (!fmt_ || !dst) {
         SetError("file is not open");
         return false;
     }
@@ -1520,6 +1563,10 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
     // Ноль означает «как в файле» — удобно для проверочных программ
     if (dstWidth  <= 0) dstWidth  = info_.width;
     if (dstHeight <= 0) dstHeight = info_.height;
+    if (!UsableFrameSize(dstWidth, dstHeight)) {
+        SetError("host frame size is not usable");
+        return false;
+    }
 
     const Settings set = CurrentSettings();
     const bool reduced = dstWidth < info_.width || dstHeight < info_.height;
@@ -1606,6 +1653,7 @@ bool Decoder::GetFrameBGRA(int64_t frameIndex, uint8_t* dst, int dstStride,
 }
 
 bool Decoder::CanDeliverYUV420() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!info_.hasVideo) return false;
 
     // Прозрачность в YUV хранить негде — такие файлы идут в BGRA целиком
@@ -1632,7 +1680,7 @@ bool Decoder::GetFrameYUV420(int64_t frameIndex,
                              uint8_t* dstV, int strideV,
                              int dstWidth, int dstHeight) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!IsOpen() || !dstY || !dstU || !dstV) {
+    if (!fmt_ || !dstY || !dstU || !dstV) {
         SetError("file is not open");
         return false;
     }
@@ -1643,6 +1691,10 @@ bool Decoder::GetFrameYUV420(int64_t frameIndex,
 
     if (dstWidth  <= 0) dstWidth  = info_.width;
     if (dstHeight <= 0) dstHeight = info_.height;
+    if (!UsableFrameSize(dstWidth, dstHeight)) {
+        SetError("host frame size is not usable");
+        return false;
+    }
 
     AVFrame* src = AcquireFrameLocked(frameIndex);
     if (!src) return false;
@@ -1663,6 +1715,7 @@ bool Decoder::GetFrameYUV420(int64_t frameIndex,
 // Кривая переноса тут НЕ ограничение: у BT.2020 Premiere различает обычную,
 // PQ и HLG отдельными константами, и все три мы умеем назвать.
 bool Decoder::CanDeliverP010() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!info_.hasVideo) return false;
     if (info_.hasAlpha)  return false;
     if (info_.bitDepth != 10) return false;
@@ -1677,7 +1730,7 @@ bool Decoder::GetFrameP010(int64_t frameIndex,
                            uint8_t* dstUV, int strideUV,
                            int dstWidth, int dstHeight) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!IsOpen() || !dstY || !dstUV) {
+    if (!fmt_ || !dstY || !dstUV) {
         SetError("file is not open");
         return false;
     }
@@ -1688,6 +1741,10 @@ bool Decoder::GetFrameP010(int64_t frameIndex,
 
     if (dstWidth  <= 0) dstWidth  = info_.width;
     if (dstHeight <= 0) dstHeight = info_.height;
+    if (!UsableFrameSize(dstWidth, dstHeight)) {
+        SetError("host frame size is not usable");
+        return false;
+    }
 
     AVFrame* src = AcquireFrameLocked(frameIndex);
     if (!src) return false;
@@ -1712,6 +1769,18 @@ void Decoder::CloseAudioLocked() {
     pendingCount_  = 0;
     audioCursor_   = -1;
     audioExpectSample_ = -1;
+}
+
+bool Decoder::HasAudio() const
+{
+    std::lock_guard<std::mutex> lock(audioMutex_);
+    return audioCodec_ != nullptr;
+}
+
+int Decoder::OpenAudioTrack() const
+{
+    std::lock_guard<std::mutex> lock(audioMutex_);
+    return audioOrdinal_;
 }
 
 bool Decoder::OpenAudio(int ordinal) {

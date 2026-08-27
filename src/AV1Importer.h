@@ -60,6 +60,11 @@
 typedef struct
 {
     av1imp::Decoder*        decoder;        // создаётся через new: Premiere выдаёт сырую память без вызова конструкторов
+    // Пин живых GetFrame/GetAudio. Premiere закрывает файл, не дожидаясь
+    // других потоков; delete decoder без этого счётчика — UAF внутри хоста.
+    // closing=1 после imCloseFile: новые пины не берутся, QuietFile не ставит.
+    csSDK_int32             inFlight;
+    csSDK_int32             closing;
     imFileRef               fileRef;        // дескриптор файла для самого Premiere; читаем мы через ffmpeg
     prUTF16Char             filePath[AV1_PATH_CHARS];
 

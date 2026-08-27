@@ -71,12 +71,27 @@ bool PreloadFFmpeg()
         // Стенд, где .prm собирается без DLL, должен копировать их сюда же,
         // как делает установщик, а не учить плагин искать «где получится».
         HMODULE m = LoadLibraryExW(full, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-        if (m) continue;
+        if (!m) {
+            av1imp::Log("ffmpeg: FAILED to load %s from %s (error %lu)",
+                        av1imp::Utf8(name).c_str(), av1imp::Utf8(dir).c_str(),
+                        GetLastError());
+            ready = false;
+            continue;
+        }
 
-        av1imp::Log("ffmpeg: FAILED to load %s from %s (error %lu)",
-                    av1imp::Utf8(name).c_str(), av1imp::Utf8(dir).c_str(),
-                    GetLastError());
-        ready = false;
+        // LoadLibrary по полному пути всё равно вернёт уже загруженный модуль
+        // с тем же именем (другой MediaCore-плагин успел раньше). Тогда это
+        // не наши DLL, и delay-load ffmpeg внутри Premiere смешает две сборки.
+        wchar_t loaded[kPluginDirChars + 64] = {};
+        const DWORD n = GetModuleFileNameW(m, loaded, ARRAYSIZE(loaded));
+        if (n == 0 || n >= ARRAYSIZE(loaded) || _wcsicmp(loaded, full) != 0) {
+            av1imp::Log("ffmpeg: %s is already loaded from elsewhere (%s), refusing",
+                        av1imp::Utf8(name).c_str(),
+                        n ? av1imp::Utf8(loaded).c_str() : "?");
+            FreeLibrary(m);
+            ready = false;
+            continue;
+        }
     }
 
     if (!ready) {

@@ -11,6 +11,20 @@ namespace {
 
 int g_failures = 0;
 
+void CheckTicks(const char* name, int64_t ticksPerSecond, int fpsNum, int fpsDen,
+                bool expectOk, int64_t expected)
+{
+    int64_t actual = -1;
+    const bool ok = av1imp::TicksPerFrame(ticksPerSecond, fpsNum, fpsDen, &actual);
+    if (ok == expectOk && (!expectOk || actual == expected)) {
+        printf("  %-36s OK\n", name);
+        return;
+    }
+    printf("  %-36s FAIL (ok %s, value %lld)\n",
+           name, ok ? "yes" : "no", (long long)actual);
+    ++g_failures;
+}
+
 void Check(const char* name, int64_t frameCount, int32_t sampleSize,
            int32_t expected, bool expectedSaturated)
 {
@@ -47,6 +61,11 @@ int main()
 
     Check("invalid sample size",
           100, 0, 0, false);
+
+    CheckTicks("ordinary 60 fps", 254016000000LL, 60, 1, true, 4233600000LL);
+    CheckTicks("zero denominator", 254016000000LL, 30, 0, false, 0);
+    CheckTicks("overflowing product",
+               (std::numeric_limits<int64_t>::max() / 2) + 1, 1, 3, false, 0);
 
     printf("\n%s\n", g_failures == 0 ? "ALL IMPORTER MATH CHECKS PASSED"
                                      : "IMPORTER MATH CHECKS FAILED");

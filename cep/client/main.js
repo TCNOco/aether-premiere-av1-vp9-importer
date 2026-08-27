@@ -32,9 +32,12 @@ function powershellExe() {
 // Папку плагинов приложения Adobe сами записывают в реестр — оттуда её берёт
 // и установщик, и диагностика. Спрашиваем тем же способом, чтобы три места
 // не разошлись во мнениях.
+const kExecTimeoutMs = 60000;
+
 function execText(command, args) {
     return new Promise((resolve, reject) => {
-        execFile(command, args, { encoding: 'utf8', windowsHide: true },
+        execFile(command, args,
+            { encoding: 'utf8', windowsHide: true, timeout: kExecTimeoutMs },
             (error, stdout) => error ? reject(error) : resolve(stdout));
     });
 }
@@ -169,7 +172,8 @@ function runDiagnostics() {
 
     // Буфер побольше умолчания: отчёт с длинными путями в него не влезал бы,
     // а обрезанный JSON разобрать нельзя вовсе.
-    execFile(exe, args, { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, windowsHide: true },
+    execFile(exe, args, { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024,
+                          windowsHide: true, timeout: kExecTimeoutMs },
         (err, stdout) => {
             run.disabled = false;
 
