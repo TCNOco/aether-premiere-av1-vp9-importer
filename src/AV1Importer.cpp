@@ -908,7 +908,7 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
         return imBadFile;
     }
 
-    const av1imp::MediaInfo mi = pin.decoder->Info();
+    av1imp::MediaInfo mi = pin.decoder->Info();
 
     ldata->memFuncs = stdParms->piSuites->memFuncs;
 
@@ -999,6 +999,9 @@ static prMALError AV1GetInfo8(imStdParms* stdParms, imFileAccessRec8* fileAccess
     fileInfo->hasDataRate = kPrFalse;
 
     if (audioTracks > 0 && EnsureAudio(ldata)) {
+        // Каналы и частота появляются только после OpenAudio. Info() отдаёт
+        // копию, поэтому снимок до открытия дорожки здесь врал бы нулями.
+        mi = pin.decoder->Info();
         fileInfo->hasAudio            = kPrTrue;
         fileInfo->audInfo.numChannels = mi.audioChannels;
         // Запоминаем ровно то, что сказали: по этому числу хост выделит

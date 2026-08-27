@@ -10,7 +10,7 @@
 форматов, без ожидания. Один установщик на Premiere Pro, After Effects
 и Media Encoder.
 
-Бесплатно, открытый код, Apache 2.0. Windows x64, **v1.3.2**.
+Бесплатно, открытый код, Apache 2.0. Windows x64, **v1.3.3**.
 
 [![core checks](https://github.com/neoHaDe/aether-premiere-av1-vp9-importer/actions/workflows/core-checks.yml/badge.svg)](https://github.com/neoHaDe/aether-premiere-av1-vp9-importer/actions/workflows/core-checks.yml)
 [![C++](https://img.shields.io/badge/C++-17-00599C?logo=cplusplus&logoColor=white)](https://isocpp.org)

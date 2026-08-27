@@ -9,7 +9,7 @@
 Drag a file onto the timeline and it plays. No transcoding, no proxies,
 no waiting. One installer covers Premiere Pro, After Effects and Media Encoder.
 
-Free, open source, Apache 2.0. Windows x64, **v1.3.2**.
+Free, open source, Apache 2.0. Windows x64, **v1.3.3**.
 
 [![core checks](https://github.com/neoHaDe/aether-premiere-av1-vp9-importer/actions/workflows/core-checks.yml/badge.svg)](https://github.com/neoHaDe/aether-premiere-av1-vp9-importer/actions/workflows/core-checks.yml)
 [![C++](https://img.shields.io/badge/C++-17-00599C?logo=cplusplus&logoColor=white)](https://isocpp.org)

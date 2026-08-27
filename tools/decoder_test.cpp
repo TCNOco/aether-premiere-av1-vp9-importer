@@ -536,8 +536,9 @@ void CheckSoundMatchesPicture(av1imp::Decoder& dec, const av1imp::MediaInfo& inf
 
     // Щелчок: первый отсчёт громче трети шкалы
     if (!dec.OpenAudio(0)) { Check(false, name); return; }
+    const av1imp::MediaInfo audio = dec.Info();
 
-    const int    channels = info.audioChannels > 0 ? info.audioChannels : 1;
+    const int    channels = audio.audioChannels > 0 ? audio.audioChannels : 1;
     const int32_t block   = 4096;
     std::vector<std::vector<float>> chans(channels, std::vector<float>(block));
     std::vector<float*> ptrs(channels);
@@ -548,7 +549,7 @@ void CheckSoundMatchesPicture(av1imp::Decoder& dec, const av1imp::MediaInfo& inf
     // ffmpeg полная шкала это -18 дБ, и любое выбранное заранее число
     // оказалось бы либо слишком строгим, либо бессмысленным.
     double peak = 0.0;
-    for (int64_t at = 0; at < info.audioSampleCount; at += block) {
+    for (int64_t at = 0; at < audio.audioSampleCount; at += block) {
         if (!dec.GetAudio(at, block, ptrs.data())) break;
         for (int32_t i = 0; i < block; ++i) {
             const double v = std::fabs(chans[0][i]);
@@ -558,7 +559,7 @@ void CheckSoundMatchesPicture(av1imp::Decoder& dec, const av1imp::MediaInfo& inf
 
     int64_t clickSample = -1;
     if (peak > 0.02) {
-        for (int64_t at = 0; at < info.audioSampleCount && clickSample < 0; at += block) {
+        for (int64_t at = 0; at < audio.audioSampleCount && clickSample < 0; at += block) {
             if (!dec.GetAudio(at, block, ptrs.data())) break;
             for (int32_t i = 0; i < block; ++i) {
                 if (std::fabs(chans[0][i]) > peak * 0.5) { clickSample = at + i; break; }
@@ -575,7 +576,7 @@ void CheckSoundMatchesPicture(av1imp::Decoder& dec, const av1imp::MediaInfo& inf
     }
 
     const double flashSec = flashFrame / info.fps;
-    const double clickSec = (double)clickSample / info.audioSampleRate;
+    const double clickSec = (double)clickSample / audio.audioSampleRate;
     const double apart    = std::fabs(flashSec - clickSec);
 
     // Два кадра. Не строже: кодер звука размазывает начало щелчка на своё окно,
@@ -663,7 +664,8 @@ void CheckAudioChannelCap(av1imp::Decoder& dec, const av1imp::MediaInfo& info,
                dec.LastAudioError().c_str());
         return;
     }
-    Check(info.audioChannels > 0 && info.audioChannels <= av1imp::kMaxAudioChannels,
+    const av1imp::MediaInfo audio = dec.Info();
+    Check(audio.audioChannels > 0 && audio.audioChannels <= av1imp::kMaxAudioChannels,
           "open audio stays within 64 channels");
 }
 
@@ -777,18 +779,19 @@ void CheckAudioIsRepeatable(av1imp::Decoder& dec, const av1imp::MediaInfo& info)
         return;
     }
 
-    const int ch = info.audioChannels;
+    const av1imp::MediaInfo audio = dec.Info();
+    const int ch = audio.audioChannels;
     const int32_t count = 4800;
 
     // Positions come from the clip, not from a fixed number of seconds. With
     // 5 and 15 seconds hard-coded, a short test file read past its own end and
     // the check reported a failure that was nothing but the end of the file.
-    if (info.audioSampleCount < (int64_t)count * 4) {
+    if (audio.audioSampleCount < (int64_t)count * 4) {
         printf("  %-46s SKIP (clip too short)\n", "same audio range reads identically");
         return;
     }
-    const int64_t at   = info.audioSampleCount / 4;
-    const int64_t away = info.audioSampleCount * 3 / 4;
+    const int64_t at   = audio.audioSampleCount / 4;
+    const int64_t away = audio.audioSampleCount * 3 / 4;
 
     std::vector<std::vector<float>> a(ch, std::vector<float>(count));
     std::vector<std::vector<float>> b(ch, std::vector<float>(count));
@@ -1105,8 +1108,9 @@ int wmain(int argc, wchar_t** wargv)
             continue;
         }
 
-        const int ch = info.audioChannels;
-        const int32_t want = info.audioSampleRate;   // one second
+        const av1imp::MediaInfo audio = dec.Info();
+        const int ch = audio.audioChannels;
+        const int32_t want = audio.audioSampleRate;   // one second
 
         // Printed BEFORE the read, not after, and that is the point.
         //
@@ -1116,8 +1120,8 @@ int wmain(int argc, wchar_t** wargv)
         // last line the true one. Costs one line of output; buys the difference
         // between guessing and knowing.
         printf("  track %d: %d ch, %d Hz, %lld samples, reading %d from %lld\n",
-               track, ch, info.audioSampleRate, (long long)info.audioSampleCount,
-               want, (long long)(info.audioSampleCount / 3));
+               track, ch, audio.audioSampleRate, (long long)audio.audioSampleCount,
+               want, (long long)(audio.audioSampleCount / 3));
 
         if (ch <= 0 || want <= 0) {
             printf("  track %d: REFUSED - %d channels at %d Hz\n", track, ch, want);
@@ -1132,7 +1136,7 @@ int wmain(int argc, wchar_t** wargv)
         // a quiet start cannot be told apart from an empty track
         // A third of the way in: far enough from the start to be representative,
         // and inside the file however short it is
-        const int64_t start = info.audioSampleCount / 3;
+        const int64_t start = audio.audioSampleCount / 3;
         if (!dec.GetAudio(start, want, ptrs.data())) {
             printf("  track %d: FAILED - %s\n", track, dec.LastAudioError().c_str());
             continue;

@@ -424,10 +424,11 @@ void CheckOneFile(Section& s, const std::wstring& path, const wchar_t* label,
         // Дорожку надо открыть: до этого число каналов и частота пустые,
         // и отчёт показывал бы «каналов 0, 0 Гц» у совершенно исправного файла.
         if (mi.audioStreamCount > 0 && dec.OpenAudio(0)) {
+            const av1imp::MediaInfo audio = dec.Info();
             Add(s, L"Звук", State::Info,
                 Format(L"дорожек %d, каналов %d, %d Гц, отсчётов %lld",
-                       mi.audioStreamCount, mi.audioChannels, mi.audioSampleRate,
-                       mi.audioSampleCount));
+                       audio.audioStreamCount, audio.audioChannels, audio.audioSampleRate,
+                       audio.audioSampleCount));
         } else if (mi.audioStreamCount > 0) {
             Add(s, L"Звук", State::Fail,
                 Format(L"дорожек %d, но первая не открылась", mi.audioStreamCount));
