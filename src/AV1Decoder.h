@@ -348,6 +348,7 @@ private:
     // Варианты без захвата замка — для вызова изнутри, когда он уже взят
     void CloseLocked();
     void CloseAudioLocked();
+    void CloseAudioDecoderLocked();
     bool DecodeUntil(int64_t targetFrame);
     double FrameTimeSec(const AVFrame* f) const;
 
@@ -387,6 +388,7 @@ private:
     void SetAudioError(const std::string& msg, int averr = 0);
 
     AVFormatContext* fmt_        = nullptr;
+    std::string      path_;      // UTF-8. Звук открывается по этой копии, не по fmt_->url
     AVCodecContext*  codec_      = nullptr;
     AVFrame*         frame_      = nullptr;  // кадр из декодера (может быть в памяти видеокарты)
     AVFrame*         swFrame_    = nullptr;  // копия в обычной памяти, если декодировала видеокарта

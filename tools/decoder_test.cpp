@@ -1113,6 +1113,11 @@ int wmain(int argc, wchar_t** wargv)
     printf("\naudio      : %d track(s)\n", info.audioStreamCount);
 
     for (int track = 0; track < info.audioStreamCount; ++track) {
+        // Printed before OpenAudio, not after. A crash while switching tracks
+        // used to leave "track 0: peak" as the last line, so the report said
+        // the read had finished when the process had in fact died inside the
+        // next open. Same reason the read itself is announced before GetAudio.
+        printf("  track %d: opening\n", track);
         if (!dec.OpenAudio(track)) {
             const std::string err = dec.LastAudioError();
             const bool cap = err.find("channels") != std::string::npos;

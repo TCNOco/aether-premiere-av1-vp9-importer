@@ -469,6 +469,7 @@ bool Decoder::Open(const std::string& utf8Path, bool preferHardware, bool needVi
         SetError("cannot open file", err);
         return false;
     }
+    path_ = utf8Path;
 
     err = avformat_find_stream_info(fmt_, nullptr);
     if (err < 0) {
@@ -1025,6 +1026,7 @@ void Decoder::CloseLocked() {
     if (aheadFrame_){ av_frame_free(&aheadFrame_); }
     if (codec_)    { avcodec_free_context(&codec_); }
     if (fmt_)      { avformat_close_input(&fmt_); }
+    path_.clear();
 
     videoStream_      = -1;
     codecId_          = 0;
@@ -1857,12 +1859,11 @@ bool Decoder::GetFrameP010(int64_t frameIndex,
 // Звук
 // ---------------------------------------------------------------------------
 
-void Decoder::CloseAudioLocked() {
+void Decoder::CloseAudioDecoderLocked() {
     if (swr_)         { swr_free(&swr_); }
     if (audioPacket_) { av_packet_free(&audioPacket_); }
     if (audioFrame_)  { av_frame_free(&audioFrame_); }
     if (audioCodec_)  { avcodec_free_context(&audioCodec_); }
-    if (audioFmt_)    { avformat_close_input(&audioFmt_); }
 
     audioStreamIndex_ = -1;
     audioOrdinal_     = -1;
@@ -1871,6 +1872,11 @@ void Decoder::CloseAudioLocked() {
     pendingCount_  = 0;
     audioCursor_   = -1;
     audioExpectSample_ = -1;
+}
+
+void Decoder::CloseAudioLocked() {
+    CloseAudioDecoderLocked();
+    if (audioFmt_)    { avformat_close_input(&audioFmt_); }
 }
 
 bool Decoder::HasAudio() const
@@ -1888,19 +1894,43 @@ int Decoder::OpenAudioTrack() const
 bool Decoder::OpenAudio(int ordinal) {
     // Оба замка: читаем путь из состояния видео, а меняем состояние звука
     std::scoped_lock lock(mutex_, audioMutex_);
-    CloseAudioLocked();
 
-    if (!fmt_) {
+    if (!fmt_ || path_.empty()) {
         SetAudioError("file is not open");
         return false;
     }
 
-    // Свой разбор контейнера для звука. Общий с видео не годится: чтение
-    // пакетов двигает одну общую позицию, и перемотка видео сбивала бы звук.
-    int err = OpenContainer(&audioFmt_, fmt_->url);
-    if (err < 0) {
-        SetAudioError("cannot open file for audio", err);
-        return false;
+    if (audioOrdinal_ == ordinal && audioCodec_)
+        return true;
+
+    // Декодер сбрасываем, контейнер — нет.
+    //
+    // Раньше на каждую дорожку файл открывался заново: CloseAudio закрывал
+    // audioFmt_, OpenContainer открывал тот же путь, пока fmt_ его ещё держал.
+    // На CI это умирало нарушением доступа (0xC0000005) сразу после успешного
+    // чтения дорожки 0 — до первой строки про дорожку 1. Два файла из набора:
+    // audio_only.mka (два FLAC, без видео) и audio_tracks_differ.mp4 (стерео
+    // и моно). Тот же av1_8bit.mp4 с двумя одинаковыми AAC проходил.
+    // Локально не воспроизводится; в августе 2026 это уже краснело три
+    // прогона подряд и тогда «лечилось» пином образа и сборки ffmpeg.
+    // Пин на месте, падение вернулось.
+    //
+    // Premiere и так перебирает дорожки на одном клипе. Держать демультиплексор
+    // и менять только декодер — то, что хост делает по смыслу, плюс не
+    // закрывать-открывать тот же файл на Windows Server, где это падает.
+    CloseAudioDecoderLocked();
+
+    int err = 0;
+    if (!audioFmt_) {
+        // Свой разбор контейнера для звука. Общий с видео не годится: чтение
+        // пакетов двигает одну общую позицию, и перемотка видео сбивала бы звук.
+        err = OpenContainer(&audioFmt_, path_.c_str());
+        if (err < 0) {
+            SetAudioError("cannot open file for audio", err);
+            return false;
+        }
+    } else {
+        av_seek_frame(audioFmt_, -1, 0, AVSEEK_FLAG_BACKWARD);
     }
 
     // Найти N-ю по счёту звуковую дорожку. Вынесено, потому что зовётся
@@ -1962,7 +1992,7 @@ bool Decoder::OpenAudio(int ordinal) {
 
     if (audioStreamIndex_ < 0) {
         SetAudioError("no audio track with that index");
-        CloseAudioLocked();
+        CloseAudioDecoderLocked();
         return false;
     }
 
@@ -1980,7 +2010,7 @@ bool Decoder::OpenAudio(int ordinal) {
     const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
     if (!dec) {
         SetAudioError("no decoder for this audio track");
-        CloseAudioLocked();
+        CloseAudioDecoderLocked();
         return false;
     }
 
@@ -1989,7 +2019,7 @@ bool Decoder::OpenAudio(int ordinal) {
         avcodec_parameters_to_context(audioCodec_, st->codecpar) < 0 ||
         avcodec_open2(audioCodec_, dec, nullptr) < 0) {
         SetAudioError("cannot open audio decoder");
-        CloseAudioLocked();
+        CloseAudioDecoderLocked();
         return false;
     }
 
@@ -2001,7 +2031,7 @@ bool Decoder::OpenAudio(int ordinal) {
                  "audio layout is not usable (%d channels at %d Hz; more than %d channels is refused)",
                  channels, rate, kMaxAudioChannels);
         SetAudioError(msg);
-        CloseAudioLocked();
+        CloseAudioDecoderLocked();
         return false;
     }
 
@@ -2027,7 +2057,7 @@ bool Decoder::OpenAudio(int ordinal) {
     av_channel_layout_uninit(&outLayout);
     if (err < 0 || swr_init(swr_) < 0) {
         SetAudioError("cannot set up audio conversion", err);
-        CloseAudioLocked();
+        CloseAudioDecoderLocked();
         return false;
     }
 
@@ -2035,7 +2065,7 @@ bool Decoder::OpenAudio(int ordinal) {
     audioPacket_ = av_packet_alloc();
     if (!audioFrame_ || !audioPacket_) {
         SetAudioError("out of memory for audio buffers");
-        CloseAudioLocked();
+        CloseAudioDecoderLocked();
         return false;
     }
 
@@ -2075,15 +2105,28 @@ bool Decoder::DecodeMoreAudio() {
                 return false;
             }
 
-            for (int c = 0; c < channels; ++c) pending_[c].resize(n);
+            // Сколько отсчётов конвертер реально запишет. При той же частоте
+            // это обычно n, но фильтр может выдать больше — и тогда resize(n)
+            // это запись мимо буфера, а падение приходит позже, на free.
+            int outCount = swr_get_out_samples(swr_, n);
+            if (outCount < n) outCount = n;
+            if (outCount <= 0 || outCount > (1 << 20)) {
+                SetAudioError("audio conversion buffer size is not usable");
+                return false;
+            }
+            for (int c = 0; c < channels; ++c) pending_[c].resize((size_t)outCount);
 
             float* out[kMaxAudioChannels] = {};
             for (int c = 0; c < channels; ++c) out[c] = pending_[c].data();
 
-            const int got = swr_convert(swr_, reinterpret_cast<uint8_t**>(out), n,
+            const int got = swr_convert(swr_, reinterpret_cast<uint8_t**>(out), outCount,
                                         const_cast<const uint8_t**>(audioFrame_->data), n);
             if (got < 0) {
                 SetAudioError("audio conversion error", got);
+                return false;
+            }
+            if (got > (int)pending_[0].size()) {
+                SetAudioError("audio conversion wrote past the buffer");
                 return false;
             }
 
